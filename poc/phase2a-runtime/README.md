@@ -8,10 +8,33 @@ The probe uses a loopback-only synthetic page. It neither requests credentials
 nor contacts CEZ. It prints one JSON evidence document to the App log and exits
 non-zero unless the mandatory sandbox and cleanup checks pass.
 
+## Configuration authority
+
+`config.yaml` is the authoritative Home Assistant OS/Supervisor runtime
+manifest. `config.json` is an internal Phase 2A static-verification fixture and
+reference only. It must never be installed as a runtime manifest or override
+`config.yaml`.
+
+Current Supervisor versions recognize JSON, YAML and YML files named
+`config.*` and scan app repositories recursively. Do not copy this source
+directory verbatim into the target local apps directory while `config.json` is
+present. Build the target directory from this explicit runtime allowlist:
+
+- `config.yaml`
+- `Dockerfile`
+- `requirements.lock`
+- `runtime_probe.py`
+
+After copying, verify that the target app directory contains `config.yaml` and
+does not contain `config.json` or any other `config.*` file. The static verifier
+compares security-relevant effective values in both source representations and
+fails closed on divergence, but that comparison does not make `config.json` a
+valid runtime input.
+
 ## Target execution
 
-1. Copy `poc/phase2a-runtime` into the target Home Assistant OS local apps
-   directory as a single app folder.
+1. Create a single app folder in the target Home Assistant OS local apps
+   directory and copy only the four runtime allowlist files above into it.
 2. In **Settings > Apps**, refresh the local app list and build the experimental
    app.
 3. Before starting it, record the exact Home Assistant OS and Supervisor
