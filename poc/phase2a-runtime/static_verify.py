@@ -142,6 +142,128 @@ def effective_value(config: dict[str, object], key: str) -> object:
     return config.get(key, SECURITY_DEFAULTS.get(key))
 
 
+def run_cmdline_regression_tests() -> None:
+    namespace: dict[str, object] = {
+        "__name__": "phase2a_runtime_probe_static_test",
+        "__file__": str(ROOT / "runtime_probe.py"),
+    }
+    exec(compile(PROBE, str(ROOT / "runtime_probe.py"), "exec"), namespace)
+    parse = namespace["parse_proc_cmdline"]
+    process_type = namespace["process_type"]
+    check_internal = namespace["check_internal_zygote_arguments"]
+    check_forbidden = namespace["check_forbidden_arguments"]
+    evaluate = namespace["evaluate_sandbox"]
+    forbidden_flags = namespace["FORBIDDEN_FLAGS"]
+
+    def process(raw: bytes, pid: int = 1) -> dict[str, object]:
+        parsed = parse(raw)
+        return {
+            "pid": pid,
+            "name": "chromium",
+            "cmdline": parsed["fields"],
+            "cmdline_switches": parsed["switches"],
+            "cmdline_layout": parsed["layout"],
+            "cmdline_source": parsed["source"],
+            "cmdline_nul_terminated": parsed["nul_terminated"],
+            "cmdline_decode_lossless": parsed["decode_lossless"],
+            "cmdline_complete": parsed["complete"],
+            "effective_uid": 2000,
+            "effective_gid": 2000,
+            "seccomp": 2,
+            "no_new_privs": 1,
+            "namespaces": {"user": "user:[2]", "pid": "pid:[2]", "net": "net:[2]"},
+        }
+
+    normal = process(b"/usr/lib/chromium/chromium\0--type=renderer\0--foo=bar\0")
+    require(normal["cmdline_layout"] == "nul_separated_argv", "Normal NUL argv layout lost")
+    require(normal["cmdline_complete"] is True, "Normal NUL argv marked incomplete")
+    require(process_type(normal) == "renderer", "Renderer missing from normal NUL argv")
+
+    single = process(
+        b"/usr/lib/chromium/chromium --type=renderer --foo=bar\0", pid=2
+    )
+    require(single["cmdline_layout"] == "single_process_title", "Single process title not identified")
+    require(single["cmdline_nul_terminated"] is True, "Single process title termination lost")
+    require(single["cmdline_complete"] is True, "Valid single process title marked incomplete")
+    require(process_type(single) == "renderer", "Renderer missing from flattened process title")
+
+    malformed = process(
+        b"/usr/lib/chromium/chromium --type=renderer --no-sandbox", pid=6
+    )
+    require(malformed["cmdline_nul_terminated"] is False, "Malformed termination not retained")
+    require(malformed["cmdline_complete"] is False, "Truncated cmdline marked complete")
+    require(bool(check_forbidden([malformed])), "Forbidden flag escaped malformed process-title scan")
+    for index, flag in enumerate(forbidden_flags, 10):
+        forbidden_process = process(
+            f"/usr/lib/chromium/chromium --type=renderer {flag}\0".encode(),
+            pid=index,
+        )
+        require(
+            check_forbidden([forbidden_process])
+            == [{"pid": index, "argument": flag}],
+            f"Forbidden switch escaped process-title scan: {flag}",
+        )
+
+    zygote = process(
+        b"/usr/lib/chromium/chromium --type=zygote --no-zygote-sandbox\0", pid=3
+    )
+    require(process_type(zygote) == "zygote", "Zygote missing from flattened process title")
+    require(
+        not check_internal([zygote])["unexpected_non_zygote_pids"],
+        "Internal zygote flag rejected on a real zygote",
+    )
+    renderer_with_zygote_flag = process(
+        b"/usr/lib/chromium/chromium\0--type=renderer\0--no-zygote-sandbox\0",
+        pid=4,
+    )
+    require(
+        check_internal([renderer_with_zygote_flag])["unexpected_non_zygote_pids"] == [4],
+        "Internal zygote flag must fail closed on a renderer",
+    )
+
+    browser = process(b"/usr/lib/chromium/chromium\0", pid=5)
+    browser["seccomp"] = 0
+    browser["no_new_privs"] = 0
+    browser["namespaces"] = {"user": "user:[1]", "pid": "pid:[1]", "net": "net:[1]"}
+
+    def case(children: list[dict[str, object]], forbidden: list[dict[str, object]] | None = None) -> dict[str, object]:
+        return {
+            "processes": [browser, *children],
+            "process_evidence_stage": "static_regression",
+            "forbidden_arguments": forbidden or [],
+        }
+
+    require(evaluate({"case": case([normal, zygote])})["verified"], "Valid sandbox evidence rejected")
+    require(
+        not evaluate({"case": case([malformed])})["verified"],
+        "Sandbox accepted malformed non-NUL-terminated process evidence",
+    )
+    invalid_utf8 = process(b"/usr/lib/chromium/chromium\0--type=renderer\xff\0", pid=7)
+    require(invalid_utf8["cmdline_complete"] is False, "Invalid UTF-8 cmdline marked complete")
+    require(
+        not evaluate({"case": case([invalid_utf8])})["verified"],
+        "Sandbox accepted lossy command-line evidence",
+    )
+    non_authoritative = dict(normal)
+    non_authoritative.pop("cmdline_source")
+    require(
+        not evaluate({"case": case([non_authoritative])})["verified"],
+        "Sandbox accepted command-line evidence without raw procfs provenance",
+    )
+    for key, value in (
+        ("seccomp", 0),
+        ("no_new_privs", 0),
+        ("namespaces", browser["namespaces"]),
+    ):
+        invalid = dict(normal)
+        invalid[key] = value
+        require(not evaluate({"case": case([invalid])})["verified"], f"Sandbox did not fail closed for {key}")
+    require(
+        not evaluate({"case": case([renderer_with_zygote_flag])})["verified"],
+        "Sandbox accepted a renderer carrying the internal zygote flag",
+    )
+
+
 def main() -> int:
     runtime_config = load_runtime_yaml(RUNTIME_CONFIG_PATH)
     reference_config = json.loads(REFERENCE_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -245,6 +367,8 @@ def main() -> int:
     require("chmod 777" not in DOCKERFILE.lower(), "World-writable application directories forbidden")
     require("cez.cz" not in PROBE.lower(), "Runtime probe must not contact CEZ")
 
+    run_cmdline_regression_tests()
+
     packages = [line for line in LOCK.splitlines() if line and not line.startswith((" ", "#"))]
     require(bool(packages), "Dependency lock must not be empty")
     require(all("==" in line for line in packages), "Every Python dependency must be pinned")
@@ -261,6 +385,7 @@ def main() -> int:
     print("STATICALLY VERIFIED: installed APK versions are checked without repository indexes or network access.")
     print("STATICALLY VERIFIED: runtime executable downloads and Selenium telemetry are disabled.")
     print("STATICALLY VERIFIED: probe target is a loopback synthetic page; no CEZ endpoint is present.")
+    print("REGRESSION TESTED: NUL argv, flattened process titles, renderer/zygote classification and fail-closed policy.")
     return 0
 
 

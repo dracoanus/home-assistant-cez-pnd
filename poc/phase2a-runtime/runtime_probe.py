@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -112,9 +113,52 @@ def proc_status(pid: int) -> dict[str, str]:
     return values
 
 
-def proc_cmdline(pid: int) -> list[str]:
-    raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+def parse_proc_cmdline(raw: bytes) -> dict[str, Any]:
+    """Preserve kernel NUL fields and extract switches from Chromium process titles.
+
+    Chromium may replace its Linux argv area with one display title containing
+    space-separated arguments. That produces one NUL field in /proc/PID/cmdline;
+    it is not equivalent to receiving the original argv array.
+    """
+    nul_terminated = bool(raw) and raw.endswith(b"\0")
+    raw_fields = raw[:-1].split(b"\0") if nul_terminated else raw.split(b"\0")
+    interior_empty_field = any(not part for part in raw_fields)
+    decode_lossless = True
+    fields: list[str] = []
+    for part in raw_fields:
+        if not part:
+            continue
+        try:
+            fields.append(part.decode("utf-8", "strict"))
+        except UnicodeDecodeError:
+            decode_lossless = False
+            fields.append(part.decode("utf-8", "replace"))
+    switches: list[str] = []
+    for field in fields:
+        if field.startswith("--") and not any(character.isspace() for character in field):
+            switches.append(field)
+    if len(fields) == 1:
+        switches.extend(
+            match.group(1)
+            for match in re.finditer(r"(?:^|\s)(--[^\s\0]+)", fields[0])
+        )
+    return {
+        "fields": fields,
+        "switches": sorted(set(switches)),
+        "layout": "nul_separated_argv" if len(fields) > 1 else "single_process_title",
+        "source": "procfs_raw_nul",
+        "nul_terminated": nul_terminated,
+        "decode_lossless": decode_lossless,
+        "interior_empty_field": interior_empty_field,
+        "complete": bool(fields)
+        and nul_terminated
+        and decode_lossless
+        and not interior_empty_field,
+    }
+
+
+def proc_cmdline(pid: int) -> dict[str, Any]:
+    return parse_proc_cmdline(Path(f"/proc/{pid}/cmdline").read_bytes())
 
 
 def proc_cpu_ticks(pid: int) -> int:
@@ -155,11 +199,18 @@ def all_processes() -> dict[int, dict[str, Any]]:
         pid = int(entry.name)
         try:
             status = proc_status(pid)
+            cmdline = proc_cmdline(pid)
             processes[pid] = {
                 "pid": pid,
                 "ppid": int(status.get("PPid", "0")),
                 "name": status.get("Name", ""),
-                "cmdline": proc_cmdline(pid),
+                "cmdline": cmdline["fields"],
+                "cmdline_switches": cmdline["switches"],
+                "cmdline_layout": cmdline["layout"],
+                "cmdline_source": cmdline["source"],
+                "cmdline_nul_terminated": cmdline["nul_terminated"],
+                "cmdline_decode_lossless": cmdline["decode_lossless"],
+                "cmdline_complete": cmdline["complete"],
                 "status": status,
                 "cpu_ticks": proc_cpu_ticks(pid),
                 "start_time_ticks": proc_start_time_ticks(pid),
@@ -238,6 +289,12 @@ def process_evidence(process: dict[str, Any]) -> dict[str, Any]:
         "ppid": process["ppid"],
         "name": process["name"],
         "cmdline": process["cmdline"],
+        "cmdline_switches": process["cmdline_switches"],
+        "cmdline_layout": process["cmdline_layout"],
+        "cmdline_source": process["cmdline_source"],
+        "cmdline_nul_terminated": process["cmdline_nul_terminated"],
+        "cmdline_decode_lossless": process["cmdline_decode_lossless"],
+        "cmdline_complete": process["cmdline_complete"],
         "real_uid": uid_parts[0],
         "effective_uid": uid_parts[1],
         "real_gid": gid_parts[0],
@@ -263,12 +320,39 @@ def wait_for_download(directory: Path, timeout: float = 10.0) -> Path:
     raise ProbeFailure("Synthetic download did not complete with the expected bytes")
 
 
+def process_switches(process: dict[str, Any]) -> set[str]:
+    if "cmdline_switches" in process:
+        return set(process["cmdline_switches"])
+    fields = process.get("cmdline", [])
+    raw = b"\0".join(str(field).encode("utf-8") for field in fields) + b"\0"
+    return set(parse_proc_cmdline(raw)["switches"])
+
+
+def has_switch(process: dict[str, Any], switch: str) -> bool:
+    return any(value == switch or value.startswith(f"{switch}=") for value in process_switches(process))
+
+
+def process_type(process: dict[str, Any]) -> str | None:
+    values = {
+        value.split("=", 1)[1]
+        for value in process_switches(process)
+        if value.startswith("--type=") and len(value.split("=", 1)) == 2
+    }
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def executable_name(process: dict[str, Any]) -> str:
+    fields = process.get("cmdline", [])
+    executable = fields[0].split(maxsplit=1)[0] if fields else ""
+    return Path(executable).name
+
+
 def is_chromium_process(process: dict[str, Any]) -> bool:
-    return any("chromium" in argument for argument in process.get("cmdline", []))
+    return process.get("name") == "chromium" or executable_name(process) == "chromium"
 
 
 def is_chromedriver_process(process: dict[str, Any]) -> bool:
-    return any("chromedriver" in argument for argument in process.get("cmdline", []))
+    return process.get("name") == "chromedriver" or executable_name(process) == "chromedriver"
 
 
 def browser_identities(snapshot: dict[int, dict[str, Any]]) -> dict[int, int]:
@@ -335,7 +419,7 @@ def record_process_snapshot(
         {
             "stage": stage,
             "process_count": len(evidence),
-            "renderer_count": sum("--type=renderer" in item["cmdline"] for item in evidence),
+            "renderer_count": sum(process_type(item) == "renderer" for item in evidence),
             "aggregate_rss_kib": sum(item["vm_rss_kib"] for item in evidence),
             "aggregate_pss_kib": sum(item["pss_kib"] or 0 for item in evidence),
             "pss_complete": all(item["pss_kib"] is not None for item in evidence),
@@ -358,11 +442,15 @@ def wait_for_renderer_snapshot(
     evidence: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         evidence = record_process_snapshot(result, "startup", driver_pid, baseline, tracked)
-        if any("--type=renderer" in process["cmdline"] for process in evidence):
+        if any(process_type(process) == "renderer" for process in evidence):
+            result["renderer_discovery"] = "observed_during_startup_window"
             return evidence
         result["process_snapshots"].pop()
         time.sleep(0.1)
-    return record_process_snapshot(result, "startup_timeout", driver_pid, baseline, tracked)
+    result["renderer_discovery"] = "not_observed_during_startup_window"
+    return record_process_snapshot(
+        result, "renderer_discovery_timeout", driver_pid, baseline, tracked
+    )
 
 
 def remaining_processes(tracked: dict[int, int]) -> list[int]:
@@ -428,10 +516,9 @@ def force_cleanup(
 def check_forbidden_arguments(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for process in processes:
-        for argument in process["cmdline"]:
-            for flag in FORBIDDEN_FLAGS:
-                if argument == flag or argument.startswith(f"{flag}="):
-                    matches.append({"pid": process["pid"], "argument": argument})
+        for flag in FORBIDDEN_FLAGS:
+            if has_switch(process, flag):
+                matches.append({"pid": process["pid"], "argument": flag})
     return matches
 
 
@@ -439,14 +526,10 @@ def check_internal_zygote_arguments(processes: list[dict[str, Any]]) -> dict[str
     observed: set[int] = set()
     unexpected: set[int] = set()
     for process in processes:
-        if not any(
-            argument == INTERNAL_ZYGOTE_FLAG
-            or argument.startswith(f"{INTERNAL_ZYGOTE_FLAG}=")
-            for argument in process["cmdline"]
-        ):
+        if not has_switch(process, INTERNAL_ZYGOTE_FLAG):
             continue
         observed.add(process["pid"])
-        if "--type=zygote" not in process["cmdline"]:
+        if process_type(process) != "zygote":
             unexpected.add(process["pid"])
     return {
         "flag": INTERNAL_ZYGOTE_FLAG,
@@ -509,6 +592,7 @@ def run_browser_case(
         started = time.monotonic()
         try:
             driver = webdriver.Chrome(service=service, options=options)
+            result["webdriver_started"] = True
             startup_seconds = time.monotonic() - started
             driver_pid = service.process.pid
             startup_processes = wait_for_renderer_snapshot(
@@ -572,13 +656,20 @@ def run_browser_case(
             observed_chromium = [
                 process
                 for process in all_observed_processes
-                if any("chromium" in argument for argument in process["cmdline"])
+                if is_chromium_process(process)
             ]
             result["all_observed_chromium_uid_gid_2000"] = bool(
                 observed_chromium
             ) and all(
                 process["effective_uid"] == EXPECTED_UID
                 and process["effective_gid"] == EXPECTED_GID
+                for process in observed_chromium
+            )
+            result["all_observed_chromium_cmdlines_authoritative_and_complete"] = bool(
+                observed_chromium
+            ) and all(
+                process.get("cmdline_source") == "procfs_raw_nul"
+                and process.get("cmdline_complete") is True
                 for process in observed_chromium
             )
             result["peak_observed_aggregate_rss_kib"] = max(
@@ -612,6 +703,9 @@ def run_browser_case(
                 and not result["forbidden_arguments"]
                 and not result["internal_zygote_argument"]["unexpected_non_zygote_pids"]
                 and result["all_observed_chromium_uid_gid_2000"]
+                and result[
+                    "all_observed_chromium_cmdlines_authoritative_and_complete"
+                ]
                 and result["cleanup"]["verified"]
             )
     return result
@@ -707,19 +801,27 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
     evidence_case, core = max(
         cases.items(),
         key=lambda item: (
-            sum("--type=renderer" in process["cmdline"] for process in item[1].get("processes", [])),
+            sum(
+                process_type(process) == "renderer"
+                for process in item[1].get("processes", [])
+            ),
             len(item[1].get("processes", [])),
         ),
     )
     processes = core.get("processes", [])
     chromium_processes = [
-        process for process in processes if any("chromium" in arg for arg in process.get("cmdline", []))
+        process for process in processes if is_chromium_process(process)
     ]
     renderers = [
-        process for process in chromium_processes if "--type=renderer" in process.get("cmdline", [])
+        process for process in chromium_processes if process_type(process) == "renderer"
     ]
     all_non_root = bool(chromium_processes) and all(
         process["effective_uid"] == EXPECTED_UID and process["effective_gid"] == EXPECTED_GID
+        for process in chromium_processes
+    )
+    cmdlines_authoritative_and_complete = bool(chromium_processes) and all(
+        process.get("cmdline_source") == "procfs_raw_nul"
+        and process.get("cmdline_complete") is True
         for process in chromium_processes
     )
     renderer_seccomp = bool(renderers) and all(
@@ -728,8 +830,7 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
     browser_processes = [
         process
         for process in chromium_processes
-        if not any(argument.startswith("--type=") for argument in process["cmdline"])
-        and not any("crashpad" in argument for argument in process["cmdline"])
+        if process_type(process) is None and "crashpad" not in executable_name(process)
     ]
     browser_process = browser_processes[0] if browser_processes else None
     namespace_names = ("user", "pid", "net")
@@ -749,6 +850,7 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
     verified = bool(
         not core.get("forbidden_arguments")
         and all_non_root
+        and cmdlines_authoritative_and_complete
         and renderer_seccomp
         and renderer_namespace_isolation
         and not internal_zygote["unexpected_non_zygote_pids"]
@@ -758,6 +860,9 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "evidence_case": evidence_case,
         "evidence_stage": core.get("process_evidence_stage"),
         "all_chromium_processes_uid_gid_2000": all_non_root,
+        "all_chromium_cmdlines_authoritative_and_complete": (
+            cmdlines_authoritative_and_complete
+        ),
         "renderer_count": len(renderers),
         "all_renderers_seccomp_filter_and_no_new_privs": renderer_seccomp,
         "all_renderers_isolated_in_user_pid_network_namespaces": renderer_namespace_isolation,
@@ -840,6 +945,9 @@ def main() -> int:
             "unexpected_non_zygote_pids"
         )
         and case.get("all_observed_chromium_uid_gid_2000")
+        and case.get(
+            "all_observed_chromium_cmdlines_authoritative_and_complete"
+        )
         for case in result["cases"].values()
     )
     result["elapsed_seconds"] = round(time.monotonic() - started, 3)

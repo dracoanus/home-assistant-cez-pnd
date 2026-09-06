@@ -63,6 +63,26 @@ bounded waiting, same-UID SIGKILL when required, and PID 1 child reaping. No
 privilege or capability is added. Aggregate PSS is reported alongside summed
 RSS to reduce shared-page double counting.
 
+The next HA OS run verified that cleanup succeeds: `cleanup_verified` was true
+and every case reported an empty `orphan_pids_after_cleanup` list. It also
+captured renderer processes with UID/GID `2000:2000`, `NoNewPrivs: 1`,
+`Seccomp: 2` and separate user, PID and network namespaces. Peak aggregate PSS
+was approximately `394489 KiB`. Functional execution still failed after the
+browser lost its DevTools connection.
+
+That run exposed a command-line classification defect. Chromium deliberately
+rewrites its Linux process title as one space-separated string, so
+`/proc/<pid>/cmdline` can contain a single NUL-terminated field such as
+`/usr/lib/chromium/chromium --type=renderer ...`. The old classifier searched
+for a separate list item equal to `--type=renderer` and therefore reported zero
+renderers. The probe now preserves the actual NUL fields, records whether the
+read was NUL terminated, extracts switches from Chromium's single process-title
+field, and applies renderer, zygote and forbidden-argument policy through one
+classifier. Truncated, lossy or non-authoritative command-line evidence cannot
+satisfy the sandbox gate. A `renderer_discovery_timeout` means only that
+classification did not observe a renderer during the bounded discovery window;
+WebDriver startup is recorded separately and the action is still attempted.
+
 ## Target execution
 
 1. Create a single app folder in the target Home Assistant OS local apps
