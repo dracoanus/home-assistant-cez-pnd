@@ -94,6 +94,27 @@ renderer PIDs present at the error snapshot, ChromeDriver return code before
 cleanup, and cleanup result. This adds diagnostics only and does not alter a
 functional or security gate.
 
+The latest HA OS run identified the functional boundary. The `normal` and
+`selenium_exception` cases both started WebDriver and observed a renderer, then
+failed on their first `driver.get()` call between the
+`before_synthetic_navigation` and `after_synthetic_navigation` milestones.
+The timeout case did not navigate; it remained operational while executing its
+intentional asynchronous-script timeout and supplied four usable renderers.
+The navigation command is therefore the confirmed trigger boundary. The
+retained evidence still does not establish whether Chromium, a renderer or the
+DevTools connection failed underneath that command.
+
+That run also caught two process identities with evidence consistent with an
+exit race. Linux returns an empty `/proc/<pid>/cmdline` for zombies, so an empty
+command line is not automatically evidence of a malformed live Chromium
+process. The probe now
+rechecks each PID plus `/proc/<pid>/stat` start time after collecting evidence.
+It excludes an identity from the live-process completeness verdict only after
+positively observing a zombie/dead state, disappearance of that same identity,
+or PID reuse after its exit. A still-live or ambiguously readable process with
+incomplete command-line or security evidence continues to fail closed. The
+full snapshot retains every excluded PID and its lifecycle reason.
+
 ## Target execution
 
 1. Create a single app folder in the target Home Assistant OS local apps

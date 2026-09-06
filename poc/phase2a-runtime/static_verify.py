@@ -149,12 +149,29 @@ def run_cmdline_regression_tests() -> None:
     }
     exec(compile(PROBE, str(ROOT / "runtime_probe.py"), "exec"), namespace)
     parse = namespace["parse_proc_cmdline"]
+    parse_stat = namespace["parse_proc_stat"]
     process_type = namespace["process_type"]
     check_internal = namespace["check_internal_zygote_arguments"]
     check_forbidden = namespace["check_forbidden_arguments"]
     evaluate = namespace["evaluate_sandbox"]
+    classify_lifecycle = namespace["classify_process_lifecycle"]
     summarize_failures = namespace["summarize_functional_failures"]
     forbidden_flags = namespace["FORBIDDEN_FLAGS"]
+
+    stat_fields = ["0"] * 20
+    stat_fields[0] = "S"
+    stat_fields[1] = "42"
+    stat_fields[11] = "7"
+    stat_fields[12] = "11"
+    stat_fields[19] = "123456"
+    parsed_stat = parse_stat(f"999 (chromium worker) {' '.join(stat_fields)}")
+    require(parsed_stat["state"] == "S", "Process state parsed from /proc stat incorrectly")
+    require(parsed_stat["ppid"] == 42, "Parent PID parsed from /proc stat incorrectly")
+    require(parsed_stat["cpu_ticks"] == 18, "CPU ticks parsed from /proc stat incorrectly")
+    require(
+        parsed_stat["start_time_ticks"] == 123456,
+        "PID identity start time parsed from /proc stat incorrectly",
+    )
 
     def process(raw: bytes, pid: int = 1) -> dict[str, object]:
         parsed = parse(raw)
@@ -173,6 +190,15 @@ def run_cmdline_regression_tests() -> None:
             "seccomp": 2,
             "no_new_privs": 1,
             "namespaces": {"user": "user:[2]", "pid": "pid:[2]", "net": "net:[2]"},
+            "start_time_ticks": pid * 100,
+            "initial_state": "S",
+            "snapshot_lifecycle": {
+                "classification": "live",
+                "reason": "same_pid_identity_live_at_snapshot_end",
+                "original_start_time_ticks": pid * 100,
+                "current_start_time_ticks": pid * 100,
+                "current_state": "S",
+            },
         }
 
     normal = process(b"/usr/lib/chromium/chromium\0--type=renderer\0--foo=bar\0")
@@ -262,6 +288,52 @@ def run_cmdline_regression_tests() -> None:
     require(
         not evaluate({"case": case([renderer_with_zygote_flag])})["verified"],
         "Sandbox accepted a renderer carrying the internal zygote flag",
+    )
+
+    exited_incomplete = process(b"", pid=516)
+    exited_incomplete.update(
+        {
+            "cmdline_complete": False,
+            "snapshot_lifecycle": classify_lifecycle(51600, "Z", None),
+        }
+    )
+    require(
+        evaluate({"case": case([normal, zygote, exited_incomplete])})["verified"],
+        "A positively exited PID identity incorrectly poisoned live-process evidence",
+    )
+    live_incomplete = dict(exited_incomplete)
+    live_incomplete["pid"] = 526
+    live_incomplete["snapshot_lifecycle"] = classify_lifecycle(
+        52600,
+        "S",
+        {"start_time_ticks": 52600, "state": "S"},
+    )
+    require(
+        not evaluate({"case": case([normal, live_incomplete])})["verified"],
+        "A live Chromium process with incomplete evidence did not fail closed",
+    )
+    unknown_incomplete = dict(live_incomplete)
+    unknown_incomplete["pid"] = 527
+    unknown_incomplete["snapshot_lifecycle"] = classify_lifecycle(
+        52700, "S", None, "identity_recheck_error:PermissionError"
+    )
+    require(
+        not evaluate({"case": case([normal, unknown_incomplete])})["verified"],
+        "Ambiguous Chromium lifecycle evidence did not fail closed",
+    )
+    reused = classify_lifecycle(
+        60000, "S", {"start_time_ticks": 70000, "state": "S"}
+    )
+    require(
+        reused["classification"] == "exited_during_snapshot"
+        and reused["reason"] == "pid_reused_after_original_identity_exited",
+        "PID reuse did not positively identify exit of the original process",
+    )
+    disappeared = classify_lifecycle(80000, "S", None, "identity_not_found")
+    require(
+        disappeared["classification"] == "exited_during_snapshot"
+        and disappeared["original_start_time_ticks"] == 80000,
+        "Disappearance of the captured PID identity was not classified as exit",
     )
 
     failed_case = case([normal])
@@ -381,6 +453,22 @@ def main() -> int:
     require("bounded_cleanup_call" in PROBE, "WebDriver and service shutdown must be time bounded")
     require("os.waitpid(-1, os.WNOHANG)" in PROBE, "PID 1 must reap adopted browser children")
     require('evaluate_sandbox(result["cases"])' in PROBE, "Sandbox evaluation must consider every case")
+    require(
+        '"classification": "exited_during_snapshot"' in PROBE,
+        "Snapshot races must require positive process-exit classification",
+    )
+    require(
+        '"classification": "unknown"' in PROBE,
+        "Ambiguous process lifecycle evidence must remain fail closed",
+    )
+    require(
+        'current_start != original_start_time_ticks' in PROBE,
+        "Snapshot lifecycle checks must retain PID/start-time reuse protection",
+    )
+    require(
+        'sandbox_verdict_processes(core.get("processes", []))' in PROBE,
+        "Sandbox evaluation must exclude only positively exited identities",
+    )
     require("peak_observed_aggregate_pss_kib" in PROBE, "PSS must accompany aggregate RSS")
     require('"pss_complete"' in PROBE, "Incomplete PSS evidence must be reported explicitly")
     require('result["functional_failures"]' in PROBE, "Functional failures need a compact case summary")
@@ -424,7 +512,7 @@ def main() -> int:
     print("STATICALLY VERIFIED: installed APK versions are checked without repository indexes or network access.")
     print("STATICALLY VERIFIED: runtime executable downloads and Selenium telemetry are disabled.")
     print("STATICALLY VERIFIED: probe target is a loopback synthetic page; no CEZ endpoint is present.")
-    print("REGRESSION TESTED: NUL argv, process classification, fail-closed policy and functional failure summaries.")
+    print("REGRESSION TESTED: NUL argv, process/lifecycle classification, PID reuse, fail-closed policy and functional failure summaries.")
     return 0
 
 

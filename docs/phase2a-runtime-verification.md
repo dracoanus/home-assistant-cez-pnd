@@ -22,11 +22,12 @@ This report uses the required classifications as follows:
 - **BLOCKED** — the required environment or evidence was unavailable and the
   conclusion cannot be advanced safely.
 
-Four target attempts now provide **HA OS VERIFIED** evidence for App discovery,
-manifest acceptance, image construction and three runtime executions. The
-latest probe positively verified Chromium sandboxing and cleanup without a
-security deviation. Functional execution remains unresolved and keeps the
-overall result false.
+Five target attempts now provide **HA OS VERIFIED** evidence for App discovery,
+manifest acceptance, image construction and four runtime executions. Runtime
+attempt 3 positively verified Chromium sandboxing and cleanup without a
+security deviation. Runtime attempt 4 identifies the functional failure
+boundary and a separate process-snapshot lifecycle race. Functional execution
+remains unresolved and keeps the overall result false.
 
 ## Target build attempt 1
 
@@ -238,6 +239,71 @@ exception, browser and renderer PIDs present in the `action_error` snapshot,
 ChromeDriver return code before cleanup and cleanup status. This is diagnostic
 only; the existing functional and fail-closed security gates are unchanged.
 
+## Target runtime attempt 4
+
+The per-case diagnostics from the latest HA OS run establish the first
+behavioral difference after renderer discovery:
+
+| Case | First operation after renderer discovery | Result |
+| --- | --- | --- |
+| `normal` | `driver.get(base_url)` | `InvalidSessionIdException` before `after_synthetic_navigation` |
+| `selenium_exception` | `driver.get(base_url)` | Same disconnect before `after_synthetic_navigation` |
+| `timeout` | `set_script_timeout(1)`, then `execute_async_script("void 0;")` on the initial document | Remained operational and provided four renderer processes |
+
+For both failing cases, `webdriver_started` is true, renderer discovery was
+observed during the startup window, and the last milestone is
+`before_synthetic_navigation`. At the action-error snapshot no renderer PID
+remained, while ChromeDriver itself still had return code `null`. Cleanup then
+succeeded. It is therefore **CONFIRMED** that the first `driver.get()` command
+is the failure boundary and that cleanup did not run before the failure. It is
+also **CONFIRMED** that the timeout scenario differs by issuing no navigation
+command.
+
+The best-supported interpretation is that Chromium's browser/renderer or
+DevTools connection disappeared while ChromeDriver was still serving the
+navigation request. This is **SUPPORTED** by the empty renderer set at the
+error snapshot and ChromeDriver's still-running state. The
+`InvalidSessionIdException` and "Unable to receive message from renderer" text
+are consequences of that loss, not its root cause.
+
+The retained evidence provided for this analysis does not contain the actual
+ChromeDriver verbose-log tail, Chromium stderr, browser PID at each milestone,
+process exit status or signal, kernel OOM record, or AppArmor audit record.
+Consequently, a Chromium/browser crash, renderer crash, DevTools transport
+failure, OOM action, AppArmor denial, namespace interaction, or Chromium 152
+defect is **OPEN / NEEDS VERIFICATION**. `/dev/shm` exhaustion is not supported
+because exhaustion was not observed. Early cleanup and WebDriver startup
+failure are contradicted by the recorded sequence.
+
+The same run captured four renderers that met UID/GID, seccomp,
+`NoNewPrivs`, namespace and forbidden-argument requirements. Two additional
+Chromium identities, PIDs `516` and `526`, had an empty command line,
+`cmdline_complete: false`, `VmRSS: 0`, unavailable PSS and disappearing
+namespace entries; they were reparented to PID 1. This combination is
+**SUPPORTED** as a process-exit/zombie race during the multi-file `/proc`
+snapshot. Linux documents that a zombie has an empty `/proc/<pid>/cmdline`, and
+that orphaned children are adopted by init or a subreaper:
+
+- <https://man7.org/linux/man-pages/man5/proc_pid_cmdline.5.html>
+- <https://man7.org/linux/man-pages/man2/wait.2.html>
+
+Because `init: false` and the image `CMD` start `runtime_probe.py` directly,
+the Python probe is the container's PID 1 and adopts orphaned Chromium children.
+Reparenting therefore shows that each process's former immediate parent exited;
+it does not by itself prove why the Chromium process tree or DevTools connection
+disappeared. The temporal correlation is **SUPPORTED**, while causation is
+**OPEN / NEEDS VERIFICATION**.
+
+The raw run's `sandbox.verified: false` is **SUPPORTED** as a snapshot-lifecycle
+artifact rather than evidence that the four live renderers lacked sandboxing.
+The old probe correctly failed closed because it could not distinguish an
+exiting identity from an unreadable live process. The revised probe retains all
+records and excludes only an identity whose PID plus start time is positively
+shown to have entered an exit state, disappeared, or been replaced after
+collection. A still-live or ambiguous identity with incomplete command-line,
+namespace, status or PSS evidence remains in the verdict and fails closed.
+Another HA OS run is required to validate that distinction on the target.
+
 ## 1. Environment tested
 
 | Item | Observed value | Classification | Evidence |
@@ -360,9 +426,13 @@ Chromium processes.
 
 ## 8. Chromium sandbox verification result
 
-**HA OS VERIFIED / PASS for the sandbox gate.** Runtime attempt 3 returned
-`sandbox.verified: true` and `renderer_count: 3`. The process-title
-classification issue is resolved.
+**HA OS VERIFIED / PASS for the sandbox mechanism in runtime attempt 3.** That
+run returned `sandbox.verified: true` and `renderer_count: 3`; the process-title
+classification issue is resolved. Attempt 4 again positively captured four
+renderers meeting every renderer security property, but its aggregate gate
+failed because two additional process identities became unreadable while the
+snapshot was collected. The lifecycle-aware correction requires a target
+repeat before the latest aggregate gate can be accepted.
 
 The runtime evidence positively demonstrates:
 
@@ -376,8 +446,8 @@ The runtime evidence positively demonstrates:
 4. Captured Chromium processes ran as UID/GID `2000:2000`.
 5. Prohibited sandbox-disabling arguments were absent.
 
-Attempts 2 and 3 establish that cleanup is reliable for normal, exception and
-timeout paths in those runs. The evaluator reports `verified: true`
+Attempts 2 through 4 establish that cleanup is reliable for normal, exception
+and timeout paths in those runs. The evaluator reports `verified: true`
 only when one internally consistent snapshot contains a browser and renderer
 set where every renderer has all required namespace, seccomp and `NoNewPrivs`
 properties, all Chromium processes are non-root, all command-line evidence is
@@ -398,7 +468,9 @@ by:
 No sandbox-disabling flag is passed by the PoC. Static inspection and all
 relevant runtime captures found none in the effective launch arguments. Attempt
 3 positively passed the complete sandbox gate rather than relying on argument
-absence alone.
+absence alone. The lifecycle correction does not relax any renderer property:
+only a positively exited PID identity is removed from the live-process set;
+ambiguous or live incomplete evidence still prevents verification.
 
 ## 9. Required Linux capabilities and container privileges
 
@@ -456,8 +528,9 @@ the container's `/dev/shm`. It deliberately does not use
 
 The first runtime produced process and filesystem observations, but the
 available report does not include the exact `/tmp` and `/dev/shm` values needed
-for sizing or for attributing the renderer disconnect. The corrected probe now
-records these values even when a Selenium action raises.
+for sizing or for attributing the renderer disconnect. Later target evidence
+states that `/dev/shm` was not observed exhausted. The probe records these
+values even when a Selenium action raises.
 
 - Appropriate `/tmp` size: **NOT VERIFIED**.
 - Appropriate `/dev/shm` size: **NOT VERIFIED**.
@@ -477,9 +550,9 @@ The included probe has three cases:
 
 | Case | Intended evidence | Current result |
 | --- | --- | --- |
-| Normal completion | Functional disconnect followed by complete cleanup | CLEANUP PASS; FUNCTION FAIL |
-| Selenium exception | Functional disconnect followed by complete cleanup | CLEANUP PASS; FUNCTION FAIL |
-| Selenium timeout | Complete cleanup after timeout path | CLEANUP PASS |
+| Normal completion | Functional disconnect followed by complete cleanup | CLEANUP PASS; FUNCTION FAIL at synthetic navigation |
+| Selenium exception | Functional disconnect followed by complete cleanup | CLEANUP PASS; FUNCTION FAIL at synthetic navigation |
+| Selenium timeout | Complete cleanup after timeout path | CLEANUP PASS; operational renderer evidence captured |
 | Forced Collector/App termination | Supervisor stop plus host-level before/after process audit | BLOCKED; target access required |
 
 The original script tracked descendants by PID and only waited after
@@ -493,9 +566,12 @@ same-UID tracked processes. It calls non-blocking `waitpid()` to reap adopted
 children and fails if any tracked identity remains. These operations require no
 additional capability or privilege.
 
-Attempt 2 confirms this cleanup path for ordinary case completion and handled
-exceptions. It does not replace the separate host-side forced App termination
-test.
+Attempts 2 through 4 confirm this cleanup path for ordinary case completion and
+handled exceptions. PIDs `516` and `526` becoming PPID 1 is consistent with
+child adoption after their parent exited and with the probe's explicit reaping
+role. It is temporally correlated with the DevTools disconnect but does not
+establish its cause. These runs do not replace the separate host-side forced
+App termination test.
 
 Forced termination cannot be proven from inside a container after the container
 has stopped. It requires a separately reviewed hold scenario and host/Supervisor
@@ -547,22 +623,26 @@ Supervisor, image digest, kernel and Synology VMM configuration tested.
 
 1. Build attempt 1 failed at the obsolete APK assertion; the corrected build
    subsequently completed.
-2. Prior runtime actions lost the browser/DevTools session with
-   `InvalidSessionIdException`. Attempt 3 reports a functional failure, but the
-   retained aggregate fields do not identify its case, milestone or exception.
+2. Runtime attempt 4 confirms that `normal` and `selenium_exception` lose the
+   browser/DevTools session on their first `driver.get(base_url)` command.
+   The underlying reason for the browser/renderer disappearance remains open.
 3. Attempt 1 left Chromium PIDs; attempt 2 passed cleanup without orphans.
 4. Attempt 1 selected the wrong case. Attempt 2 captured renderers but classified
    Chromium's flattened Linux process title as one argument and therefore
    reported `renderer_count: 0`.
 5. Attempt 3 resolved classification and positively passed the aggregate
    renderer sandbox gate with three renderers.
-6. Effective capabilities and AppArmor enforcement still require explicit
+6. Attempt 4 captured four compliant renderers but failed aggregate command-line
+   completeness while PIDs `516` and `526` appeared to exit during collection.
+   The lifecycle-aware correction requires a target repeat.
+7. Effective capabilities and AppArmor enforcement still require explicit
    target inspection; no extra capability was declared.
-7. Forced App termination and host orphan audit remain **NOT VERIFIED**.
-8. **BLOCKED locally:** no local Linux container engine or WSL distribution.
+8. Forced App termination and host orphan audit remain **NOT VERIFIED**.
+9. **BLOCKED locally:** no local Linux container engine or WSL distribution.
 
-Attempt 3 is a successful sandbox and cleanup run with an unidentified
-functional failure. It does not permit entry into Phase 2A-2.
+Attempt 4 identifies the functional boundary and confirms cleanup, but does not
+identify the underlying navigation-triggered process failure. It does not
+permit entry into Phase 2A-2.
 
 ## 15. Security deviations
 
@@ -592,11 +672,12 @@ inconsistently aggregated properties remain uncertainty rather than compliance.
 The following findings block Phase 2A-1 `PASS`, Phase 2A-1
 `PASS WITH CONDITIONS`, and entry into Phase 2A-2:
 
-1. The exact failed functional case, action milestone and exception in attempt
-   3 remain **OPEN / NEEDS VERIFICATION**.
-2. All functional cases have not passed on the target.
-3. The cause of the earlier browser/DevTools disconnect remains **OPEN / NEEDS
-   VERIFICATION** unless attempt 3's detailed case evidence resolves it.
+1. The `normal` and `selenium_exception` cases fail at the first synthetic
+   navigation, so all functional cases have not passed on the target.
+2. The cause of the browser/renderer or DevTools disappearance during
+   navigation remains **OPEN / NEEDS VERIFICATION**.
+3. The lifecycle-aware distinction between positively exited and unreadable
+   live Chromium processes has not yet run on HA OS.
 4. Effective capabilities, AppArmor status, mounts and Supervisor namespace
    configuration have not been fully inspected.
 5. Required `/tmp` and `/dev/shm` sizes have not been established, although
@@ -637,6 +718,12 @@ to static design; it is not experimental proof that none will be needed.
 | Attempt 3 cleanup | `cleanup_verified: true` | CONFIRMED / HA OS VERIFIED |
 | Attempt 3 security deviations | Empty | CONFIRMED / HA OS VERIFIED |
 | Attempt 3 functional result | `functional_cases_passed: false`; exact case absent from retained evidence | CONFIRMED aggregate; case OPEN |
+| Attempt 4 normal action | Failed during first `driver.get(base_url)` | CONFIRMED / HA OS VERIFIED |
+| Attempt 4 expected-exception action | Failed during first `driver.get(base_url)` before the intended missing-element exception | CONFIRMED / HA OS VERIFIED |
+| Attempt 4 timeout action | Stayed operational and supplied four renderer processes | CONFIRMED / HA OS VERIFIED |
+| Attempt 4 renderer properties | Four renderers passed UID/GID, seccomp, `NoNewPrivs` and namespace checks | CONFIRMED / HA OS VERIFIED |
+| Attempt 4 incomplete PIDs | PIDs `516`/`526`: empty cmdline, zero RSS, unavailable PSS/namespaces, PPID 1 | CONFIRMED observations; exit race SUPPORTED |
+| Lifecycle-aware snapshot policy | Excludes only positively exited PID/start-time identities; live/unknown remains fail closed | LOCALLY TESTED / TARGET REPEAT REQUIRED |
 
 The local Python compilation created only ignored bytecode cache files; those
 files were removed immediately and are not part of the proposed repository
@@ -653,8 +740,9 @@ diff.
       `requirements.lock` and `runtime_probe.py`.
 - [ ] Inspect the effective deployed App configuration, mounts, AppArmor,
       network/PID/IPC modes and capabilities.
-- [ ] Run the synthetic probe again and retain its complete JSON output and exit
-      code, including verbose driver/browser logs and all action milestones.
+- [ ] Run the lifecycle-aware probe again and retain its complete JSON output
+      and exit code, including verbose driver/browser logs and all action
+      milestones.
 - [x] Confirm `sandbox.verified: true` with process-level evidence.
 - [ ] Review `/tmp`, `/dev/shm`, RSS, CPU, startup, process and disk values.
 - [ ] Execute a separately reviewed forced-termination test and host-side orphan
@@ -664,4 +752,4 @@ diff.
 
 ## Phase 2A-1 Decision
 
-FAIL — FUNCTIONAL CASE IDENTIFICATION AND REPEAT REQUIRED
+FAIL — NAVIGATION FAILURE ROOT CAUSE AND LIFECYCLE-AWARE REPEAT REQUIRED

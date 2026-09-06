@@ -161,14 +161,26 @@ def proc_cmdline(pid: int) -> dict[str, Any]:
     return parse_proc_cmdline(Path(f"/proc/{pid}/cmdline").read_bytes())
 
 
+def parse_proc_stat(text: str) -> dict[str, Any]:
+    fields = text.rsplit(")", 1)[1].split()
+    return {
+        "state": fields[0],
+        "ppid": int(fields[1]),
+        "cpu_ticks": int(fields[11]) + int(fields[12]),
+        "start_time_ticks": int(fields[19]),
+    }
+
+
+def proc_stat(pid: int) -> dict[str, Any]:
+    return parse_proc_stat(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8"))
+
+
 def proc_cpu_ticks(pid: int) -> int:
-    fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-    return int(fields[11]) + int(fields[12])
+    return int(proc_stat(pid)["cpu_ticks"])
 
 
 def proc_start_time_ticks(pid: int) -> int:
-    fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-    return int(fields[19])
+    return int(proc_stat(pid)["start_time_ticks"])
 
 
 def proc_pss_kib(pid: int) -> int | None:
@@ -198,11 +210,14 @@ def all_processes() -> dict[int, dict[str, Any]]:
             continue
         pid = int(entry.name)
         try:
+            # Bind every later read to the PID identity observed first. The
+            # end-of-evidence recheck detects exit or reuse during collection.
+            stat = proc_stat(pid)
             status = proc_status(pid)
             cmdline = proc_cmdline(pid)
             processes[pid] = {
                 "pid": pid,
-                "ppid": int(status.get("PPid", "0")),
+                "ppid": stat["ppid"],
                 "name": status.get("Name", ""),
                 "cmdline": cmdline["fields"],
                 "cmdline_switches": cmdline["switches"],
@@ -212,8 +227,9 @@ def all_processes() -> dict[int, dict[str, Any]]:
                 "cmdline_decode_lossless": cmdline["decode_lossless"],
                 "cmdline_complete": cmdline["complete"],
                 "status": status,
-                "cpu_ticks": proc_cpu_ticks(pid),
-                "start_time_ticks": proc_start_time_ticks(pid),
+                "state": stat["state"],
+                "cpu_ticks": stat["cpu_ticks"],
+                "start_time_ticks": stat["start_time_ticks"],
             }
         except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
             continue
@@ -279,12 +295,95 @@ def bounded_cleanup_call(operation: Callable[[], None]) -> dict[str, Any]:
     return outcome
 
 
+def classify_process_lifecycle(
+    original_start_time_ticks: int,
+    initial_state: str,
+    current_stat: dict[str, Any] | None,
+    read_error: str | None = None,
+) -> dict[str, Any]:
+    """Classify the exact observed PID identity after snapshot collection.
+
+    Only a positively observed exit state, disappearance, or replacement of
+    the original PID identity is excludable. Every ambiguous result remains
+    part of the live-process security verdict and therefore fails closed when
+    its evidence is incomplete.
+    """
+    if initial_state in {"Z", "X", "x"}:
+        return {
+            "classification": "exited_during_snapshot",
+            "reason": "exit_state_observed_at_snapshot_start",
+            "original_start_time_ticks": original_start_time_ticks,
+            "current_start_time_ticks": original_start_time_ticks,
+            "current_state": initial_state,
+        }
+    if read_error == "identity_not_found":
+        return {
+            "classification": "exited_during_snapshot",
+            "reason": "proc_identity_disappeared_before_snapshot_end",
+            "original_start_time_ticks": original_start_time_ticks,
+            "current_start_time_ticks": None,
+            "current_state": None,
+        }
+    if read_error is not None or current_stat is None:
+        return {
+            "classification": "unknown",
+            "reason": read_error or "identity_recheck_unavailable",
+            "original_start_time_ticks": original_start_time_ticks,
+            "current_start_time_ticks": None,
+            "current_state": None,
+        }
+    current_start = int(current_stat["start_time_ticks"])
+    current_state = str(current_stat["state"])
+    if current_start != original_start_time_ticks:
+        return {
+            "classification": "exited_during_snapshot",
+            "reason": "pid_reused_after_original_identity_exited",
+            "original_start_time_ticks": original_start_time_ticks,
+            "current_start_time_ticks": current_start,
+            "current_state": current_state,
+        }
+    if current_state in {"Z", "X", "x"}:
+        return {
+            "classification": "exited_during_snapshot",
+            "reason": "exit_state_observed_at_snapshot_end",
+            "original_start_time_ticks": original_start_time_ticks,
+            "current_start_time_ticks": current_start,
+            "current_state": current_state,
+        }
+    return {
+        "classification": "live",
+        "reason": "same_pid_identity_live_at_snapshot_end",
+        "original_start_time_ticks": original_start_time_ticks,
+        "current_start_time_ticks": current_start,
+        "current_state": current_state,
+    }
+
+
+def verify_process_lifecycle(process: dict[str, Any]) -> dict[str, Any]:
+    try:
+        current_stat = proc_stat(process["pid"])
+    except (FileNotFoundError, ProcessLookupError):
+        return classify_process_lifecycle(
+            process["start_time_ticks"], process["state"], None, "identity_not_found"
+        )
+    except (PermissionError, OSError, ValueError) as error:
+        return classify_process_lifecycle(
+            process["start_time_ticks"],
+            process["state"],
+            None,
+            f"identity_recheck_error:{type(error).__name__}",
+        )
+    return classify_process_lifecycle(
+        process["start_time_ticks"], process["state"], current_stat
+    )
+
+
 def process_evidence(process: dict[str, Any]) -> dict[str, Any]:
     pid = process["pid"]
     status = process["status"]
     uid_parts = [int(value) for value in status.get("Uid", "-1 -1 -1 -1").split()]
     gid_parts = [int(value) for value in status.get("Gid", "-1 -1 -1 -1").split()]
-    return {
+    evidence = {
         "pid": pid,
         "ppid": process["ppid"],
         "name": process["name"],
@@ -305,9 +404,22 @@ def process_evidence(process: dict[str, Any]) -> dict[str, Any]:
         "vm_rss_kib": int(status.get("VmRSS", "0 kB").split()[0]),
         "cpu_ticks": process["cpu_ticks"],
         "start_time_ticks": process["start_time_ticks"],
+        "initial_state": process["state"],
         "pss_kib": proc_pss_kib(pid),
         "namespaces": namespace_links(pid),
     }
+    evidence["snapshot_lifecycle"] = verify_process_lifecycle(process)
+    return evidence
+
+
+def sandbox_verdict_processes(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return live and ambiguous identities; exclude only positively exited ones."""
+    return [
+        process
+        for process in processes
+        if process.get("snapshot_lifecycle", {}).get("classification")
+        != "exited_during_snapshot"
+    ]
 
 
 def wait_for_download(directory: Path, timeout: float = 10.0) -> Path:
@@ -415,21 +527,41 @@ def record_process_snapshot(
 ) -> list[dict[str, Any]]:
     _snapshot, current = case_processes(driver_pid, baseline, tracked)
     evidence = [process_evidence(current[pid]) for pid in sorted(current)]
+    verdict_evidence = sandbox_verdict_processes(evidence)
+    exited_pids = [
+        item["pid"]
+        for item in evidence
+        if item.get("snapshot_lifecycle", {}).get("classification")
+        == "exited_during_snapshot"
+    ]
     result.setdefault("process_snapshots", []).append(
         {
             "stage": stage,
-            "process_count": len(evidence),
-            "renderer_count": sum(process_type(item) == "renderer" for item in evidence),
-            "aggregate_rss_kib": sum(item["vm_rss_kib"] for item in evidence),
-            "aggregate_pss_kib": sum(item["pss_kib"] or 0 for item in evidence),
-            "pss_complete": all(item["pss_kib"] is not None for item in evidence),
+            "observed_process_count": len(evidence),
+            "process_count": len(verdict_evidence),
+            "renderer_count": sum(
+                process_type(item) == "renderer" for item in verdict_evidence
+            ),
+            "aggregate_rss_kib": sum(item["vm_rss_kib"] for item in verdict_evidence),
+            "aggregate_pss_kib": sum(item["pss_kib"] or 0 for item in verdict_evidence),
+            "pss_complete": all(
+                item["pss_kib"] is not None for item in verdict_evidence
+            ),
             "pss_unavailable_pids": [
-                item["pid"] for item in evidence if item["pss_kib"] is None
+                item["pid"] for item in verdict_evidence if item["pss_kib"] is None
+            ],
+            "exited_during_snapshot_pids": exited_pids,
+            "unknown_lifecycle_pids": [
+                item["pid"]
+                for item in evidence
+                if item.get("snapshot_lifecycle", {}).get("classification")
+                == "unknown"
             ],
             "processes": evidence,
+            "sandbox_verdict_processes": verdict_evidence,
         }
     )
-    return evidence
+    return verdict_evidence
 
 
 def wait_for_renderer_snapshot(
@@ -637,15 +769,24 @@ def run_browser_case(
             best_snapshot = max(
                 snapshots,
                 key=lambda snapshot: (snapshot["renderer_count"], snapshot["process_count"]),
-                default={"processes": [], "renderer_count": 0, "process_count": 0},
+                default={
+                    "processes": [],
+                    "sandbox_verdict_processes": [],
+                    "renderer_count": 0,
+                    "process_count": 0,
+                },
             )
-            result["processes"] = best_snapshot["processes"]
+            result["processes"] = best_snapshot["sandbox_verdict_processes"]
+            result["all_processes_in_evidence_snapshot"] = best_snapshot["processes"]
+            result["exited_during_evidence_snapshot_pids"] = best_snapshot.get(
+                "exited_during_snapshot_pids", []
+            )
             result["process_evidence_stage"] = best_snapshot.get("stage")
             result["process_count"] = best_snapshot["process_count"]
             all_observed_processes = [
                 process
                 for snapshot in snapshots
-                for process in snapshot["processes"]
+                for process in snapshot["sandbox_verdict_processes"]
             ]
             result["forbidden_arguments"] = check_forbidden_arguments(
                 all_observed_processes
@@ -803,12 +944,14 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
         key=lambda item: (
             sum(
                 process_type(process) == "renderer"
-                for process in item[1].get("processes", [])
+                for process in sandbox_verdict_processes(
+                    item[1].get("processes", [])
+                )
             ),
-            len(item[1].get("processes", [])),
+            len(sandbox_verdict_processes(item[1].get("processes", []))),
         ),
     )
-    processes = core.get("processes", [])
+    processes = sandbox_verdict_processes(core.get("processes", []))
     chromium_processes = [
         process for process in processes if is_chromium_process(process)
     ]
@@ -887,7 +1030,10 @@ def summarize_functional_failures(
             ),
             {"processes": []},
         )
-        error_processes = error_snapshot.get("processes", [])
+        error_processes = error_snapshot.get(
+            "sandbox_verdict_processes",
+            sandbox_verdict_processes(error_snapshot.get("processes", [])),
+        )
         progress = case.get("action_progress", [])
         failures.append(
             {
