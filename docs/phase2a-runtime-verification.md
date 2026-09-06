@@ -22,8 +22,51 @@ This report uses the required classifications as follows:
 - **BLOCKED** — the required environment or evidence was unavailable and the
   conclusion cannot be advanced safely.
 
-No item in this report is classified **HA OS VERIFIED**. The approved target was
-not accessible during Phase 2A-1 authoring.
+The first target build now provides limited **HA OS VERIFIED** evidence for App
+discovery, manifest acceptance, image-base retrieval and dependency
+installation. The image did not finish building, so Chromium execution,
+sandboxing and all other runtime properties remain **NOT VERIFIED**.
+
+## Target build attempt 1
+
+The first real build was run on this target:
+
+| Item | Observed value |
+| --- | --- |
+| Home Assistant OS | `18.2` |
+| Supervisor | `2026.08.0` |
+| Home Assistant | `2026.9.0` |
+| Architecture / machine | `amd64` / `qemux86-64` |
+
+The target discovered the local App and Supervisor accepted the authoritative
+`config.yaml` manifest. The pinned Home Assistant base image was pulled. The
+build then installed Chromium `152.0.7977.82-r0`, ChromeDriver
+`152.0.7977.82-r0`, Python `3.14.7-r1`, Selenium `4.48.0` and every locked
+Python dependency.
+
+The build failed only in the final Dockerfile package-version assertions. The
+original assertions used `apk info -v` after `apk add --no-cache`; on the target,
+`apk info` attempted to open an `APKINDEX.tar.gz` cache that had deliberately
+not been retained. This is classified as a **Phase 2A-1 build-verification
+defect**, not a Chromium runtime failure.
+
+The replacement uses `apk --no-network --repositories-file /dev/null info -e`
+with exact `name=version` constraints. The `info -e` operation evaluates only
+installed package providers, while the global options remove network and
+repository-index inputs. It fails when either package is absent or its
+installed version does not satisfy the exact constraint. This correction is
+**STATICALLY VERIFIED** and requires a repeat target build.
+
+Alpine `apk-tools` implements `info -e` by parsing each argument as a package
+dependency, ignoring providers without an installed-package record (`ipkg`),
+and returning a non-zero count for unsatisfied dependencies. Evidence:
+<https://gitlab.alpinelinux.org/alpine/apk-tools/-/blob/v2.14.10/src/app_info.c>
+and
+<https://gitlab.alpinelinux.org/alpine/apk-tools/-/blob/v2.14.10/doc/apk-info.8.scd>.
+
+Because the failed RUN layer prevented image completion, Chromium never
+started. Chromium runtime, Selenium operation and sandbox enforcement remain
+**NOT VERIFIED**.
 
 ## 1. Environment tested
 
@@ -33,19 +76,19 @@ not accessible during Phase 2A-1 authoring.
 | Docker CLI/engine | Not installed or available in `PATH` | LOCALLY TESTED | `Get-Command docker` returned `NOT FOUND` |
 | Podman / nerdctl | Not installed or available in `PATH` | LOCALLY TESTED | `Get-Command podman, nerdctl` returned `NOT FOUND` |
 | WSL Linux distribution | WSL reported that Windows Subsystem for Linux is not installed | LOCALLY TESTED | `wsl --list --verbose` and `wsl --status` |
-| Approved HA OS VM on Synology VMM | No direct access was available | BLOCKED | No Supervisor/App execution log or VM observation exists |
+| Approved HA OS target | HA OS `18.2`, Supervisor `2026.08.0`, Home Assistant `2026.9.0`, `amd64` / `qemux86-64` | HA OS VERIFIED for build attempt | Operator-provided build result from target attempt 1 |
 | Synthetic target | Loopback HTTP server created by the probe | DESIGN VERIFIED | `poc/phase2a-runtime/runtime_probe.py`, `SyntheticHandler` |
 
 The local checks prove only that the disposable artifact is structurally
 consistent and syntactically valid Python. They do not approximate the HA OS
-kernel, Docker, AppArmor, seccomp, namespace, Supervisor, or Synology VMM matrix.
+kernel, Docker, AppArmor, seccomp or namespace behavior. Target attempt 1 adds
+build-path evidence only; it did not start the container.
 
 ## 2. Home Assistant OS version
 
-**NOT VERIFIED.** No Home Assistant OS instance was accessed and no version was
-provided by the target. The PoC deliberately does not request Supervisor API
-access merely to discover this value. The target operator must record it from
-Home Assistant system information alongside the App log.
+**HA OS VERIFIED for target build attempt 1:** `18.2`. The PoC still does not
+request Supervisor API access merely to discover this value; it was recorded by
+the target operator.
 
 The public release list was consulted only to avoid treating an old release as
 the target; it is not evidence of the installed VM version:
@@ -53,9 +96,9 @@ the target; it is not evidence of the installed VM version:
 
 ## 3. Supervisor version
 
-**NOT VERIFIED.** No target Supervisor was accessed and the App requests no
-Supervisor API capability. The target operator must record the installed
-Supervisor version alongside the App log.
+**HA OS VERIFIED for target build attempt 1:** `2026.08.0`. Home Assistant was
+`2026.9.0`. The App requests no Supervisor API capability; the versions were
+recorded outside the App by the target operator.
 
 Reference release history, not target evidence:
 <https://github.com/home-assistant/supervisor/releases>.
@@ -63,13 +106,14 @@ Reference release history, not target evidence:
 ## 4. Architecture
 
 The approved target architecture is `amd64`. The disposable App declares only
-`amd64` in `poc/phase2a-runtime/config.json`. The Home Assistant documentation
+`amd64` in the authoritative `poc/phase2a-runtime/config.yaml`. The Home Assistant documentation
 maps App `amd64` to Docker platform `linux/amd64`:
 <https://developers.home-assistant.io/docs/apps/testing/>.
 
 - App declaration: **STATICALLY VERIFIED**.
 - Alpine package metadata architecture `x86_64`: **STATICALLY VERIFIED**.
-- Execution on the approved amd64 VM: **NOT VERIFIED / BLOCKED**.
+- Supervisor build execution on `amd64` / `qemux86-64`: **HA OS VERIFIED**.
+- Chromium runtime execution on that target: **NOT VERIFIED**.
 
 ## 5. Chromium version and availability
 
@@ -80,7 +124,8 @@ maps App `amd64` to Docker platform `linux/amd64`:
 | Repository | Alpine 3.24 `community` | STATICALLY VERIFIED |
 | Architecture | `x86_64` | STATICALLY VERIFIED |
 | Alpine source commit | `73650098eb2aa1baf6fe7b09586838990466235c` | STATICALLY VERIFIED |
-| Installed executable version | Expected `152.0.7977.82`; Docker build asserts exact value | DESIGN VERIFIED; NOT EXECUTED |
+| Package installation in target build layer | `152.0.7977.82-r0` installed | HA OS VERIFIED for build attempt 1 |
+| Completed image / executable runtime | Image did not complete; executable was not run | NOT VERIFIED |
 
 Evidence: official Alpine package record checked directly on 2026-09-06:
 <https://pkgs.alpinelinux.org/package/v3.24/community/x86_64/chromium>.
@@ -94,8 +139,9 @@ The referenced GHCR package page associated that digest with the Home Assistant
 3.24 image when inspected:
 <https://github.com/home-assistant/docker-base/pkgs/container/base>.
 
-Package availability in metadata does not prove that the image builds or runs
-inside the target Supervisor.
+Target installation advances package availability beyond metadata evidence,
+but the failed final assertion means no completed image or runtime evidence
+exists yet.
 
 ## 6. ChromeDriver version and compatibility
 
@@ -105,17 +151,20 @@ inside the target Supervisor.
 | Version pinned in PoC | `152.0.7977.82-r0` | STATICALLY VERIFIED |
 | Repository / architecture | Alpine 3.24 `community` / `x86_64` | STATICALLY VERIFIED |
 | Origin / source commit | `chromium` / `73650098eb2aa1baf6fe7b09586838990466235c` | STATICALLY VERIFIED |
+| Installation in target build layer | Exact pinned ChromeDriver package installed | HA OS VERIFIED for build attempt 1 |
 | Browser/driver compatibility | Exact upstream version and source commit match | STATICALLY VERIFIED; runtime handshake NOT VERIFIED |
 
 Evidence: <https://pkgs.alpinelinux.org/package/v3.24/community/x86_64/chromium-chromedriver>.
 
-The Docker build asserts identical executable versions. Selenium receives the
-explicit path `/usr/bin/chromedriver`; Selenium Manager fallback is not used.
-`SE_OFFLINE=true`, `SE_AVOID_BROWSER_DOWNLOAD=true`, and `SE_AVOID_STATS=true`
-are set in the image. Browser, driver, and Python dependencies are downloaded
-only while building the disposable image. Runtime binary downloading is
-forbidden by construction and is checked statically, but an offline runtime
-start has **NOT** executed.
+The Docker build asserts the exact installed package versions using `apk info
+-e` against the installed package database with repository and network inputs
+disabled. Selenium receives the explicit path `/usr/bin/chromedriver`;
+Selenium Manager fallback is not used. `SE_OFFLINE=true`,
+`SE_AVOID_BROWSER_DOWNLOAD=true`, and `SE_AVOID_STATS=true` are set in the
+image. Browser, driver, Python `3.14.7-r1`, Selenium `4.48.0` and every locked
+Python dependency installed successfully during target build attempt 1.
+Runtime binary downloading is forbidden by construction and is checked
+statically, but an offline runtime start has **NOT** executed.
 
 The Python dependency set is fully version pinned and SHA-256 locked in
 `poc/phase2a-runtime/requirements.lock`. Selenium is `4.48.0`. The Selenium
@@ -276,24 +325,26 @@ Supervisor, image digest, kernel and Synology VMM configuration tested.
 
 ## 14. Failures and uncompleted tests
 
-1. **BLOCKED:** no approved HA OS/Supervisor/Synology VMM target access.
-2. **BLOCKED:** no local Linux container engine or WSL distribution.
-3. Chromium/ChromeDriver image build: **NOT VERIFIED**.
+1. Target build attempt 1 reached the final package-version assertions and
+   failed because `apk info -v` depended on an absent cached repository index.
+2. **BLOCKED locally:** no local Linux container engine or WSL distribution.
+3. Chromium/ChromeDriver image build: **INCOMPLETE** pending a repeat build with
+   the installed-database-only assertion.
 4. Selenium browser startup/navigation/DOM/download/shutdown: **NOT VERIFIED**.
 5. Positive namespace/seccomp/SUID-or-user-namespace sandbox proof:
    **NOT VERIFIED**.
 6. Runtime privilege, AppArmor, mount and process inventory: **NOT VERIFIED**.
 7. Forced App termination and host orphan audit: **NOT VERIFIED**.
-8. Home Assistant App schema acceptance by the target Supervisor:
-   **NOT VERIFIED**.
-9. Python files compiled successfully and `config.json` parsed successfully on
-   the authoring host: **LOCALLY TESTED**.
+8. Home Assistant App discovery and `config.yaml` acceptance by Supervisor
+   `2026.08.0`: **HA OS VERIFIED**.
+9. Python files compiled successfully; authoritative `config.yaml` and fixture
+   `config.json` parsed and matched on the authoring host: **LOCALLY TESTED**.
 10. `static_verify.py` passed all included policy assertions:
     **LOCALLY TESTED / STATICALLY VERIFIED**.
 
-The unavailable environment is not treated as a failed sandbox experiment. It
-does require the final decision `NOT TESTED` because no relevant target runtime
-test ran.
+The build-verification defect is not treated as a failed Chromium or sandbox
+experiment. The final decision remains `NOT TESTED` because no relevant target
+runtime test ran.
 
 ## 15. Security deviations
 
@@ -323,8 +374,8 @@ No security property that depends on Linux, Supervisor or HA OS is claimed.
 The following findings block Phase 2A-1 `PASS`, Phase 2A-1
 `PASS WITH CONDITIONS`, and entry into Phase 2A-2:
 
-1. The disposable image has not built in the approved HA OS amd64 Supervisor
-   environment.
+1. The disposable image has not completed building in the approved HA OS amd64
+   Supervisor environment; the corrected assertion requires a repeat build.
 2. Chromium has not run as effective UID/GID `2000:2000` in that environment.
 3. The layer 1 and seccomp-BPF sandbox have not been positively verified there.
 4. Effective capabilities, AppArmor status, namespace layout, mounts and network
@@ -341,13 +392,17 @@ to static design; it is not experimental proof that none will be needed.
 
 | Evidence | Result | Classification |
 | --- | --- | --- |
-| `poc/phase2a-runtime/config.json` parsed by Python standard JSON parser | PASS | LOCALLY TESTED |
-| `poc/phase2a-runtime/static_verify.py` | PASS, five policy result lines | LOCALLY TESTED / STATICALLY VERIFIED |
+| Local App discovery and authoritative `config.yaml` acceptance | PASS on Supervisor `2026.08.0` | HA OS VERIFIED |
+| Base image pull | PASS | HA OS VERIFIED for target build attempt 1 |
+| Chromium, ChromeDriver, Python, Selenium and locked dependency installation | PASS | HA OS VERIFIED for target build attempt 1 |
+| Completed image and Chromium runtime | FAIL at obsolete version assertion; runtime not reached | NOT VERIFIED |
+| `poc/phase2a-runtime/config.yaml` and `config.json` parsed and compared | PASS | LOCALLY TESTED |
+| `poc/phase2a-runtime/static_verify.py` | PASS | LOCALLY TESTED / STATICALLY VERIFIED |
 | `python -m py_compile` for both Python files | PASS | LOCALLY TESTED |
 | `git status` branch check | `phase2a/runtime-verification` | LOCALLY TESTED |
 | Direct Alpine package metadata retrieval | Matching browser/driver `152.0.7977.82-r0`, x86_64, same origin and commit | STATICALLY VERIFIED |
 | Docker/Podman/nerdctl/WSL environment inventory | No usable Linux container runtime | LOCALLY TESTED |
-| HA OS App execution log | Not available | BLOCKED |
+| HA OS App runtime log | Not available because the image did not complete | BLOCKED |
 
 The local Python compilation created only ignored bytecode cache files; those
 files were removed immediately and are not part of the proposed repository
@@ -355,9 +410,12 @@ diff.
 
 ## Required target run before reassessment
 
-- [ ] Record exact HA OS and Supervisor versions and Synology VMM VM details.
-- [ ] Copy only the disposable App directory to the local Apps area.
-- [ ] Build on `linux/amd64` and retain full build output and final image digest.
+- [x] Record exact HA OS, Supervisor, Home Assistant and machine architecture.
+- [x] Confirm local App discovery and `config.yaml` acceptance.
+- [ ] Copy only `config.yaml`, `Dockerfile`, `requirements.lock` and
+      `runtime_probe.py` to the local Apps area for the repeat attempt.
+- [ ] Repeat the build on `linux/amd64` and retain full build output and final
+      image digest.
 - [ ] Confirm the installed Chromium/ChromeDriver/Selenium versions from the
       probe output.
 - [ ] Inspect the effective deployed App configuration, mounts, AppArmor,

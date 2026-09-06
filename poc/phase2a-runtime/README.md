@@ -31,6 +31,20 @@ compares security-relevant effective values in both source representations and
 fails closed on divergence, but that comparison does not make `config.json` a
 valid runtime input.
 
+## Target build observation
+
+The first target build on Home Assistant OS 18.2 with Supervisor 2026.08.0
+accepted the local App manifest and installed the pinned Chromium,
+ChromeDriver, Python and Selenium packages. It then failed in the original
+`apk info -v` package-version assertion because `apk add --no-cache` had not
+retained a repository `APKINDEX` cache. The version check now uses `apk info
+-e` with networking disabled and `/dev/null` as the repositories file. This
+checks exact constraints against installed package records and still fails if a
+package is absent or has another version.
+
+The image did not finish building in that attempt. Chromium runtime and sandbox
+behavior therefore remain untested.
+
 ## Target execution
 
 1. Create a single app folder in the target Home Assistant OS local apps

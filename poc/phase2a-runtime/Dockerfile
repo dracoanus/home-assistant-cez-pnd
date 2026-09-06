@@ -33,8 +33,9 @@ RUN apk add --no-cache \
     && adduser -u 2000 -S -D -H -h /home/phase2a -G phase2a phase2a \
     && install -d -o 0 -g 0 -m 0555 /home/phase2a /opt/phase2a \
     && rm -f /tmp/requirements.lock \
-    && test "$(apk info -v chromium)" = "chromium-152.0.7977.82-r0" \
-    && test "$(apk info -v chromium-chromedriver)" = "chromium-chromedriver-152.0.7977.82-r0"
+    && apk --no-network --repositories-file /dev/null info -e \
+        "chromium=152.0.7977.82-r0" \
+        "chromium-chromedriver=152.0.7977.82-r0"
 
 COPY --chown=0:0 runtime_probe.py /opt/phase2a/runtime_probe.py
 

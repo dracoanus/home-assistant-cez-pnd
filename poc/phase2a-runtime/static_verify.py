@@ -188,6 +188,19 @@ def main() -> int:
     require('tempfile.mkdtemp(prefix="phase2a-runtime-", dir="/tmp")' in PROBE, "Private runtime root required")
     require("chromium=152.0.7977.82-r0" in DOCKERFILE, "Chromium must be version pinned")
     require("chromium-chromedriver=152.0.7977.82-r0" in DOCKERFILE, "ChromeDriver must match")
+    require("apk info -v" not in DOCKERFILE, "Package verification must not query unavailable APK indexes")
+    require(
+        "apk --no-network --repositories-file /dev/null info -e" in DOCKERFILE,
+        "Package verification must query only the installed APK database",
+    )
+    require(
+        '"chromium=152.0.7977.82-r0"' in DOCKERFILE,
+        "Installed Chromium must satisfy the exact pinned version",
+    )
+    require(
+        '"chromium-chromedriver=152.0.7977.82-r0"' in DOCKERFILE,
+        "Installed ChromeDriver must satisfy the exact pinned version",
+    )
     require("SE_OFFLINE=true" in DOCKERFILE, "Selenium Manager offline mode is required")
     require("SE_AVOID_BROWSER_DOWNLOAD=true" in DOCKERFILE, "Browser downloads must be disabled")
     require("SE_AVOID_STATS=true" in DOCKERFILE, "Selenium telemetry must be disabled")
@@ -220,6 +233,7 @@ def main() -> int:
     print("STATICALLY VERIFIED: image paths are non-writable and runtime paths are private temporary directories.")
     print("STATICALLY VERIFIED: no forbidden sandbox flag is passed to Chromium.")
     print("STATICALLY VERIFIED: browser/driver versions match and Selenium wheels are hash locked.")
+    print("STATICALLY VERIFIED: installed APK versions are checked without repository indexes or network access.")
     print("STATICALLY VERIFIED: runtime executable downloads and Selenium telemetry are disabled.")
     print("STATICALLY VERIFIED: probe target is a loopback synthetic page; no CEZ endpoint is present.")
     return 0
