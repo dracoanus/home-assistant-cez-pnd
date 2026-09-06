@@ -1,0 +1,30 @@
+{
+  "name": "CEZ PND Phase 2A Runtime Probe",
+  "version": "0.0.1",
+  "slug": "cez_pnd_phase2a_runtime_probe",
+  "description": "Disposable offline Chromium runtime and sandbox feasibility probe.",
+  "arch": [
+    "amd64"
+  ],
+  "startup": "once",
+  "boot": "manual",
+  "init": false,
+  "stage": "experimental",
+  "hassio_api": false,
+  "homeassistant_api": false,
+  "auth_api": false,
+  "docker_api": false,
+  "full_access": false,
+  "apparmor": true,
+  "audio": false,
+  "video": false,
+  "gpio": false,
+  "usb": false,
+  "uart": false,
+  "udev": false,
+  "devicetree": false,
+  "kernel_modules": false,
+  "stdin": false,
+  "options": {},
+  "schema": {}
+}
