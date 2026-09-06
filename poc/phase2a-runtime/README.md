@@ -45,6 +45,24 @@ package is absent or has another version.
 The image did not finish building in that attempt. Chromium runtime and sandbox
 behavior therefore remain untested.
 
+The corrected image subsequently built and started on the same target. The
+first runtime returned failure because two Selenium sessions disconnected and
+Chromium processes remained after cleanup. Its final sandbox summary also read
+only the failed normal case, even though the timeout case captured renderers
+with `NoNewPrivs: 1`, `Seccomp: 2` and additional namespaces.
+
+The probe now retains process snapshots on success and failure, evaluates the
+strongest internally consistent snapshot across every case, and uses renderer
+namespace separation plus `/proc` seccomp and no-new-privileges state as the
+authoritative sandbox evidence. It no longer navigates to `chrome://sandbox`.
+Overall PASS still requires positive sandbox evidence, all three functional
+cases and complete cleanup.
+
+Cleanup now follows normal WebDriver/service shutdown with same-UID SIGTERM,
+bounded waiting, same-UID SIGKILL when required, and PID 1 child reaping. No
+privilege or capability is added. Aggregate PSS is reported alongside summed
+RSS to reduce shared-page double counting.
+
 ## Target execution
 
 1. Create a single app folder in the target Home Assistant OS local apps

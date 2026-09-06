@@ -204,7 +204,7 @@ def main() -> int:
     require("SE_OFFLINE=true" in DOCKERFILE, "Selenium Manager offline mode is required")
     require("SE_AVOID_BROWSER_DOWNLOAD=true" in DOCKERFILE, "Browser downloads must be disabled")
     require("SE_AVOID_STATS=true" in DOCKERFILE, "Selenium telemetry must be disabled")
-    require("Service(executable_path=CHROMEDRIVER)" in PROBE, "Explicit packaged driver path required")
+    require("executable_path=CHROMEDRIVER" in PROBE, "Explicit packaged driver path required")
     for flag in (
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -212,6 +212,31 @@ def main() -> int:
         "--disable-gpu-sandbox",
     ):
         require(f'options.add_argument("{flag}")' not in PROBE, f"Forbidden launch flag present: {flag}")
+    require(
+        'options.add_argument("--no-zygote-sandbox")' not in PROBE,
+        "The internal zygote flag must never be supplied by the probe",
+    )
+    require(
+        'INTERNAL_ZYGOTE_FLAG = "--no-zygote-sandbox"' in PROBE,
+        "Internally generated zygote flags must be identified explicitly",
+    )
+    require(
+        '"unexpected_non_zygote_pids"' in PROBE,
+        "The internal zygote flag must fail closed if observed on another process type",
+    )
+    require("driver.get(\"chrome://sandbox\")" not in PROBE, "Internal page navigation must not disturb renderer evidence")
+    require("record_process_snapshot" in PROBE, "Process evidence must survive action failures")
+    require("force_cleanup" in PROBE, "Non-privileged TERM/KILL cleanup fallback is required")
+    require("bounded_cleanup_call" in PROBE, "WebDriver and service shutdown must be time bounded")
+    require("os.waitpid(-1, os.WNOHANG)" in PROBE, "PID 1 must reap adopted browser children")
+    require('evaluate_sandbox(result["cases"])' in PROBE, "Sandbox evaluation must consider every case")
+    require("peak_observed_aggregate_pss_kib" in PROBE, "PSS must accompany aggregate RSS")
+    require('"pss_complete"' in PROBE, "Incomplete PSS evidence must be reported explicitly")
+    require("verify_installed_apk(\"chromium=152.0.7977.82-r0\")" in PROBE, "Runtime Chromium package check must be exact and offline")
+    require(
+        'verify_installed_apk(\n                "chromium-chromedriver=152.0.7977.82-r0"' in PROBE,
+        "Runtime ChromeDriver package check must be exact and offline",
+    )
     require("https://" not in PROBE and "http://" in PROBE, "Probe may navigate only to loopback HTTP")
     require("127.0.0.1" in PROBE, "Synthetic server must bind to loopback")
     require("--disable-background-networking" in PROBE, "Background browser networking must be disabled")
