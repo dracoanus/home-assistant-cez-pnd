@@ -153,6 +153,7 @@ def run_cmdline_regression_tests() -> None:
     check_internal = namespace["check_internal_zygote_arguments"]
     check_forbidden = namespace["check_forbidden_arguments"]
     evaluate = namespace["evaluate_sandbox"]
+    summarize_failures = namespace["summarize_functional_failures"]
     forbidden_flags = namespace["FORBIDDEN_FLAGS"]
 
     def process(raw: bytes, pid: int = 1) -> dict[str, object]:
@@ -263,6 +264,34 @@ def run_cmdline_regression_tests() -> None:
         "Sandbox accepted a renderer carrying the internal zygote flag",
     )
 
+    failed_case = case([normal])
+    failed_case.update(
+        {
+            "action_passed": False,
+            "webdriver_started": True,
+            "renderer_discovery": "observed_during_startup_window",
+            "action_progress": ["before_synthetic_navigation"],
+            "error": {"type": "SyntheticFailure", "message": "test"},
+            "process_snapshots": [
+                {
+                    "stage": "action_error",
+                    "processes": [browser, normal],
+                }
+            ],
+            "chromedriver_returncode_before_cleanup": None,
+            "cleanup": {"verified": True},
+        }
+    )
+    passed_case = {"action_passed": True}
+    summary = summarize_failures({"normal": failed_case, "timeout": passed_case})
+    require(len(summary) == 1 and summary[0]["case"] == "normal", "Failed case summary is incorrect")
+    require(
+        summary[0]["last_action_milestone"] == "before_synthetic_navigation",
+        "Failed case milestone is missing",
+    )
+    require(summary[0]["browser_pids_at_action_error"] == [5], "Browser lifetime evidence is missing")
+    require(summary[0]["renderer_pids_at_action_error"] == [1], "Renderer lifetime evidence is missing")
+
 
 def main() -> int:
     runtime_config = load_runtime_yaml(RUNTIME_CONFIG_PATH)
@@ -354,6 +383,16 @@ def main() -> int:
     require('evaluate_sandbox(result["cases"])' in PROBE, "Sandbox evaluation must consider every case")
     require("peak_observed_aggregate_pss_kib" in PROBE, "PSS must accompany aggregate RSS")
     require('"pss_complete"' in PROBE, "Incomplete PSS evidence must be reported explicitly")
+    require('result["functional_failures"]' in PROBE, "Functional failures need a compact case summary")
+    require(
+        '''result["passed"] = bool(
+        result["sandbox"]["verified"]
+        and result["cleanup_verified"]
+        and result["functional_cases_passed"]
+        and result["case_policy_verified"]
+    )''' in PROBE,
+        "Overall PASS must retain every sandbox, cleanup, functional and case-policy gate",
+    )
     require("verify_installed_apk(\"chromium=152.0.7977.82-r0\")" in PROBE, "Runtime Chromium package check must be exact and offline")
     require(
         'verify_installed_apk(\n                "chromium-chromedriver=152.0.7977.82-r0"' in PROBE,
@@ -385,7 +424,7 @@ def main() -> int:
     print("STATICALLY VERIFIED: installed APK versions are checked without repository indexes or network access.")
     print("STATICALLY VERIFIED: runtime executable downloads and Selenium telemetry are disabled.")
     print("STATICALLY VERIFIED: probe target is a loopback synthetic page; no CEZ endpoint is present.")
-    print("REGRESSION TESTED: NUL argv, flattened process titles, renderer/zygote classification and fail-closed policy.")
+    print("REGRESSION TESTED: NUL argv, process classification, fail-closed policy and functional failure summaries.")
     return 0
 
 

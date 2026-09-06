@@ -83,6 +83,17 @@ satisfy the sandbox gate. A `renderer_discovery_timeout` means only that
 classification did not observe a renderer during the bounded discovery window;
 WebDriver startup is recorded separately and the action is still attempted.
 
+The following HA OS run resolved that classification issue and returned
+`sandbox.verified: true` with three classified renderers,
+`cleanup_verified: true`, and no security deviation. Functional execution
+still failed, so the overall result correctly remained false. The retained
+aggregate result does not identify which case failed or its final action
+milestone. The probe now emits a compact `functional_failures` list containing
+the case, last milestone, Selenium error, renderer discovery state, browser and
+renderer PIDs present at the error snapshot, ChromeDriver return code before
+cleanup, and cleanup result. This adds diagnostics only and does not alter a
+functional or security gate.
+
 ## Target execution
 
 1. Create a single app folder in the target Home Assistant OS local apps

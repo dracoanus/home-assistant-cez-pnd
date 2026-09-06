@@ -22,11 +22,11 @@ This report uses the required classifications as follows:
 - **BLOCKED** — the required environment or evidence was unavailable and the
   conclusion cannot be advanced safely.
 
-Three target attempts now provide **HA OS VERIFIED** evidence for App discovery,
-manifest acceptance, image construction and two runtime executions. The latest
-probe still returned functional failure, but it positively verified cleanup and
-captured the required renderer security state. A command-line classification
-defect prevented the aggregate sandbox decision from consuming that evidence.
+Four target attempts now provide **HA OS VERIFIED** evidence for App discovery,
+manifest acceptance, image construction and three runtime executions. The
+latest probe positively verified Chromium sandboxing and cleanup without a
+security deviation. Functional execution remains unresolved and keeps the
+overall result false.
 
 ## Target build attempt 1
 
@@ -195,6 +195,49 @@ DevTools availability policy change as examples; it does not distinguish them
 without surrounding diagnostics:
 <https://chromium.googlesource.com/chromium/src/+/main/chrome/test/chromedriver/chrome/devtools_client_impl.cc>.
 
+## Target runtime attempt 3
+
+The NUL-aware probe resolved process classification on the HA OS target. The
+latest aggregate result was:
+
+| Result | Value | Classification |
+| --- | --- | --- |
+| `sandbox.verified` | `true` | CONFIRMED |
+| `renderer_count` | `3` | CONFIRMED |
+| `cleanup_verified` | `true` | CONFIRMED |
+| `security_deviations` | `[]` | CONFIRMED |
+| `functional_cases_passed` | `false` | CONFIRMED |
+| Overall `passed` | `false` | CONFIRMED |
+
+This run closes the renderer classification finding. Matching Chromium and
+ChromeDriver `152.0.7977.82-r0`, runtime UID/GID `2000:2000`, renderer
+discovery, renderer seccomp and `NoNewPrivs`, separate user/PID/network
+namespaces, forbidden-argument absence, successful cleanup, lack of persistent
+storage and non-exhausted `/dev/shm` are **CONFIRMED** for this target run. No
+security relaxation was required.
+
+The retained evidence available for this analysis does not include the
+per-case `cases` object, its `action_progress`, exception object, verbose
+ChromeDriver log tail, process snapshots, return code or exact `/dev/shm`
+numbers. Consequently, the exact failed case and last successful action
+milestone are **OPEN / NEEDS VERIFICATION**. It is also **OPEN / NEEDS
+VERIFICATION** whether the immediate DevTools disconnect seen in prior runs
+recurred in the same case and at the same milestone.
+
+The aggregate result proves only that at least one action did not set
+`action_passed: true`. It does not distinguish normal, Selenium-exception or
+timeout cases. Browser or renderer crash, ChromeDriver failure, Selenium timeout
+interaction, scenario design, OOM, AppArmor and namespace interaction must not
+be inferred from that aggregate bit. `/dev/shm` exhaustion is not supported by
+this run because the captured state did not show exhaustion.
+
+To prevent loss of the decisive fields in another large JSON result, the probe
+now produces a compact `functional_failures` list. For each failed case it
+records WebDriver startup, renderer discovery, last action milestone, exact
+exception, browser and renderer PIDs present in the `action_error` snapshot,
+ChromeDriver return code before cleanup and cleanup status. This is diagnostic
+only; the existing functional and fail-closed security gates are unchanged.
+
 ## 1. Environment tested
 
 | Item | Observed value | Classification | Evidence |
@@ -317,11 +360,9 @@ Chromium processes.
 
 ## 8. Chromium sandbox verification result
 
-**PARTIALLY POSITIVELY VERIFIED / OVERALL FAIL.** Both runtime attempts captured
-positive process-level sandbox evidence. Attempt 2 still produced a false
-aggregate renderer count because classification assumed every switch was a
-separate `/proc/<pid>/cmdline` field. It is not evidence that the observed
-renderers lacked a sandbox.
+**HA OS VERIFIED / PASS for the sandbox gate.** Runtime attempt 3 returned
+`sandbox.verified: true` and `renderer_count: 3`. The process-title
+classification issue is resolved.
 
 The runtime evidence positively demonstrates:
 
@@ -335,15 +376,15 @@ The runtime evidence positively demonstrates:
 4. Captured Chromium processes ran as UID/GID `2000:2000`.
 5. Prohibited sandbox-disabling arguments were absent.
 
-Attempt 2 establishes that cleanup is reliable for normal, exception and
-timeout paths in that run. The corrected evaluator will report `verified: true`
+Attempts 2 and 3 establish that cleanup is reliable for normal, exception and
+timeout paths in those runs. The evaluator reports `verified: true`
 only when one internally consistent snapshot contains a browser and renderer
 set where every renderer has all required namespace, seccomp and `NoNewPrivs`
 properties, all Chromium processes are non-root, all command-line evidence is
 derived from complete, losslessly decoded, NUL-terminated raw procfs data, no
 forbidden argument exists, and the internal zygote flag appears only on a
 zygote. Overall PASS additionally requires all actions and cleanup cases to
-succeed.
+succeed; that functional condition did not pass in attempt 3.
 
 The probe records user, PID, network, mount and IPC namespace identifiers for
 each process. Container seccomp alone is not treated as proof of Chromium's
@@ -354,9 +395,10 @@ by:
 - <https://chromium.googlesource.com/chromium/src/+/4b74fa1307784d2fe83c3dad453874e7b3911331/chrome/browser/resources/sandbox_internals/sandbox_internals.js>
 - <https://chromium.googlesource.com/chromium/src/+/0e94f26e8/docs/linux_sandboxing.md>
 
-No sandbox-disabling flag is passed by the PoC. Static inspection and the first
-runtime capture found none in the effective launch arguments. This absence is
-required but is not used alone as a positive sandbox result.
+No sandbox-disabling flag is passed by the PoC. Static inspection and all
+relevant runtime captures found none in the effective launch arguments. Attempt
+3 positively passed the complete sandbox gate rather than relying on argument
+absence alone.
 
 ## 9. Required Linux capabilities and container privileges
 
@@ -505,24 +547,22 @@ Supervisor, image digest, kernel and Synology VMM configuration tested.
 
 1. Build attempt 1 failed at the obsolete APK assertion; the corrected build
    subsequently completed.
-2. Runtime actions still lost the browser/DevTools session with
-   `InvalidSessionIdException`; the supplied retained evidence does not identify
-   the underlying browser, driver or platform cause.
+2. Prior runtime actions lost the browser/DevTools session with
+   `InvalidSessionIdException`. Attempt 3 reports a functional failure, but the
+   retained aggregate fields do not identify its case, milestone or exception.
 3. Attempt 1 left Chromium PIDs; attempt 2 passed cleanup without orphans.
 4. Attempt 1 selected the wrong case. Attempt 2 captured renderers but classified
    Chromium's flattened Linux process title as one argument and therefore
    reported `renderer_count: 0`.
-5. Renderer seccomp, `NoNewPrivs`, non-root identity and namespace separation
-   were positively observed again in attempt 2. Aggregate verification requires
-   one more run with the corrected parser/classifier.
+5. Attempt 3 resolved classification and positively passed the aggregate
+   renderer sandbox gate with three renderers.
 6. Effective capabilities and AppArmor enforcement still require explicit
    target inspection; no extra capability was declared.
 7. Forced App termination and host orphan audit remain **NOT VERIFIED**.
 8. **BLOCKED locally:** no local Linux container engine or WSL distribution.
 
-The result is a failed Phase 2A-1 run with useful positive partial evidence. It
-does not establish absence of the renderer sandbox and it does not permit entry
-into Phase 2A-2.
+Attempt 3 is a successful sandbox and cleanup run with an unidentified
+functional failure. It does not permit entry into Phase 2A-2.
 
 ## 15. Security deviations
 
@@ -552,14 +592,17 @@ inconsistently aggregated properties remain uncertainty rather than compliance.
 The following findings block Phase 2A-1 `PASS`, Phase 2A-1
 `PASS WITH CONDITIONS`, and entry into Phase 2A-2:
 
-1. The browser/DevTools disconnect cause remains **OPEN / NEEDS VERIFICATION**.
-2. The NUL-aware process-title classifier has not run on the target, so the
-   aggregate fail-closed sandbox result has not passed.
-3. Effective capabilities, AppArmor status, mounts and Supervisor namespace
+1. The exact failed functional case, action milestone and exception in attempt
+   3 remain **OPEN / NEEDS VERIFICATION**.
+2. All functional cases have not passed on the target.
+3. The cause of the earlier browser/DevTools disconnect remains **OPEN / NEEDS
+   VERIFICATION** unless attempt 3's detailed case evidence resolves it.
+4. Effective capabilities, AppArmor status, mounts and Supervisor namespace
    configuration have not been fully inspected.
-4. Required `/tmp` and `/dev/shm` sizes have not been established.
-5. Complete PSS evidence and final resource sizing have not been established.
-6. Forced App termination and host-side orphan auditing have not been performed.
+5. Required `/tmp` and `/dev/shm` sizes have not been established, although
+   exhaustion was not observed.
+6. Complete PSS evidence and final resource sizing have not been established.
+7. Forced App termination and host-side orphan auditing have not been performed.
 
 No prohibited capability requirement was discovered. That statement is limited
 to static design; it is not experimental proof that none will be needed.
@@ -589,7 +632,11 @@ to static design; it is not experimental proof that none will be needed.
 | `git status` branch check | `phase2a/runtime-verification` | LOCALLY TESTED |
 | Direct Alpine package metadata retrieval | Matching browser/driver `152.0.7977.82-r0`, x86_64, same origin and commit | STATICALLY VERIFIED |
 | Docker/Podman/nerdctl/WSL environment inventory | No usable Linux container runtime | LOCALLY TESTED |
-| Latest HA OS App runtime result | Functional FAIL, cleanup PASS, aggregate sandbox result invalidated by classifier defect | HA OS VERIFIED result; interpretation corrected above |
+| Attempt 3 renderer classification | Three renderers | CONFIRMED / HA OS VERIFIED |
+| Attempt 3 sandbox | `sandbox.verified: true` | CONFIRMED / HA OS VERIFIED |
+| Attempt 3 cleanup | `cleanup_verified: true` | CONFIRMED / HA OS VERIFIED |
+| Attempt 3 security deviations | Empty | CONFIRMED / HA OS VERIFIED |
+| Attempt 3 functional result | `functional_cases_passed: false`; exact case absent from retained evidence | CONFIRMED aggregate; case OPEN |
 
 The local Python compilation created only ignored bytecode cache files; those
 files were removed immediately and are not part of the proposed repository
@@ -602,13 +649,13 @@ diff.
 - [x] Build and start the image on the target after the APK assertion fix.
 - [x] Confirm the installed Chromium/ChromeDriver/Selenium versions from the
       target build and probe output.
-- [ ] Deploy the NUL-aware corrected probe using only `config.yaml`, `Dockerfile`,
+- [x] Deploy the NUL-aware corrected probe using only `config.yaml`, `Dockerfile`,
       `requirements.lock` and `runtime_probe.py`.
 - [ ] Inspect the effective deployed App configuration, mounts, AppArmor,
       network/PID/IPC modes and capabilities.
 - [ ] Run the synthetic probe again and retain its complete JSON output and exit
       code, including verbose driver/browser logs and all action milestones.
-- [ ] Confirm `sandbox.verified: true` with process-level evidence.
+- [x] Confirm `sandbox.verified: true` with process-level evidence.
 - [ ] Review `/tmp`, `/dev/shm`, RSS, CPU, startup, process and disk values.
 - [ ] Execute a separately reviewed forced-termination test and host-side orphan
       process audit.
@@ -617,4 +664,4 @@ diff.
 
 ## Phase 2A-1 Decision
 
-FAIL — NUL-AWARE PHASE 2A-1 REPEAT REQUIRED
+FAIL — FUNCTIONAL CASE IDENTIFICATION AND REPEAT REQUIRED

@@ -872,6 +872,50 @@ def evaluate_sandbox(cases: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def summarize_functional_failures(
+    cases: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for case_name, case in cases.items():
+        if case.get("action_passed"):
+            continue
+        error_snapshot = next(
+            (
+                snapshot
+                for snapshot in reversed(case.get("process_snapshots", []))
+                if snapshot.get("stage") == "action_error"
+            ),
+            {"processes": []},
+        )
+        error_processes = error_snapshot.get("processes", [])
+        progress = case.get("action_progress", [])
+        failures.append(
+            {
+                "case": case_name,
+                "webdriver_started": bool(case.get("webdriver_started")),
+                "renderer_discovery": case.get("renderer_discovery"),
+                "last_action_milestone": progress[-1] if progress else None,
+                "error": case.get("error"),
+                "browser_pids_at_action_error": [
+                    process["pid"]
+                    for process in error_processes
+                    if is_chromium_process(process) and process_type(process) is None
+                ],
+                "renderer_pids_at_action_error": [
+                    process["pid"]
+                    for process in error_processes
+                    if is_chromium_process(process)
+                    and process_type(process) == "renderer"
+                ],
+                "chromedriver_returncode_before_cleanup": case.get(
+                    "chromedriver_returncode_before_cleanup"
+                ),
+                "cleanup_verified": case.get("cleanup", {}).get("verified"),
+            }
+        )
+    return failures
+
+
 def main() -> int:
     started = time.monotonic()
     result: dict[str, Any] = {
@@ -938,6 +982,7 @@ def main() -> int:
     result["functional_cases_passed"] = all(
         case.get("action_passed") for case in result["cases"].values()
     )
+    result["functional_failures"] = summarize_functional_failures(result["cases"])
     result["case_policy_verified"] = all(
         not case.get("preexisting_browser_pids")
         and not case.get("forbidden_arguments")
