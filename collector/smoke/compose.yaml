@@ -1,0 +1,55 @@
+name: cez-pnd-collector-offline-smoke
+
+services:
+  collector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: cez-pnd-collector-service:offline-smoke
+    user: "2000:2000"
+    read_only: true
+    restart: "no"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=2000,gid=2000,mode=0700
+    volumes:
+      - ./runtime/data:/data:ro
+    networks:
+      - smoke
+
+  smoke-client:
+    image: cez-pnd-collector-service:offline-smoke
+    user: "2000:2000"
+    read_only: true
+    restart: "no"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 128m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=2000,gid=2000,mode=0700
+    depends_on:
+      - collector
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /opt/collector-venv/bin/python
+    command:
+      - /opt/smoke/smoke_client.py
+    volumes:
+      - ./smoke_client.py:/opt/smoke/smoke_client.py:ro
+      - ./runtime/client:/smoke/client:ro
+      - ./runtime/data/tls/server.crt:/smoke/ca.crt:ro
+    networks:
+      - smoke
+
+networks:
+  smoke:
+    internal: true
