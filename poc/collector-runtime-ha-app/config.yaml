@@ -1,0 +1,38 @@
+name: "CEZ PND Collector Runtime Gate"
+version: "0.1.0"
+slug: cez_pnd_collector_runtime_gate
+description: "Offline Debian Chromium runtime and sandbox feasibility gate."
+url: "https://github.com/dracoanus/home-assistant-cez-pnd"
+arch:
+  - amd64
+image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector-runtime"
+startup: once
+boot: manual
+init: false
+stage: experimental
+host_network: false
+host_pid: false
+host_ipc: false
+host_uts: false
+host_dbus: false
+hassio_api: false
+homeassistant_api: false
+auth_api: false
+docker_api: false
+full_access: false
+apparmor: true
+audio: false
+video: false
+gpio: false
+usb: false
+uart: false
+udev: false
+devicetree: false
+kernel_modules: false
+realtime: false
+journald: false
+ingress: false
+stdin: false
+options: {}
+schema: {}
+

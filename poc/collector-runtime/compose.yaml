@@ -1,0 +1,18 @@
+services:
+  collector-runtime:
+    build:
+      context: .
+    platform: linux/amd64
+    image: cez-pnd-collector-runtime:local
+    user: "2000:2000"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    shm_size: 512m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,uid=2000,gid=2000,mode=1777
+    stop_grace_period: 10s
