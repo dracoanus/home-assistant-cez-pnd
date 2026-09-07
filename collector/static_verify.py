@@ -16,6 +16,9 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 WORKFLOW = (
     REPOSITORY_ROOT / ".github" / "workflows" / "publish-collector-service.yaml"
 ).read_text(encoding="utf-8")
+VALIDATION_WORKFLOW = (
+    REPOSITORY_ROOT / ".github" / "workflows" / "validate-collector-service.yaml"
+).read_text(encoding="utf-8")
 SMOKE_COMPOSE = (ROOT / "smoke" / "compose.yaml").read_text(encoding="utf-8")
 SMOKE_CLIENT = (ROOT / "smoke" / "smoke_client.py").read_text(encoding="utf-8")
 SMOKE_PREPARE = (ROOT / "smoke" / "prepare_material.sh").read_text(encoding="utf-8")
@@ -89,8 +92,24 @@ assert "sbom: true" in WORKFLOW
 assert "provenance: mode=max" in WORKFLOW
 assert "Refuse to overwrite immutable tags" in WORKFLOW
 assert ":latest" not in WORKFLOW
-for uses in re.findall(r"^\s*uses:\s*([^\s]+)", WORKFLOW, re.MULTILINE):
+for uses in re.findall(
+    r"^\s*uses:\s*([^\s]+)", WORKFLOW + "\n" + VALIDATION_WORKFLOW, re.MULTILINE
+):
     assert re.search(r"@[0-9a-f]{40}$", uses), f"unpinned action: {uses}"
+
+assert "pull_request:" in VALIDATION_WORKFLOW
+assert "      - main" in VALIDATION_WORKFLOW
+assert '      - "poc/phase2a-runtime/**"' in VALIDATION_WORKFLOW
+assert "permissions:\n  contents: read" in VALIDATION_WORKFLOW
+assert "runs-on: ubuntu-latest" in VALIDATION_WORKFLOW
+assert "python3 collector/ci_validate.py" in VALIDATION_WORKFLOW
+assert "python3 -m unittest discover -s collector/tests -v" in VALIDATION_WORKFLOW
+assert "python3 collector/static_verify.py" in VALIDATION_WORKFLOW
+assert "python3 -m compileall" in VALIDATION_WORKFLOW
+assert "git diff --check" in VALIDATION_WORKFLOW
+assert "Psych.parse_file" in VALIDATION_WORKFLOW
+for forbidden in ("privileged", "docker build", "selenium", "pnd.cez"):
+    assert forbidden not in VALIDATION_WORKFLOW
 
 for forbidden in (
     "network_mode:",
@@ -143,3 +162,4 @@ print("PASS: no CEZ hosts, browser control, commands, or sandbox weakening")
 print("PASS: missing measurement is null, never synthesized zero")
 print("PASS: immutable GHCR workflow retains SBOM and provenance")
 print("PASS: isolated non-root offline container smoke profile")
+print("PASS: PR validation workflow is read-only, pinned, and offline")
