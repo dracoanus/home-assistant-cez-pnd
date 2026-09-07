@@ -1,0 +1,119 @@
+name: Publish Collector service skeleton
+
+on:
+  push:
+    tags:
+      - "collector-service-v*"
+
+concurrency:
+  group: collector-service-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/dracoanus/home-assistant-cez-pnd-collector
+
+jobs:
+  publish:
+    name: Verify, build and publish amd64 image
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate immutable release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#collector-service-v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must be collector-service-vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if [[ "${version}" != "$(cat collector/VERSION)" ]]; then
+            echo "Tag version does not match collector/VERSION" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "version_tag=${IMAGE}:${version}" >> "${GITHUB_OUTPUT}"
+          echo "sha_tag=${IMAGE}:sha-${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run service tests and static security verification
+        env:
+          PYTHONPATH: collector
+        run: |
+          python3 -m unittest discover -s collector/tests -v
+          python3 collector/static_verify.py
+          python3 -m compileall -q collector/collector_service collector/tests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite immutable tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in "${{ steps.release.outputs.version_tag }}" "${{ steps.release.outputs.sha_tag }}"; do
+            if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+              echo "Refusing to overwrite existing image tag: ${tag}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build and publish with SBOM and provenance
+        id: publish
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: ./collector
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.release.outputs.version_tag }}
+            ${{ steps.release.outputs.sha_tag }}
+          labels: |
+            io.hass.type=app
+            io.hass.name=CEZ PND Collector
+            io.hass.description=Authenticated local Collector API
+            io.hass.url=https://github.com/dracoanus/home-assistant-cez-pnd
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          cache-from: type=gha,scope=cez-pnd-collector-amd64
+          cache-to: type=gha,mode=max,scope=cez-pnd-collector-amd64
+          sbom: true
+          provenance: mode=max
+
+      - name: Record immutable image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > image-digest.txt <<EOF
+          image=${IMAGE}
+          version_tag=${{ steps.release.outputs.version_tag }}
+          sha_tag=${{ steps.release.outputs.sha_tag }}
+          digest=${{ steps.publish.outputs.digest }}
+          immutable_reference=${IMAGE}@${{ steps.publish.outputs.digest }}
+          EOF
+          cat image-digest.txt
+          cat image-digest.txt >> "${GITHUB_STEP_SUMMARY}"
+          docker buildx imagetools inspect "${IMAGE}@${{ steps.publish.outputs.digest }}"
+
+      - name: Retain image digest artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: collector-service-${{ steps.release.outputs.version }}-digest
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 90

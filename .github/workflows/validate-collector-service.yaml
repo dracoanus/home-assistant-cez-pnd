@@ -1,0 +1,65 @@
+name: Validate Collector service
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "README.md"
+      - "collector/**"
+      - "docs/**"
+      - "poc/collector-runtime/**"
+      - "poc/phase2a-runtime/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Collector service validation
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed-file policy and Markdown links
+        run: python3 collector/ci_validate.py --base "${BASE_SHA}" --head "${HEAD_SHA}"
+
+      - name: Validate changed YAML syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' yaml_files < <(
+            git diff --name-only --diff-filter=ACMR -z \
+              "${BASE_SHA}...${HEAD_SHA}" -- '*.yaml' '*.yml'
+          )
+          if (( ${#yaml_files[@]} )); then
+            ruby -e 'require "yaml"; ARGV.each { |path| Psych.parse_file(path) }' \
+              "${yaml_files[@]}"
+          fi
+
+      - name: Check diff whitespace
+        run: git diff --check "${BASE_SHA}...${HEAD_SHA}"
+
+      - name: Compile Collector Python
+        run: >-
+          python3 -m compileall -q
+          collector/collector_service
+          collector/tests
+          collector/smoke/smoke_client.py
+          collector/ci_validate.py
+
+      - name: Run Collector unit and regression tests
+        env:
+          PYTHONPATH: collector
+        run: python3 -m unittest discover -s collector/tests -v
+
+      - name: Run static security verification
+        run: python3 collector/static_verify.py
