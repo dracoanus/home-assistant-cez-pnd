@@ -1,31 +1,34 @@
 # Phase 2B Collector Home Assistant App
 
-Status: **0.2.0 HA OS DEPLOYMENT GATE FAILED CLOSED / 0.2.1 HOTFIX UNDER
-REVIEW**. The `0.2.0` image was installed and given synthetic offline
-configuration on the target, but its first start failed before the HTTPS
-listener because the Collector used the wrong Supervisor self-info API path.
-Candidate `0.2.1` changes only that endpoint. This document defines the
+Status: **0.2.1 HA OS DEPLOYMENT GATE FAILED CLOSED / RUNTIME BOOTSTRAP
+DIAGNOSIS REQUIRED**. The `0.2.0` first start failed before the HTTPS listener
+because the Collector used the wrong Supervisor self-info API path. Release
+`0.2.1` corrected that path, installed in place, and did not reproduce the
+Supervisor permission error, but it still failed closed with
+`invalid_private_configuration` before listener startup. This document defines the
 production-oriented App wrapper and records the CEZ-independent deployment
 gate. It does not authorize CEZ access or implement a Home Assistant
 integration.
 
-## Selected release candidate
+## Published deployment baseline
 
-The hotfix candidate is Collector service version `0.2.1`. It retains the Home
+The published Collector service version tested on HA OS is `0.2.1`. It retains the Home
 Assistant-specific configuration bootstrap and API schema `1.0`. The App
-manifest `version` and immutable GHCR tag must match. A future reviewed release
-workflow run must publish only:
+manifest `version` and immutable GHCR tag match. The reviewed release workflow
+published only:
 
 - `ghcr.io/dracoanus/home-assistant-cez-pnd-collector:0.2.1`; and
 - `ghcr.io/dracoanus/home-assistant-cez-pnd-collector:sha-<commit>`.
 
 The release workflow retains amd64-only Buildx output, cache reuse, SBOM,
 `provenance: mode=max`, immutable-tag refusal, and a digest artifact. It never
-publishes `latest`. The immutable `0.2.0` image remains at manifest digest
+publishes `latest`. Release `0.2.1` was published from commit
+`ac49a41d39b262ba186b25dfb6ad745ba7fb3616` at immutable manifest digest
+`sha256:95260dac7385fb618a878c3cce0ba26093ea69d3bf747b1a766707ed9e14787a`.
+The immutable `0.2.0` image remains at manifest digest
 `sha256:70015c4f5d649bb3a44ff67ced7e9f4eeeb558186e012c515e58746337e1cd82`.
-Candidate `0.2.1` is not yet published. The App has no Dockerfile, so
-Supervisor must pull the prebuilt image and cannot build Chromium or Python
-during installation.
+The App has no Dockerfile, so Supervisor pulls the prebuilt image and cannot
+build Chromium or Python during installation.
 
 ## Architecture and trust boundaries
 
@@ -144,7 +147,7 @@ integration performs the same check without copying CEZ credentials.
 | Control | Manifest/image setting | Status |
 | --- | --- | --- |
 | Runtime identity | Image `USER 2000:2000`; startup fails on mismatch | REQUIRED; verify on HA OS |
-| Prebuilt image | Generic GHCR image plus manifest version `0.2.1` | REQUIRED; image must exist before install |
+| Prebuilt image | Generic GHCR image plus candidate manifest version `0.2.2` | REQUIRED; image must exist before install |
 | AppArmor | `apparmor: true`, protected mode retained | REQUIRED; effective profile verify on HA OS |
 | Host namespaces | all host network/PID/IPC/UTS/D-Bus flags false | REQUIRED |
 | Privilege/API | no privileged list; `full_access`, API, Docker, ingress and hardware flags false | REQUIRED |
@@ -163,7 +166,7 @@ The already accepted HA OS Runtime Gate evidence positively established the
 Chromium renderer's own `Seccomp=2`, `NoNewPrivs=1`, empty effective
 capabilities, and separate user/PID/network namespaces. This wrapper neither
 changes Chromium arguments nor adds capabilities. Effective controls must be
-reconfirmed for the future `0.2.1` image.
+reconfirmed for any future `0.2.2` image.
 
 ## HA OS deployment and connectivity gate
 
@@ -291,12 +294,101 @@ App remains stopped. The temporary offline token and TLS material are retained
 outside the repository under restricted local access solely for the controlled
 repeat; they are not production pairing material.
 
+## HA OS 0.2.1 deployment result
+
+The in-place update and first-start gate were executed on 8 September 2026
+with Home Assistant OS `18.2`, Supervisor `2026.08.0`, Home Assistant Core
+`2026.9.1`, and amd64 `qemux86-64`. Only synthetic offline configuration was
+present. No CEZ host was contacted, and no CEZ credential or browser
+automation was introduced.
+
+Supervisor refreshed the repository, offered version `0.2.1`, and updated the
+installed App from `0.2.0` to `0.2.1`. Its log recorded the versioned GHCR
+image download and successful update. No local Docker build occurred. The
+observed records did not expose the resolved target manifest digest, so target
+resolution to the published `0.2.1` digest remains unverified.
+
+The meter identifier and bearer-token verifier remained populated and
+schema-shaped after the update. The certificate and private-key options
+remained masked by the Supervisor UI, and the configuration page had no
+unsaved changes. No option value was exposed during this review. The App
+remained stopped before the authorized first start.
+
+Supervisor started the prebuilt `0.2.1` image and then recorded that CEZ PND
+Collector exited with non-zero code `1`. The Collector emitted only:
+
+```json
+{"event":"startup_failed","code":"invalid_private_configuration"}
+```
+
+The `0.2.0` Supervisor errors `missing API permission for /apps/self/info` and
+`Invalid token for access /apps/self/info` did not recur. This is **SUPPORTED
+BY EVIDENCE** that the original unversioned-path authorization defect was
+corrected. A successful HTTP result for `/v2/apps/self/info` was not surfaced
+independently, so successful self-info retrieval is not yet confirmed. The
+remaining failure occurred before a TLS context or HTTPS listener was
+reported. Its exact stage and cause are **OPEN / NEEDS VERIFICATION**; the
+bounded public log code does not distinguish response validation, option
+decoding, or TLS configuration failures.
+
+Per the fail-closed gate, no second start, HTTPS request, endpoint test,
+restart test, or shutdown test was attempted. The UI subsequently reported
+version `0.2.1` in error state with the Start control available, confirming
+that the App was stopped.
+
+| Gate item | Result | Evidence / limitation |
+| --- | --- | --- |
+| Repository refresh and update offer | **PASS** | Supervisor offered and installed App version `0.2.1`. |
+| In-place update | **PASS** | Supervisor recorded update from GHCR tag `0.2.0` to `0.2.1` and successful image update. |
+| No local build | **PASS** | The Supervisor record shows a registry image download; the App contains no Dockerfile. |
+| Exact immutable pulled digest | **OPEN / NEEDS VERIFICATION** | The target UI/log identified tag `0.2.1`, not resolved digest `sha256:95260dac7385fb618a878c3cce0ba26093ea69d3bf747b1a766707ed9e14787a`. |
+| Option schema and unsaved state | **PASS** | Existing options were accepted and the configuration page showed no pending change. |
+| Option persistence through update | **PARTIAL** | Meter ID and verifier remained populated; certificate and key fields remained intentionally redacted, and bootstrap did not complete. |
+| Permission manifest | **PASS FOR DECLARED CONFIGURATION** | Version `0.2.1` retains `hassio_api: false`, `full_access: false`, no host networking, ports, added mounts, devices, or capabilities. Effective runtime inspection was blocked. |
+| Runtime UID/GID | **PASS BY APPLICATION CONTROL PATH** | Execution reached `invalid_private_configuration`, which follows the fail-closed UID/GID `2000:2000` check. Independent inspection was not completed. |
+| Supervisor v2 self-info authorization | **SUPPORTED / NOT CONFIRMED** | The prior permission and invalid-token errors did not recur, but an independent successful HTTP result was unavailable. |
+| Collector bootstrap | **FAIL** | The process emitted `startup_failed` / `invalid_private_configuration` and exited with code `1`. |
+| TLS context | **OPEN / NOT CONFIRMED** | The bounded failure code covers both option/TLS validation and later listener setup; no positive TLS-context milestone exists. |
+| HTTPS listener | **BLOCKED / NOT STARTED** | No `service_started` event was emitted and the process exited. |
+| HTTPS authentication 401/401/200 | **BLOCKED / NOT RUN** | The App had no listener. |
+| Status and measurement endpoints | **BLOCKED / NOT RUN** | The App had no listener. |
+| Effective capabilities, AppArmor, namespaces, mounts, tmpfs, rootfs, NNP and PID limit | **OPEN / NOT OBSERVED** | The process exited before independent inspection. |
+| Restart and normal shutdown gates | **BLOCKED / NOT RUN** | The gate stopped after the first-start failure. |
+| Secret-safe logging | **PASS FOR OBSERVED RECORDS** | App and Supervisor records exposed no Supervisor token, bearer token, verifier, TLS body/key, or option value. |
+
+The overall deployment gate result is **FAIL / BLOCKED** for Collector
+`0.2.1`. The result does not justify any permission expansion or security
+workaround. Diagnose the private-configuration bootstrap offline, publish a
+separately reviewed immutable fix if required, and repeat the first-start gate.
+The App remains stopped.
+
+## Collector 0.2.2 diagnostic scope
+
+Candidate `0.2.2` preserves the complete `0.2.1` failure evidence and changes
+only private-configuration diagnostics. Configuration failures are represented
+by an allowlisted fixed code for Supervisor token/request/response validation,
+token-verifier validation, missing or invalid TLS option encoding/size, TLS
+context creation, temporary TLS files, positively identified key mismatch,
+generic SSL context loading, and fixed-file configuration. Exception text and
+all configuration values remain excluded from logs.
+
+Python's `SSLContext.load_cert_chain` does not reliably identify whether every
+generic PEM parsing failure belongs to the certificate or private key. The
+Collector therefore reports `private_config_ssl_context_load_failed` unless
+OpenSSL positively supplies `KEY_VALUES_MISMATCH`; it does not infer a more
+specific cause. Unknown configuration/listener exceptions retain the existing
+generic fail-closed code. This diagnostic candidate requires a new immutable
+`0.2.2` image before any manual HA OS retry.
+
 ## OPEN / NEEDS VERIFICATION
 
 - The exact immutable manifest digest resolved by Supervisor during the
   observed tagged-image pull.
-- Successful option retrieval from `/v2/apps/self/info` without `hassio_api`
-  after a reviewed corrective release.
+- A positively observed successful HTTP result from `/v2/apps/self/info`
+  without `hassio_api`; the old authorization error did not recur in the
+  `0.2.1` run, but bootstrap still failed generically.
+- The exact `invalid_private_configuration` failure stage and root cause in
+  release `0.2.1`.
 - Persistence of the two redacted TLS options across restart.
 - Actual `/data` owner/mode, UID-2000 access, controlled file creation, restart,
   update, backup and restore behavior.

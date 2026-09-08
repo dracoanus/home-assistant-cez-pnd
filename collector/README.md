@@ -33,8 +33,9 @@ Selenium.
   They do not contain headers, query strings, tokens, measurement values, DOM,
   screenshots, or process details.
 
-Version `0.2.1` retains the experimental HA OS deployment bootstrap and changes
-only its fixed authenticated self-info endpoint to the Supervisor v2 App path.
+Version `0.2.2` retains the experimental HA OS deployment bootstrap and its
+fixed authenticated self-info endpoint at the Supervisor v2 App path. It adds
+only allowlisted, non-secret private-configuration failure-stage codes.
 The non-root service retrieves only its own Supervisor-managed App options.
 Options hold a token SHA-256 verifier, never the plaintext bearer token, plus
 the TLS certificate/private key. TLS material is loaded through mode-0600 files
@@ -80,5 +81,5 @@ published host port, exercises the three API routes, and verifies graceful
 shutdown. It is not a production configuration or pairing design.
 
 The prepared production-oriented App manifest references the future immutable
-`0.2.1` GHCR image and exposes no host port. This change does not publish the
+`0.2.2` GHCR image and exposes no host port. This change does not publish the
 image; publication requires a separate review.
