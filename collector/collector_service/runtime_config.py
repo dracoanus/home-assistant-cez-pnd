@@ -19,7 +19,7 @@ from .api import EXPECTED_SCOPES, TokenVerifier
 from .security_files import descriptor_path, open_verified_file
 
 
-SUPERVISOR_SELF_INFO_URL = "http://supervisor/v2/apps/self/info"
+SUPERVISOR_SELF_INFO_URL = "http://supervisor/addons/self/info"
 TOKEN_VERIFIER_FILE = Path("/data/auth/client.json")
 TLS_CERT_FILE = Path("/data/tls/server.crt")
 TLS_KEY_FILE = Path("/data/tls/server.key")

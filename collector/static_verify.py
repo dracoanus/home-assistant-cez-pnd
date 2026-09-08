@@ -43,7 +43,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.2.2"
+assert VERSION == "0.2.3"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
@@ -95,10 +95,11 @@ assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
 assert '"event":"service_stopped"' in SOURCE
 assert (
-    'SUPERVISOR_SELF_INFO_URL = "http://supervisor/v2/apps/self/info"'
+    'SUPERVISOR_SELF_INFO_URL = "http://supervisor/addons/self/info"'
     in RUNTIME_CONFIG_SOURCE
 )
 assert '"http://supervisor/apps/self/info"' not in RUNTIME_CONFIG_SOURCE
+assert '"http://supervisor/v2/apps/self/info"' not in RUNTIME_CONFIG_SOURCE
 assert "class PrivateConfigurationError(ValueError)" in RUNTIME_CONFIG_SOURCE
 assert "PRIVATE_CONFIGURATION_ERROR_CODES = frozenset" in RUNTIME_CONFIG_SOURCE
 for required_code in (
@@ -229,7 +230,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.2.2"',
+    'version: "0.2.3"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
