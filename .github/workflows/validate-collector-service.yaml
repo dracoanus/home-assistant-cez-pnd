@@ -7,10 +7,12 @@ on:
     paths:
       - ".github/workflows/**"
       - "README.md"
+      - "cez_pnd_collector/**"
       - "collector/**"
       - "docs/**"
       - "poc/collector-runtime/**"
       - "poc/phase2a-runtime/**"
+      - "repository.yaml"
 
 permissions:
   contents: read

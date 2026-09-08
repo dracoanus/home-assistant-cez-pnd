@@ -5,21 +5,16 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
-from pathlib import Path
 import signal
 import socket
-import ssl
 import sys
 
-from .api import ApiResponse, CollectorApi, TokenVerifier
-from .security_files import descriptor_path, open_verified_file
+from .api import ApiResponse, CollectorApi
+from .runtime_config import load_runtime_configuration
 
 
 BIND_ADDRESS = "0.0.0.0"
 BIND_PORT = 8443
-TOKEN_VERIFIER_FILE = Path("/data/auth/client.json")
-TLS_CERT_FILE = Path("/data/tls/server.crt")
-TLS_KEY_FILE = Path("/data/tls/server.key")
 MAX_RESPONSE_BYTES = 1024 * 1024
 
 
@@ -91,18 +86,11 @@ def main() -> int:
         print('{"event":"startup_failed","code":"non_root_identity_mismatch"}', file=sys.stderr)
         return 1
     try:
-        verifier = TokenVerifier.from_file(TOKEN_VERIFIER_FILE)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        with open_verified_file(TLS_CERT_FILE, private=False) as cert_descriptor:
-            with open_verified_file(TLS_KEY_FILE, private=True) as key_descriptor:
-                context.load_cert_chain(
-                    descriptor_path(cert_descriptor), descriptor_path(key_descriptor)
-                )
+        configuration = load_runtime_configuration()
         server = CollectorHttpServer((BIND_ADDRESS, BIND_PORT), CollectorRequestHandler)
-        server.collector_api = CollectorApi(verifier)  # type: ignore[attr-defined]
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-    except (OSError, ValueError, json.JSONDecodeError, ssl.SSLError):
+        server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
+        server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
+    except (OSError, ValueError, json.JSONDecodeError):
         print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
         return 1
 
@@ -113,6 +101,7 @@ def main() -> int:
                 "bind": BIND_ADDRESS,
                 "port": BIND_PORT,
                 "transport": "https",
+                "configuration_source": configuration.source,
             },
             separators=(",", ":"),
         ),

@@ -18,8 +18,9 @@ Selenium.
 ## Runtime boundary
 
 - The container remains UID/GID `2000:2000`.
-- HTTPS is mandatory. Startup fails unless `/data/tls/server.crt` and the
-  UID-2000-owned mode-0600 `/data/tls/server.key` are valid.
+- HTTPS is mandatory. Outside HA OS, startup fails unless
+  `/data/tls/server.crt` and the UID-2000-owned mode-0600
+  `/data/tls/server.key` are valid. The HA App path is described below.
 - The API token is presented only as an `Authorization: Bearer` header. The
   server stores a SHA-256 verifier, not the token, in the UID-2000-owned
   mode-0600 `/data/auth/client.json` file.
@@ -32,11 +33,18 @@ Selenium.
   They do not contain headers, query strings, tokens, measurement values, DOM,
   screenshots, or process details.
 
-Token generation, authenticated pairing, rotation, revocation, TLS identity
-provisioning, and HA App `/data` ownership behavior remain **OPEN / NEEDS
-VERIFICATION**. This skeleton deliberately refuses to start without externally
-prepared private configuration; it does not invent the unresolved pairing
-workflow.
+Version `0.2.0` adds an experimental HA OS deployment bootstrap. The non-root
+service retrieves only its own Supervisor-managed App options through the
+fixed authenticated self-info endpoint. Options hold a token SHA-256 verifier,
+never the plaintext bearer token, plus the TLS certificate/private key. TLS
+material is loaded through mode-0600 files on `/tmp` and unlinked before the
+listener starts. The fixed-file mode remains available to the isolated
+Synology smoke profile.
+
+Production pairing, rotation/revocation UX, TLS issuance and renewal, and HA
+App `/data` ownership/backup behavior remain **OPEN / NEEDS VERIFICATION**.
+The complete design and gate are in the
+[Collector HA App plan](../docs/phase2b-collector-ha-app.md).
 
 ## API
 
@@ -71,6 +79,6 @@ short-lived test-only TLS and bearer material, starts this image without a
 published host port, exercises the three API routes, and verifies graceful
 shutdown. It is not a production configuration or pairing design.
 
-No production installation is defined yet. The service release workflow
-publishes reviewed tags to GHCR; a separately reviewed Home Assistant App
-manifest will reference that prebuilt image and expose no host port.
+The prepared production-oriented App manifest references the future immutable
+`0.2.0` GHCR image and exposes no host port. This change does not publish the
+image; publication requires a separate review.

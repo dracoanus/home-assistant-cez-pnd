@@ -28,13 +28,19 @@ SMOKE_GITIGNORE = (ROOT / "smoke" / ".gitignore").read_text(encoding="utf-8")
 PHASE2B_EVIDENCE = (
     REPOSITORY_ROOT / "docs" / "phase2b-collector-service-validation.md"
 ).read_text(encoding="utf-8")
+APP_DIRECTORY = REPOSITORY_ROOT / "cez_pnd_collector"
+APP_MANIFEST = (APP_DIRECTORY / "config.yaml").read_text(encoding="utf-8")
+APP_DOCUMENTATION = (APP_DIRECTORY / "DOCS.md").read_text(encoding="utf-8")
+HA_APP_VALIDATION = (
+    REPOSITORY_ROOT / "docs" / "phase2b-collector-ha-app.md"
+).read_text(encoding="utf-8")
 
 EXPECTED_BASE = (
     "FROM ghcr.io/dracoanus/home-assistant-cez-pnd-collector-runtime:0.1.0"
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.1.0"
+assert VERSION == "0.2.0"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
@@ -85,6 +91,15 @@ assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
 assert '"event":"service_stopped"' in SOURCE
+assert 'SUPERVISOR_SELF_INFO_URL = "http://supervisor/apps/self/info"' in SOURCE
+assert "HTTPRedirectHandler" in SOURCE
+assert "MAX_SUPERVISOR_RESPONSE_BYTES" in SOURCE
+assert "base64.b64decode(encoded, validate=True)" in SOURCE
+assert "api_token_sha256" in SOURCE
+assert "tls_private_key_b64" in SOURCE
+assert 'source="supervisor_self_info"' in SOURCE
+assert "tempfile.mkstemp" in SOURCE and "os.fchmod(descriptor, 0o600)" in SOURCE
+assert "os.unlink(path)" in SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW
@@ -108,6 +123,8 @@ assert "python3 collector/static_verify.py" in VALIDATION_WORKFLOW
 assert "python3 -m compileall" in VALIDATION_WORKFLOW
 assert "git diff --check" in VALIDATION_WORKFLOW
 assert "Psych.parse_file" in VALIDATION_WORKFLOW
+assert '      - "cez_pnd_collector/**"' in VALIDATION_WORKFLOW
+assert '      - "repository.yaml"' in VALIDATION_WORKFLOW
 for forbidden in ("privileged", "docker build", "selenium", "pnd.cez"):
     assert forbidden not in VALIDATION_WORKFLOW
 
@@ -147,6 +164,91 @@ assert "Missing measurement converted to zero | No, PASS" in PHASE2B_EVIDENCE
 assert "PIDs limit discarded" in PHASE2B_EVIDENCE
 assert "OPEN / NEEDS VERIFICATION on HA OS" in PHASE2B_EVIDENCE
 
+assert not (APP_DIRECTORY / "Dockerfile").exists()
+expected_manifest_keys = {
+    "name",
+    "version",
+    "slug",
+    "description",
+    "url",
+    "arch",
+    "image",
+    "startup",
+    "boot",
+    "init",
+    "stage",
+    "timeout",
+    "tmpfs",
+    "host_network",
+    "host_pid",
+    "host_ipc",
+    "host_uts",
+    "host_dbus",
+    "hassio_api",
+    "homeassistant_api",
+    "auth_api",
+    "docker_api",
+    "full_access",
+    "apparmor",
+    "audio",
+    "video",
+    "gpio",
+    "usb",
+    "uart",
+    "udev",
+    "devicetree",
+    "kernel_modules",
+    "realtime",
+    "ingress",
+    "stdin",
+    "options",
+    "schema",
+}
+manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
+assert manifest_keys == expected_manifest_keys
+for required in (
+    'name: "CEZ PND Collector"',
+    'version: "0.2.0"',
+    "slug: cez_pnd_collector",
+    "  - amd64",
+    'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
+    "stage: experimental",
+    "tmpfs: true",
+    "host_network: false",
+    "host_pid: false",
+    "host_ipc: false",
+    "host_uts: false",
+    "host_dbus: false",
+    "hassio_api: false",
+    "homeassistant_api: false",
+    "auth_api: false",
+    "docker_api: false",
+    "full_access: false",
+    "apparmor: true",
+    "ingress: false",
+):
+    assert required in APP_MANIFEST
+for forbidden in (
+    "ports:",
+    "map:",
+    "devices:",
+    "privileged:",
+    "SYS_ADMIN",
+    "NET_ADMIN",
+    "latest",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu-sandbox",
+):
+    assert forbidden not in APP_MANIFEST
+assert "api_token_sha256" in APP_MANIFEST
+assert "api_token:" not in APP_MANIFEST
+assert "tls_certificate_b64" in APP_MANIFEST
+assert "tls_private_key_b64" in APP_MANIFEST
+assert "plaintext bearer token" in APP_DOCUMENTATION
+assert "PREPARED / HA OS RUNTIME VERIFICATION REQUIRED" in HA_APP_VALIDATION
+assert "Core-origin connectivity remains OPEN" in HA_APP_VALIDATION
+
 for path in SOURCE_FILES:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
@@ -163,3 +265,5 @@ print("PASS: missing measurement is null, never synthesized zero")
 print("PASS: immutable GHCR workflow retains SBOM and provenance")
 print("PASS: isolated non-root offline container smoke profile")
 print("PASS: PR validation workflow is read-only, pinned, and offline")
+print("PASS: production App wrapper is prebuilt-image-only and least-privilege")
+print("PASS: HA bootstrap stores only the API verifier and fails closed")

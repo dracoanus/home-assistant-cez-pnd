@@ -1,0 +1,46 @@
+name: "CEZ PND Collector"
+version: "0.2.0"
+slug: cez_pnd_collector
+description: "Authenticated CEZ PND Collector API (offline deployment-validation stage)."
+url: "https://github.com/dracoanus/home-assistant-cez-pnd"
+arch:
+  - amd64
+image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"
+startup: application
+boot: manual
+init: false
+stage: experimental
+timeout: 10
+tmpfs: true
+host_network: false
+host_pid: false
+host_ipc: false
+host_uts: false
+host_dbus: false
+hassio_api: false
+homeassistant_api: false
+auth_api: false
+docker_api: false
+full_access: false
+apparmor: true
+audio: false
+video: false
+gpio: false
+usb: false
+uart: false
+udev: false
+devicetree: false
+kernel_modules: false
+realtime: false
+ingress: false
+stdin: false
+options:
+  meter_id: null
+  api_token_sha256: null
+  tls_certificate_b64: null
+  tls_private_key_b64: null
+schema:
+  meter_id: "match(^mtr_[a-f0-9]{32}$)"
+  api_token_sha256: "match(^[a-f0-9]{64}$)"
+  tls_certificate_b64: password
+  tls_private_key_b64: password

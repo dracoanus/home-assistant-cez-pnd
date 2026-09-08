@@ -60,6 +60,12 @@ class TokenVerifier:
     @classmethod
     def from_file(cls, path: Path) -> TokenVerifier:
         raw = json.loads(read_private_file(path, maximum_bytes=4096).decode("utf-8"))
+        return cls.from_mapping(raw)
+
+    @classmethod
+    def from_mapping(cls, raw: object) -> TokenVerifier:
+        """Validate a token verifier supplied by a trusted configuration boundary."""
+
         if not isinstance(raw, dict) or set(raw) != {
             "schema_version",
             "token_sha256",
