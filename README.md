@@ -5,26 +5,27 @@ measurement data in Home Assistant. The planned architecture separates a
 credential-holding Collector App from a minimal Home Assistant custom
 integration that handles sensors and statistics.
 
-Current status: **runtime feasibility passed; Collector App deployment gate prepared**.
-The Debian Collector Runtime Gate passed on the actual HA OS amd64 target. The
-production CEZ collection flow and Home Assistant integration are not yet
-implemented or production ready.
+Current status: **runtime feasibility passed; Collector 0.2.0 deployment gate
+failed closed; 0.2.1 hotfix under review**. The Debian Collector Runtime Gate
+passed on the actual HA OS amd64 target. The production CEZ collection flow and
+Home Assistant integration are not yet implemented or production ready.
 
 ## Experimental runtime gate
 
 The existing **CEZ PND Collector Runtime Gate** App is retained as historical
-runtime evidence. The prepared **CEZ PND Collector** App uses a prebuilt
-Collector service image and synthetic offline data only. Version `0.2.0` must
-have a separately reviewed published image before that App can be installed.
+runtime evidence. The **CEZ PND Collector** App uses a prebuilt Collector
+service image and synthetic offline data only. Version `0.2.0` failed closed on
+the HA OS Supervisor self-info bootstrap. Candidate `0.2.1` changes only that
+endpoint and requires review, publication, and a repeated deployment gate.
 
 To add this repository in Home Assistant, open **Settings -> Apps -> App Store
 -> Repositories** and add:
 
 `https://github.com/dracoanus/home-assistant-cez-pnd`
 
-The App uses the public prebuilt image
-`ghcr.io/dracoanus/home-assistant-cez-pnd-collector-runtime:0.1.0`; Home
-Assistant does not build Chromium or Python during App installation.
+The App references the public prebuilt image repository
+`ghcr.io/dracoanus/home-assistant-cez-pnd-collector`; Home Assistant does not
+build Chromium or Python during App installation.
 ## Documentation
 
 - [Phase 1 analysis](docs/phase1-analysis.md)

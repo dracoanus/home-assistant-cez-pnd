@@ -12,6 +12,7 @@ import stat
 import tempfile
 import unittest
 from unittest import mock
+from urllib.error import URLError
 
 from collector_service.api import SYNTHETIC_METER_ID
 from collector_service import runtime_config
@@ -34,6 +35,16 @@ class _FakeResponse:
 
 
 class RuntimeConfigurationTest(unittest.TestCase):
+    def test_supervisor_self_info_url_is_exact_v2_app_route(self) -> None:
+        self.assertEqual(
+            runtime_config.SUPERVISOR_SELF_INFO_URL,
+            "http://supervisor/v2/apps/self/info",
+        )
+        executable_source = Path(runtime_config.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(
+            '"http://supervisor/apps/self/info"', executable_source
+        )
+
     def test_supervisor_redirect_is_rejected(self) -> None:
         handler = runtime_config._RejectRedirects()
         with self.assertRaisesRegex(ValueError, "redirected"):
@@ -49,15 +60,28 @@ class RuntimeConfigurationTest(unittest.TestCase):
         opener.open.return_value = _FakeResponse(payload)
         with mock.patch(
             "collector_service.runtime_config.build_opener", return_value=opener
-        ):
+        ) as build_opener_mock:
             options = runtime_config._read_supervisor_options("platform-token")
         self.assertEqual(options, {"safe": "value"})
         request = opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, runtime_config.SUPERVISOR_SELF_INFO_URL)
+        self.assertEqual(request.full_url, "http://supervisor/v2/apps/self/info")
         self.assertEqual(request.get_header("Authorization"), "Bearer platform-token")
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 5.0)
+        redirect_handler = build_opener_mock.call_args.args[0]
+        self.assertIsInstance(redirect_handler, runtime_config._RejectRedirects)
+
+    def test_supervisor_transport_failure_does_not_expose_token(self) -> None:
+        supervisor_token = "private-platform-token"
+        opener = mock.Mock()
+        opener.open.side_effect = URLError("offline")
+        with mock.patch(
+            "collector_service.runtime_config.build_opener", return_value=opener
+        ), self.assertRaises(ValueError) as raised:
+            runtime_config._read_supervisor_options(supervisor_token)
+        self.assertNotIn(supervisor_token, str(raised.exception))
 
     def test_supervisor_response_limit_and_token_shape_fail_closed(self) -> None:
+        self.assertEqual(runtime_config.MAX_SUPERVISOR_RESPONSE_BYTES, 256 * 1024)
         opener = mock.Mock()
         opener.open.return_value = _FakeResponse(
             b"x" * (runtime_config.MAX_SUPERVISOR_RESPONSE_BYTES + 1)
