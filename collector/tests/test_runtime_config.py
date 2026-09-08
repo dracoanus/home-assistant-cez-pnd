@@ -68,14 +68,17 @@ class RuntimeConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown private configuration"):
             runtime_config.PrivateConfigurationError("untrusted-dynamic-value")
 
-    def test_supervisor_self_info_url_is_exact_v2_app_route(self) -> None:
+    def test_supervisor_self_info_url_is_exact_v1_addon_route(self) -> None:
         self.assertEqual(
             runtime_config.SUPERVISOR_SELF_INFO_URL,
-            "http://supervisor/v2/apps/self/info",
+            "http://supervisor/addons/self/info",
         )
         executable_source = Path(runtime_config.__file__).read_text(encoding="utf-8")
         self.assertNotIn(
             '"http://supervisor/apps/self/info"', executable_source
+        )
+        self.assertNotIn(
+            '"http://supervisor/v2/apps/self/info"', executable_source
         )
 
     def test_supervisor_redirect_is_rejected(self) -> None:
@@ -97,7 +100,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             options = runtime_config._read_supervisor_options("platform-token")
         self.assertEqual(options, {"safe": "value"})
         request = opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, "http://supervisor/v2/apps/self/info")
+        self.assertEqual(request.full_url, "http://supervisor/addons/self/info")
         self.assertEqual(request.get_header("Authorization"), "Bearer platform-token")
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 5.0)
         redirect_handler = build_opener_mock.call_args.args[0]
