@@ -1,5 +1,5 @@
 name: "CEZ PND Collector"
-version: "0.2.0"
+version: "0.2.1"
 slug: cez_pnd_collector
 description: "Authenticated CEZ PND Collector API (offline deployment-validation stage)."
 url: "https://github.com/dracoanus/home-assistant-cez-pnd"

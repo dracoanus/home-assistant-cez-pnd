@@ -1,4 +1,4 @@
-# CEZ PND Collector App 0.2.0
+# CEZ PND Collector App 0.2.1
 
 This is an **experimental, offline deployment-validation release candidate**.
 It serves synthetic data only. It does not contact CEZ, accept CEZ
@@ -20,10 +20,12 @@ validation client must trust the issuing private CA or an explicitly reviewed
 certificate pin; disabling TLS verification is forbidden.
 
 The service reads its own Supervisor-managed options through the authenticated
-`/apps/self/info` endpoint because the non-root UID 2000 process cannot assume
-direct access to the Supervisor-owned mode-0600 `/data/options.json`. TLS PEM
-material is decoded into UID-2000-owned mode-0600 files on `/tmp`, loaded into
-OpenSSL, and immediately unlinked. The App enables Supervisor's `/tmp` tmpfs.
+v2 `/v2/apps/self/info` endpoint because the non-root UID 2000 process cannot
+assume direct access to the Supervisor-owned mode-0600 `/data/options.json`.
+Release `0.2.0` omitted the `/v2` prefix and failed closed before HTTPS startup;
+`0.2.1` changes only this endpoint. TLS PEM material is decoded into
+UID-2000-owned mode-0600 files on `/tmp`, loaded into OpenSSL, and immediately
+unlinked. The App enables Supervisor's `/tmp` tmpfs.
 
 This bootstrap is limited to HA OS deployment validation. Production pairing,
 automatic certificate issuance/renewal, token transfer to Home Assistant Core,

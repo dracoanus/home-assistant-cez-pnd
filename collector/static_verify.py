@@ -12,6 +12,9 @@ REPOSITORY_ROOT = ROOT.parent
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 SOURCE_FILES = sorted((ROOT / "collector_service").glob("*.py"))
 SOURCE = "\n".join(path.read_text(encoding="utf-8") for path in SOURCE_FILES)
+RUNTIME_CONFIG_SOURCE = (ROOT / "collector_service" / "runtime_config.py").read_text(
+    encoding="utf-8"
+)
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 WORKFLOW = (
     REPOSITORY_ROOT / ".github" / "workflows" / "publish-collector-service.yaml"
@@ -40,7 +43,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.2.0"
+assert VERSION == "0.2.1"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
@@ -91,9 +94,13 @@ assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
 assert '"event":"service_stopped"' in SOURCE
-assert 'SUPERVISOR_SELF_INFO_URL = "http://supervisor/apps/self/info"' in SOURCE
+assert (
+    'SUPERVISOR_SELF_INFO_URL = "http://supervisor/v2/apps/self/info"'
+    in RUNTIME_CONFIG_SOURCE
+)
+assert '"http://supervisor/apps/self/info"' not in RUNTIME_CONFIG_SOURCE
 assert "HTTPRedirectHandler" in SOURCE
-assert "MAX_SUPERVISOR_RESPONSE_BYTES" in SOURCE
+assert "MAX_SUPERVISOR_RESPONSE_BYTES = 256 * 1024" in RUNTIME_CONFIG_SOURCE
 assert "base64.b64decode(encoded, validate=True)" in SOURCE
 assert "api_token_sha256" in SOURCE
 assert "tls_private_key_b64" in SOURCE
@@ -208,7 +215,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.2.0"',
+    'version: "0.2.1"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -246,7 +253,13 @@ assert "api_token:" not in APP_MANIFEST
 assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
 assert "plaintext bearer token" in APP_DOCUMENTATION
-assert "PREPARED / HA OS RUNTIME VERIFICATION REQUIRED" in HA_APP_VALIDATION
+assert (
+    "0.2.0 HA OS DEPLOYMENT GATE FAILED CLOSED / 0.2.1 HOTFIX UNDER"
+    in HA_APP_VALIDATION
+)
+assert "missing API permission for /apps/self/info" in HA_APP_VALIDATION
+assert "http://supervisor/v2/apps/self/info" in HA_APP_VALIDATION
+assert "changes only the Supervisor self-info endpoint" in HA_APP_VALIDATION
 assert "Core-origin connectivity remains OPEN" in HA_APP_VALIDATION
 
 for path in SOURCE_FILES:

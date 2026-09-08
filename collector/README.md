@@ -33,13 +33,13 @@ Selenium.
   They do not contain headers, query strings, tokens, measurement values, DOM,
   screenshots, or process details.
 
-Version `0.2.0` adds an experimental HA OS deployment bootstrap. The non-root
-service retrieves only its own Supervisor-managed App options through the
-fixed authenticated self-info endpoint. Options hold a token SHA-256 verifier,
-never the plaintext bearer token, plus the TLS certificate/private key. TLS
-material is loaded through mode-0600 files on `/tmp` and unlinked before the
-listener starts. The fixed-file mode remains available to the isolated
-Synology smoke profile.
+Version `0.2.1` retains the experimental HA OS deployment bootstrap and changes
+only its fixed authenticated self-info endpoint to the Supervisor v2 App path.
+The non-root service retrieves only its own Supervisor-managed App options.
+Options hold a token SHA-256 verifier, never the plaintext bearer token, plus
+the TLS certificate/private key. TLS material is loaded through mode-0600 files
+on `/tmp` and unlinked before the listener starts. The fixed-file mode remains
+available to the isolated Synology smoke profile.
 
 Production pairing, rotation/revocation UX, TLS issuance and renewal, and HA
 App `/data` ownership/backup behavior remain **OPEN / NEEDS VERIFICATION**.
@@ -80,5 +80,5 @@ published host port, exercises the three API routes, and verifies graceful
 shutdown. It is not a production configuration or pairing design.
 
 The prepared production-oriented App manifest references the future immutable
-`0.2.0` GHCR image and exposes no host port. This change does not publish the
+`0.2.1` GHCR image and exposes no host port. This change does not publish the
 image; publication requires a separate review.

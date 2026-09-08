@@ -1,25 +1,31 @@
 # Phase 2B Collector Home Assistant App
 
-Status: **PREPARED / HA OS RUNTIME VERIFICATION REQUIRED**. This document
-defines the production-oriented App wrapper and a CEZ-independent deployment
-gate. It does not record a runtime PASS, publish an image, implement a Home
-Assistant integration, or authorize CEZ access.
+Status: **0.2.0 HA OS DEPLOYMENT GATE FAILED CLOSED / 0.2.1 HOTFIX UNDER
+REVIEW**. The `0.2.0` image was installed and given synthetic offline
+configuration on the target, but its first start failed before the HTTPS
+listener because the Collector used the wrong Supervisor self-info API path.
+Candidate `0.2.1` changes only that endpoint. This document defines the
+production-oriented App wrapper and records the CEZ-independent deployment
+gate. It does not authorize CEZ access or implement a Home Assistant
+integration.
 
 ## Selected release candidate
 
-The next Collector service version is `0.2.0`. This is a minor release because
-it adds a Home Assistant-specific configuration bootstrap while retaining API
-schema `1.0`. The App manifest `version` and immutable GHCR tag must match.
-The workflow must publish only:
+The hotfix candidate is Collector service version `0.2.1`. It retains the Home
+Assistant-specific configuration bootstrap and API schema `1.0`. The App
+manifest `version` and immutable GHCR tag must match. A future reviewed release
+workflow run must publish only:
 
-- `ghcr.io/dracoanus/home-assistant-cez-pnd-collector:0.2.0`; and
+- `ghcr.io/dracoanus/home-assistant-cez-pnd-collector:0.2.1`; and
 - `ghcr.io/dracoanus/home-assistant-cez-pnd-collector:sha-<commit>`.
 
-The workflow retains amd64-only Buildx output, cache reuse, SBOM,
+The release workflow retains amd64-only Buildx output, cache reuse, SBOM,
 `provenance: mode=max`, immutable-tag refusal, and a digest artifact. It never
-publishes `latest`. No tag, image, or release is created by this change. The App
-has no Dockerfile, so Supervisor must pull the prebuilt image and cannot build
-Chromium or Python during installation.
+publishes `latest`. The immutable `0.2.0` image remains at manifest digest
+`sha256:70015c4f5d649bb3a44ff67ced7e9f4eeeb558186e012c515e58746337e1cd82`.
+Candidate `0.2.1` is not yet published. The App has no Dockerfile, so
+Supervisor must pull the prebuilt image and cannot build Chromium or Python
+during installation.
 
 ## Architecture and trust boundaries
 
@@ -62,13 +68,19 @@ client. A future integration configuration flow will receive this limited API
 token and TLS trust material through an owner-mediated pairing flow; that flow
 is deliberately not implemented here.
 
-On HA OS, the UID-2000 service retrieves only its own options from the fixed
-`http://supervisor/apps/self/info` endpoint with the platform-provided
-Supervisor token. Current Supervisor source explicitly allows self-info without
-`hassio_api: true`; the App therefore requests neither Supervisor API nor Home
-Assistant API permission. Redirects, oversized responses, malformed JSON,
-missing options, invalid token verifiers, and invalid TLS material fail closed.
-The Supervisor token and option values are never logged.
+On HA OS, the UID-2000 service is intended to retrieve only its own options
+with the platform-provided Supervisor token. Release `0.2.0` incorrectly calls
+`http://supervisor/apps/self/info`. Supervisor `2026.08.0` rejected that path
+because the unversioned v1 policy permits `/addons/self/...`, while the v2
+policy permits `/v2/apps/self/...`. The narrow corrective path is therefore
+`http://supervisor/v2/apps/self/info`; enabling `hassio_api`, `full_access`, a
+broader role, or root is neither required nor acceptable. This finding is
+supported by the target Supervisor log and the current Supervisor security
+middleware at
+<https://github.com/home-assistant/supervisor/blob/main/supervisor/api/middleware/security.py>.
+Redirects, oversized responses, malformed JSON, missing options, invalid token
+verifiers, and invalid TLS material must continue to fail closed. The
+Supervisor token and option values must never be logged.
 
 TLS PEM values are written only to random mode-0600 files in `/tmp`, loaded
 into the TLS context, and unlinked before the HTTPS listener starts. `tmpfs:
@@ -132,7 +144,7 @@ integration performs the same check without copying CEZ credentials.
 | Control | Manifest/image setting | Status |
 | --- | --- | --- |
 | Runtime identity | Image `USER 2000:2000`; startup fails on mismatch | REQUIRED; verify on HA OS |
-| Prebuilt image | Generic GHCR image plus manifest version `0.2.0` | REQUIRED; image must exist before install |
+| Prebuilt image | Generic GHCR image plus manifest version `0.2.1` | REQUIRED; image must exist before install |
 | AppArmor | `apparmor: true`, protected mode retained | REQUIRED; effective profile verify on HA OS |
 | Host namespaces | all host network/PID/IPC/UTS/D-Bus flags false | REQUIRED |
 | Privilege/API | no privileged list; `full_access`, API, Docker, ingress and hardware flags false | REQUIRED |
@@ -151,7 +163,7 @@ The already accepted HA OS Runtime Gate evidence positively established the
 Chromium renderer's own `Seccomp=2`, `NoNewPrivs=1`, empty effective
 capabilities, and separate user/PID/network namespaces. This wrapper neither
 changes Chromium arguments nor adds capabilities. Effective controls must be
-reconfirmed for the `0.2.0` image.
+reconfirmed for the future `0.2.1` image.
 
 ## HA OS deployment and connectivity gate
 
@@ -160,11 +172,11 @@ Use the approved HA OS amd64 target and only synthetic/offline values.
 1. Record HA OS, Supervisor, Core, kernel and architecture versions. Confirm
    branch contents include one `cez_pnd_collector` App entry and no Dockerfile
    in that directory.
-2. Review and publish `collector-service-v0.2.0` separately. Record the commit,
+2. Review and publish `collector-service-v0.2.1` separately. Record the commit,
    tag, version tag, SHA tag, image digest, SBOM and provenance. Confirm no
    `latest` tag is created.
 3. Add or refresh the repository using its exact GitHub URL. Confirm Supervisor
-   discovers **CEZ PND Collector**, reports amd64, version `0.2.0`, experimental
+   discovers **CEZ PND Collector**, reports amd64, version `0.2.1`, experimental
    stage, and a registry image. Capture the authoritative installed slug,
    hostname and DNS values.
 4. Confirm installation pulls the recorded GHCR digest. Reject any local build
@@ -208,19 +220,93 @@ positive authentication, restart persistence, clean shutdown, and every
 expressible isolation control pass without deviations. Static CI validates
 structure and policy only; it cannot substitute for this HA OS evidence.
 
+## Collector 0.2.1 hotfix scope
+
+Collector `0.2.1` changes only the Supervisor self-info endpoint from the
+rejected unversioned URL to exactly
+`http://supervisor/v2/apps/self/info`. It provides no fallback to
+`http://supervisor/apps/self/info`. Token handling, redirect rejection, the
+256-KiB response bound, strict response validation, TLS material handling,
+bearer verifier bootstrap, non-root identity, manifest permissions, API
+surface, and fail-closed behavior remain unchanged. Release `0.2.0`, its tag,
+and its published images remain immutable.
+
+## HA OS 0.2.0 deployment result
+
+The first-start gate was executed on 8 September 2026 with Home Assistant OS
+`18.2`, Supervisor `2026.08.0`, Home Assistant Core `2026.9.0`, and amd64
+`qemux86-64`. It used only synthetic offline configuration. No CEZ host was
+contacted and no CEZ credential was present.
+
+Supervisor recorded that it downloaded
+`ghcr.io/dracoanus/home-assistant-cez-pnd-collector:0.2.0`, attached that image,
+and successfully installed App `606197c3_cez_pnd_collector`. The observed
+internal hostname was `606197c3-cez-pnd-collector`. The four App options passed
+the manifest schema and were saved before start. The meter identifier and token
+verifier remained populated after a page reload; Home Assistant redacted the
+two password-class TLS fields, so their persisted values could be established
+only by the fail-closed runtime bootstrap.
+
+The first start produced this sequence:
+
+1. Supervisor started the prebuilt `0.2.0` image.
+2. Supervisor rejected the App's request to `/apps/self/info`, recording
+   `missing API permission for /apps/self/info` and then
+   `Invalid token for access /apps/self/info`.
+3. The Collector emitted only its bounded
+   `startup_failed`/`invalid_private_configuration` event and exited with code
+   `1`.
+4. Supervisor left the App stopped with an error state.
+
+This is a **CONFIRMED application bootstrap defect**. It is not evidence that
+the App needs Supervisor API permission. The current Supervisor middleware
+defines the unprivileged v2 App self-info bypass under
+`/v2/apps/self/...`; the Collector omitted the `/v2` prefix. The service failed
+closed before creating its TLS context or HTTPS listener, and the available App
+and Supervisor records exposed no option values, bearer token, TLS key, or
+Supervisor token.
+
+| Gate item | Result | Evidence / limitation |
+| --- | --- | --- |
+| Repository discovery and manifest acceptance | **PASS** | Supervisor discovered and installed CEZ PND Collector `0.2.0`. |
+| Prebuilt image use | **PASS** | Supervisor downloaded and attached the GHCR `0.2.0` image; the App has no Dockerfile. |
+| Exact immutable pulled digest | **OPEN / NEEDS VERIFICATION** | The UI/Supervisor records observed in this run identified the tag, not the resolved manifest digest. |
+| Installed slug and internal hostname | **PASS** | `606197c3_cez_pnd_collector` and `606197c3-cez-pnd-collector` were observed. |
+| Option schema and save | **PASS** | Save succeeded and no schema error was shown. |
+| Option persistence | **PARTIAL** | Meter ID and verifier survived reload; TLS password fields were intentionally redacted and bootstrap did not read them. |
+| Runtime UID/GID check | **PASS BY APPLICATION CHECK** | Startup passed the fail-closed UID/GID `2000:2000` check before configuration failed; independent container inspection was not completed. |
+| Supervisor self-info bootstrap | **FAIL** | The unversioned `/apps/self/info` path was rejected by Supervisor. |
+| HTTPS and bearer authentication | **BLOCKED / NOT RUN** | The service exited before listener creation. |
+| Status and measurement endpoints | **BLOCKED / NOT RUN** | No HTTPS listener existed. |
+| Effective AppArmor, namespaces, capabilities, mounts, tmpfs and PID controls | **OPEN / NOT OBSERVED** | The process exited before the planned container-state inspection. |
+| Restart persistence and clean normal shutdown | **BLOCKED / NOT RUN** | A second start was intentionally avoided after the deterministic bootstrap failure. |
+| Secret-safe failure logging | **PASS FOR OBSERVED RECORDS** | Only bounded error codes and request paths were present; no configured value or plaintext secret was emitted. |
+
+The deployment gate result is **FAIL / BLOCKED** for Collector `0.2.0`.
+Release `0.2.0` must not be promoted for HA OS use. A reviewed fix must change
+only the self-info URL to the v2 App path, retain the existing bounded parsing
+and fail-closed behavior, add a regression test for the exact URL, publish a
+new immutable image version, and repeat this gate from first start. The test
+App remains stopped. The temporary offline token and TLS material are retained
+outside the repository under restricted local access solely for the controlled
+repeat; they are not production pairing material.
+
 ## OPEN / NEEDS VERIFICATION
 
-- This change does not publish the `0.2.0` image; the recorded immutable image
-  must exist before installation.
-- Supervisor 2026.08+ acceptance of this exact manifest and options schema.
+- The exact immutable manifest digest resolved by Supervisor during the
+  observed tagged-image pull.
+- Successful option retrieval from `/v2/apps/self/info` without `hassio_api`
+  after a reviewed corrective release.
+- Persistence of the two redacted TLS options across restart.
 - Actual `/data` owner/mode, UID-2000 access, controlled file creation, restart,
   update, backup and restore behavior.
 - Effective outer-container read-only-root, no-new-privileges, PID limit,
   default capability set and tmpfs size controls; the current schema does not
   expose all of them.
-- Exact installed hostname/DNS and certificate SAN validation on the target.
-- Security and usability of Supervisor self-info bootstrap on the target,
-  including restart behavior and absence of values from logs/diagnostics.
+- Certificate SAN validation and internal HTTPS connectivity to the observed
+  hostname on the target.
+- Successful restart behavior and continued absence of option values from
+  logs/diagnostics after the bootstrap fix.
 - Production certificate authority, issuance, renewal, pin format, recovery,
   token pairing, rotation, revocation and owner UX.
 - A Core-origin HTTPS request through the future limited custom integration.

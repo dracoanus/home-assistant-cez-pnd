@@ -41,7 +41,7 @@ pairing, rotation, revocation, certificate provisioning, renewal, and recovery
 remain **OPEN / NEEDS VERIFICATION (O-12)**. The skeleton has no unauthenticated
 network health exception.
 
-The `0.2.0` HA OS deployment candidate accepts only the token's lowercase
+The `0.2.1` HA OS deployment candidate accepts only the token's lowercase
 SHA-256 verifier through trusted Supervisor-managed App options. The plaintext
 token is never an App option. TLS certificate/private-key options support the
 narrow offline deployment gate; they do not close production pairing,
