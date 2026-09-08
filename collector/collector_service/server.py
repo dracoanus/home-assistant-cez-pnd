@@ -10,7 +10,7 @@ import socket
 import sys
 
 from .api import ApiResponse, CollectorApi
-from .runtime_config import load_runtime_configuration
+from .runtime_config import PrivateConfigurationError, load_runtime_configuration
 
 
 BIND_ADDRESS = "0.0.0.0"
@@ -90,6 +90,15 @@ def main() -> int:
         server = CollectorHttpServer((BIND_ADDRESS, BIND_PORT), CollectorRequestHandler)
         server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
         server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
+    except PrivateConfigurationError as error:
+        print(
+            json.dumps(
+                {"event": "startup_failed", "code": error.code},
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except (OSError, ValueError, json.JSONDecodeError):
         print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
         return 1

@@ -27,6 +27,38 @@ MAX_SUPERVISOR_RESPONSE_BYTES = 256 * 1024
 MAX_TLS_MATERIAL_BYTES = 64 * 1024
 TMP_DIRECTORY = Path("/tmp")
 
+PRIVATE_CONFIGURATION_ERROR_CODES = frozenset(
+    {
+        "private_config_invalid_supervisor_token",
+        "private_config_supervisor_request_failed",
+        "private_config_supervisor_response_too_large",
+        "private_config_supervisor_response_invalid",
+        "private_config_invalid_token_verifier",
+        "private_config_missing_tls_certificate",
+        "private_config_invalid_certificate_encoding",
+        "private_config_invalid_certificate_size",
+        "private_config_missing_tls_private_key",
+        "private_config_invalid_private_key_encoding",
+        "private_config_invalid_private_key_size",
+        "private_config_ssl_context_create_failed",
+        "private_config_tls_temporary_file_failed",
+        "private_config_key_mismatch",
+        "private_config_ssl_context_load_failed",
+        "private_config_file_verifier_failed",
+        "private_config_file_tls_load_failed",
+    }
+)
+
+
+class PrivateConfigurationError(ValueError):
+    """Fail-closed configuration error containing only an allowlisted code."""
+
+    def __init__(self, code: str) -> None:
+        if code not in PRIVATE_CONFIGURATION_ERROR_CODES:
+            raise ValueError("unknown private configuration error code")
+        self.code = code
+        super().__init__(code)
+
 
 @dataclass(frozen=True)
 class RuntimeConfiguration:
@@ -50,14 +82,19 @@ def load_runtime_configuration() -> RuntimeConfiguration:
     supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
     if supervisor_token:
         options = _read_supervisor_options(supervisor_token)
-        verifier = TokenVerifier.from_mapping(
-            {
-                "schema_version": "1",
-                "token_sha256": options.get("api_token_sha256"),
-                "meter_id": options.get("meter_id"),
-                "scopes": sorted(EXPECTED_SCOPES),
-            }
-        )
+        try:
+            verifier = TokenVerifier.from_mapping(
+                {
+                    "schema_version": "1",
+                    "token_sha256": options.get("api_token_sha256"),
+                    "meter_id": options.get("meter_id"),
+                    "scopes": sorted(EXPECTED_SCOPES),
+                }
+            )
+        except (TypeError, ValueError) as error:
+            raise PrivateConfigurationError(
+                "private_config_invalid_token_verifier"
+            ) from error
         certificate = _decode_tls_option(options, "tls_certificate_b64")
         private_key = _decode_tls_option(options, "tls_private_key_b64")
         return RuntimeConfiguration(
@@ -66,13 +103,19 @@ def load_runtime_configuration() -> RuntimeConfiguration:
             source="supervisor_self_info",
         )
 
-    verifier = TokenVerifier.from_file(TOKEN_VERIFIER_FILE)
-    context = _new_tls_context()
-    with open_verified_file(TLS_CERT_FILE, private=False) as cert_descriptor:
-        with open_verified_file(TLS_KEY_FILE, private=True) as key_descriptor:
-            context.load_cert_chain(
-                descriptor_path(cert_descriptor), descriptor_path(key_descriptor)
-            )
+    try:
+        verifier = TokenVerifier.from_file(TOKEN_VERIFIER_FILE)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise PrivateConfigurationError("private_config_file_verifier_failed") from error
+    try:
+        context = _new_tls_context()
+        with open_verified_file(TLS_CERT_FILE, private=False) as cert_descriptor:
+            with open_verified_file(TLS_KEY_FILE, private=True) as key_descriptor:
+                context.load_cert_chain(
+                    descriptor_path(cert_descriptor), descriptor_path(key_descriptor)
+                )
+    except (OSError, ValueError, ssl.SSLError) as error:
+        raise PrivateConfigurationError("private_config_file_tls_load_failed") from error
     return RuntimeConfiguration(verifier=verifier, tls_context=context, source="files")
 
 
@@ -80,61 +123,112 @@ def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
     if len(supervisor_token) > 8192 or any(
         character.isspace() for character in supervisor_token
     ):
-        raise ValueError("invalid Supervisor token shape")
-    request = Request(
-        SUPERVISOR_SELF_INFO_URL,
-        headers={
-            "Authorization": f"Bearer {supervisor_token}",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-    opener = build_opener(_RejectRedirects())
+        raise PrivateConfigurationError("private_config_invalid_supervisor_token")
     try:
+        request = Request(
+            SUPERVISOR_SELF_INFO_URL,
+            headers={
+                "Authorization": f"Bearer {supervisor_token}",
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        opener = build_opener(_RejectRedirects())
         with opener.open(request, timeout=5.0) as response:
             if response.status != 200:
-                raise ValueError("Supervisor self-info request failed")
+                raise PrivateConfigurationError(
+                    "private_config_supervisor_request_failed"
+                )
             body = response.read(MAX_SUPERVISOR_RESPONSE_BYTES + 1)
-    except (HTTPError, URLError, TimeoutError) as error:
-        raise ValueError("Supervisor self-info request failed") from error
+    except PrivateConfigurationError:
+        raise
+    except (HTTPError, URLError, TimeoutError, OSError, TypeError, ValueError) as error:
+        raise PrivateConfigurationError(
+            "private_config_supervisor_request_failed"
+        ) from error
     if len(body) > MAX_SUPERVISOR_RESPONSE_BYTES:
-        raise ValueError("Supervisor self-info response exceeds size limit")
-    payload = json.loads(body.decode("utf-8"))
+        raise PrivateConfigurationError(
+            "private_config_supervisor_response_too_large"
+        )
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise PrivateConfigurationError(
+            "private_config_supervisor_response_invalid"
+        ) from error
     if not isinstance(payload, dict) or payload.get("result") != "ok":
-        raise ValueError("invalid Supervisor self-info response")
+        raise PrivateConfigurationError("private_config_supervisor_response_invalid")
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise ValueError("invalid Supervisor self-info data")
+        raise PrivateConfigurationError("private_config_supervisor_response_invalid")
     options = data.get("options")
     if not isinstance(options, dict):
-        raise ValueError("missing Supervisor App options")
+        raise PrivateConfigurationError("private_config_supervisor_response_invalid")
     return options
 
 
 def _decode_tls_option(options: dict[str, object], name: str) -> bytes:
+    if name == "tls_certificate_b64":
+        missing_code = "private_config_missing_tls_certificate"
+        encoding_code = "private_config_invalid_certificate_encoding"
+        size_code = "private_config_invalid_certificate_size"
+    elif name == "tls_private_key_b64":
+        missing_code = "private_config_missing_tls_private_key"
+        encoding_code = "private_config_invalid_private_key_encoding"
+        size_code = "private_config_invalid_private_key_size"
+    else:
+        raise ValueError("unsupported TLS option name")
     encoded = options.get(name)
-    if not isinstance(encoded, str) or not encoded or len(encoded) > 128 * 1024:
-        raise ValueError("invalid TLS option")
+    if encoded is None or encoded == "":
+        raise PrivateConfigurationError(missing_code)
+    if not isinstance(encoded, str):
+        raise PrivateConfigurationError(encoding_code)
+    if len(encoded) > 128 * 1024:
+        raise PrivateConfigurationError(size_code)
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as error:
-        raise ValueError("invalid TLS option encoding") from error
+        raise PrivateConfigurationError(encoding_code) from error
     if not decoded or len(decoded) > MAX_TLS_MATERIAL_BYTES:
-        raise ValueError("invalid TLS option size")
+        raise PrivateConfigurationError(size_code)
     return decoded
 
 
 def _new_tls_context() -> ssl.SSLContext:
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    except (OSError, ValueError, ssl.SSLError) as error:
+        raise PrivateConfigurationError(
+            "private_config_ssl_context_create_failed"
+        ) from error
     return context
 
 
 def _context_from_memory(certificate: bytes, private_key: bytes) -> ssl.SSLContext:
     context = _new_tls_context()
-    with _temporary_private_file(certificate) as certificate_path:
-        with _temporary_private_file(private_key) as private_key_path:
-            context.load_cert_chain(certificate_path, private_key_path)
+    try:
+        with _temporary_private_file(certificate) as certificate_path:
+            with _temporary_private_file(private_key) as private_key_path:
+                try:
+                    context.load_cert_chain(certificate_path, private_key_path)
+                except ssl.SSLError as error:
+                    code = (
+                        "private_config_key_mismatch"
+                        if getattr(error, "reason", None) == "KEY_VALUES_MISMATCH"
+                        else "private_config_ssl_context_load_failed"
+                    )
+                    raise PrivateConfigurationError(code) from error
+                except (OSError, ValueError) as error:
+                    raise PrivateConfigurationError(
+                        "private_config_ssl_context_load_failed"
+                    ) from error
+    except PrivateConfigurationError:
+        raise
+    except OSError as error:
+        raise PrivateConfigurationError(
+            "private_config_tls_temporary_file_failed"
+        ) from error
     return context
 
 

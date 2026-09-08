@@ -5,18 +5,20 @@ measurement data in Home Assistant. The planned architecture separates a
 credential-holding Collector App from a minimal Home Assistant custom
 integration that handles sensors and statistics.
 
-Current status: **runtime feasibility passed; Collector 0.2.0 deployment gate
-failed closed; 0.2.1 hotfix under review**. The Debian Collector Runtime Gate
-passed on the actual HA OS amd64 target. The production CEZ collection flow and
-Home Assistant integration are not yet implemented or production ready.
+Current status: **runtime feasibility passed; Collector 0.2.1 deployment gate
+failed closed; 0.2.2 diagnostic candidate under review**. The Debian Collector
+Runtime Gate passed on the actual HA OS amd64 target. The production CEZ
+collection flow and Home Assistant integration are not yet implemented or
+production ready.
 
 ## Experimental runtime gate
 
 The existing **CEZ PND Collector Runtime Gate** App is retained as historical
 runtime evidence. The **CEZ PND Collector** App uses a prebuilt Collector
 service image and synthetic offline data only. Version `0.2.0` failed closed on
-the HA OS Supervisor self-info bootstrap. Candidate `0.2.1` changes only that
-endpoint and requires review, publication, and a repeated deployment gate.
+the HA OS Supervisor self-info path. Version `0.2.1` corrected the path but
+failed closed under the intentionally generic private-configuration error.
+Candidate `0.2.2` adds only bounded, non-secret failure-stage diagnostics.
 
 To add this repository in Home Assistant, open **Settings -> Apps -> App Store
 -> Repositories** and add:

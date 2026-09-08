@@ -41,13 +41,17 @@ pairing, rotation, revocation, certificate provisioning, renewal, and recovery
 remain **OPEN / NEEDS VERIFICATION (O-12)**. The skeleton has no unauthenticated
 network health exception.
 
-The `0.2.1` HA OS deployment candidate accepts only the token's lowercase
+The `0.2.2` HA OS diagnostic candidate accepts only the token's lowercase
 SHA-256 verifier through trusted Supervisor-managed App options. The plaintext
 token is never an App option. TLS certificate/private-key options support the
 narrow offline deployment gate; they do not close production pairing,
 certificate lifecycle, backup, recovery, or integration-side pinning. The
 [Collector App validation plan](phase2b-collector-ha-app.md) defines this
 experimental bootstrap and its remaining gates.
+
+Startup diagnostics are limited to fixed local codes. They identify the
+failed validation stage without including exception text, Supervisor tokens,
+bearer material, verifiers, option values, certificates, or private keys.
 
 Successful and error responses are JSON, bounded to 1 MiB, marked
 `Cache-Control: no-store`, and carry no permissive CORS header. Errors contain

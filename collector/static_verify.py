@@ -43,7 +43,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.2.1"
+assert VERSION == "0.2.2"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
@@ -99,6 +99,20 @@ assert (
     in RUNTIME_CONFIG_SOURCE
 )
 assert '"http://supervisor/apps/self/info"' not in RUNTIME_CONFIG_SOURCE
+assert "class PrivateConfigurationError(ValueError)" in RUNTIME_CONFIG_SOURCE
+assert "PRIVATE_CONFIGURATION_ERROR_CODES = frozenset" in RUNTIME_CONFIG_SOURCE
+for required_code in (
+    "private_config_supervisor_request_failed",
+    "private_config_supervisor_response_invalid",
+    "private_config_invalid_token_verifier",
+    "private_config_missing_tls_certificate",
+    "private_config_missing_tls_private_key",
+    "private_config_invalid_certificate_encoding",
+    "private_config_invalid_private_key_encoding",
+    "private_config_key_mismatch",
+    "private_config_ssl_context_load_failed",
+):
+    assert required_code in RUNTIME_CONFIG_SOURCE
 assert "HTTPRedirectHandler" in SOURCE
 assert "MAX_SUPERVISOR_RESPONSE_BYTES = 256 * 1024" in RUNTIME_CONFIG_SOURCE
 assert "base64.b64decode(encoded, validate=True)" in SOURCE
@@ -215,7 +229,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.2.1"',
+    'version: "0.2.2"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -254,12 +268,15 @@ assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
 assert "plaintext bearer token" in APP_DOCUMENTATION
 assert (
-    "0.2.0 HA OS DEPLOYMENT GATE FAILED CLOSED / 0.2.1 HOTFIX UNDER"
+    "0.2.1 HA OS DEPLOYMENT GATE FAILED CLOSED / RUNTIME BOOTSTRAP"
     in HA_APP_VALIDATION
 )
 assert "missing API permission for /apps/self/info" in HA_APP_VALIDATION
 assert "http://supervisor/v2/apps/self/info" in HA_APP_VALIDATION
 assert "changes only the Supervisor self-info endpoint" in HA_APP_VALIDATION
+assert '"code":"invalid_private_configuration"' in HA_APP_VALIDATION
+assert "The overall deployment gate result is **FAIL / BLOCKED** for Collector" in HA_APP_VALIDATION
+assert "Collector 0.2.2 diagnostic scope" in HA_APP_VALIDATION
 assert "Core-origin connectivity remains OPEN" in HA_APP_VALIDATION
 
 for path in SOURCE_FILES:
