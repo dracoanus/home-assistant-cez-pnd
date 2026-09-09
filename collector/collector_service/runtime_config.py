@@ -116,6 +116,7 @@ class RuntimeConfiguration:
     source: str
     discovery: DiscoveryConfiguration | None = None
     http_auth_discovery: HttpAuthDiscoveryConfiguration | None = None
+    requests_preauth_compatibility: bool = False
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -147,6 +148,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
         _validate_discovery_modes(options)
         discovery = _load_discovery_configuration(options)
         http_auth_discovery = _load_http_auth_discovery_configuration(options)
+        requests_preauth_compatibility = _load_requests_preauth_compatibility_mode(options)
         options.pop("cez_username", None)
         options.pop("cez_password", None)
         certificate = _decode_tls_option(options, "tls_certificate_b64")
@@ -157,6 +159,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
             source="supervisor_self_info",
             discovery=discovery,
             http_auth_discovery=http_auth_discovery,
+            requests_preauth_compatibility=requests_preauth_compatibility,
         )
 
     try:
@@ -269,12 +272,22 @@ def _load_discovery_configuration(
 def _validate_discovery_modes(options: dict[str, object]) -> None:
     selenium_mode = options.get("cez_discovery_mode", False)
     http_mode = options.get("cez_http_auth_discovery_mode", False)
+    requests_mode = options.get("cez_requests_preauth_compatibility_mode", False)
     if not isinstance(selenium_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_mode")
     if not isinstance(http_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
-    if selenium_mode and http_mode:
+    if not isinstance(requests_mode, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if sum((selenium_mode, http_mode, requests_mode)) > 1:
         raise DiscoveryConfigurationError("discovery_config_conflicting_modes")
+
+
+def _load_requests_preauth_compatibility_mode(options: dict[str, object]) -> bool:
+    enabled = options.get("cez_requests_preauth_compatibility_mode", False)
+    if not isinstance(enabled, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    return enabled
 
 
 def _load_http_auth_discovery_configuration(
