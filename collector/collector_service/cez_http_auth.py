@@ -119,6 +119,10 @@ SAFE_ERROR_CODES = frozenset(
         "auth_form_ambiguous",
         "auth_form_invalid",
         "auth_form_too_large",
+        "auth_form_document_too_large",
+        "auth_form_control_limit",
+        "auth_form_name_too_large",
+        "auth_form_value_too_large",
         "auth_cookie_invalid_syntax",
         "auth_cookie_invalid_name",
         "auth_cookie_invalid_domain",
@@ -400,12 +404,14 @@ class _LoginFormParser(HTMLParser):
         elif tag.lower() == "input" and self.current is not None:
             self.controls += 1
             if self.controls > MAX_FORM_CONTROLS:
-                raise _AuthFailure("auth_form_too_large")
+                raise _AuthFailure("auth_form_control_limit")
             name = attributes.get("name", "")
             value = attributes.get("value", "")
             input_type = attributes.get("type", "text").lower()
-            if len(name.encode("utf-8")) > 256 or len(value.encode("utf-8")) > MAX_FORM_VALUE_BYTES:
-                raise _AuthFailure("auth_form_too_large")
+            if len(name.encode("utf-8")) > 256:
+                raise _AuthFailure("auth_form_name_too_large")
+            if len(value.encode("utf-8")) > MAX_FORM_VALUE_BYTES:
+                raise _AuthFailure("auth_form_value_too_large")
             if name:
                 self.current.controls.append((name, value, input_type))
 
@@ -426,7 +432,7 @@ class _LoginFormParser(HTMLParser):
 
 def _parse_login_form(html: bytes, page_url: str) -> _ParsedForm:
     if len(html) > MAX_HTML_BYTES:
-        raise _AuthFailure("auth_form_too_large")
+        raise _AuthFailure("auth_form_document_too_large")
     try:
         text = html.decode("utf-8", errors="strict")
         parser = _LoginFormParser()
