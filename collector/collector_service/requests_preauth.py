@@ -63,6 +63,19 @@ def _default_session() -> _Session:
     return session
 
 
+def _requests_exception_types() -> tuple[tuple[type[BaseException], ...], tuple[type[BaseException], ...]]:
+    """Load the pinned runtime dependency's exception classes without eager import."""
+
+    try:
+        from requests import exceptions
+    except ModuleNotFoundError:
+        return (), ()
+    return (
+        (exceptions.Timeout, exceptions.ConnectTimeout, exceptions.ReadTimeout),
+        (exceptions.RequestException,),
+    )
+
+
 class RequestsSessionTransport:
     """Redirect-disabled requests transport with bounded, memory-only state."""
 
@@ -104,6 +117,7 @@ class RequestsSessionTransport:
     ) -> HttpResponse:
         if self._closed or method not in {"GET", "POST"}:
             raise _AuthFailure("auth_transport_policy_invalid")
+        timeout_errors, request_errors = _requests_exception_types()
         deadline = self._monotonic() + total_timeout
         response: _Response | None = None
         try:
@@ -145,6 +159,10 @@ class RequestsSessionTransport:
             return HttpResponse(status, header_pairs, b"".join(chunks))
         except _AuthFailure:
             raise
+        except timeout_errors as error:
+            raise _AuthFailure("auth_operation_timeout") from error
+        except request_errors as error:
+            raise _AuthFailure("auth_transport_failed") from error
         except (TimeoutError, OSError) as error:
             raise _AuthFailure("auth_transport_failed") from error
         except Exception as error:
