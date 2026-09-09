@@ -466,6 +466,13 @@ def _domain_matches(hostname: str, domain: str) -> bool:
     return hostname == domain or hostname.endswith("." + domain)
 
 
+def _is_reviewed_cookie_domain(domain: str) -> bool:
+    return any(
+        domain == boundary or domain.endswith("." + boundary)
+        for boundary in REVIEWED_COOKIE_DOMAINS
+    )
+
+
 def _normalize_cookie_domain(value: str) -> str:
     domain = value.strip().lower()
     if domain.startswith("."):
@@ -530,7 +537,7 @@ class _MemoryCookieJar:
             )
             if not host_only and not _domain_matches(hostname, domain):
                 continue
-            if not host_only and domain not in REVIEWED_COOKIE_DOMAINS:
+            if not host_only and not _is_reviewed_cookie_domain(domain):
                 raise _AuthFailure("auth_cookie_domain_not_allowed")
             cookie = _Cookie(domain, cookie_name, cookie_value, host_only)
             self._cookies[(domain, cookie_name, host_only)] = cookie

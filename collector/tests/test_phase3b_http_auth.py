@@ -151,6 +151,31 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             jar.header_for("https://mepas.cez.cz/cas/login"), "session=private"
         )
 
+    def test_reviewed_exact_host_domain_cookies_are_accepted(self) -> None:
+        cases = (
+            ("mepas.cez.cz", "/cas/login"),
+            ("pnd.cezdistribuce.cz", "/cezpnd2"),
+            ("dip.cezdistribuce.cz", "/login"),
+        )
+        for hostname, path in cases:
+            with self.subTest(hostname=hostname):
+                jar = cez_http_auth._MemoryCookieJar()
+                jar.absorb(
+                    _response(
+                        200,
+                        b"",
+                        (
+                            "Set-Cookie",
+                            f"session=private; Domain={hostname}; Secure",
+                        ),
+                    ),
+                    f"https://{hostname}{path}",
+                )
+                self.assertEqual(
+                    jar.header_for(f"https://{hostname}{path}"),
+                    "session=private",
+                )
+
     def test_invalid_cookie_syntax_has_fixed_code(self) -> None:
         for raw_cookie in ("missing-separator", "name=value; Domain", "name=value; Domain=a; Domain=b"):
             with self.subTest(raw_cookie=raw_cookie):
@@ -264,6 +289,26 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         self.assertEqual(
             raised.exception.code, "auth_cookie_domain_not_allowed"
         )
+
+    def test_unrelated_and_boundary_lookalike_domains_are_discarded(self) -> None:
+        for domain in ("example.cz", "evilcez.cz", "attacker.example"):
+            with self.subTest(domain=domain):
+                jar = cez_http_auth._MemoryCookieJar()
+                jar.absorb(
+                    _response(
+                        200,
+                        b"",
+                        (
+                            "Set-Cookie",
+                            f"session=private; Domain={domain}; Secure",
+                        ),
+                    ),
+                    "https://mepas.cez.cz/cas/login",
+                )
+                self.assertEqual(jar.count, 0)
+                self.assertIsNone(
+                    jar.header_for("https://mepas.cez.cz/cas/login")
+                )
 
     def test_cookie_is_never_sent_to_unreviewed_hostname(self) -> None:
         jar = cez_http_auth._MemoryCookieJar()
