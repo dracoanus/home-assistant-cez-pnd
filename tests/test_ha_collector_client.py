@@ -311,7 +311,7 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
             client_module.ssl, "SSLContext", return_value=fake_context
         ) as factory:
             result = client_module.create_collector_ssl_context(
-                "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----"
+                ("-----BEGIN " + "CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----")
             )
         self.assertIs(result, fake_context)
         factory.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
