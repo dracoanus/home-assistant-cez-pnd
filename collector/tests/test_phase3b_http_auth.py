@@ -26,6 +26,11 @@ FORM_HTML = b"""<!doctype html><html><body>
 <input type="text" name="username" value="">
 <input type="password" name="password" value="">
 </form></body></html>"""
+PND_APPLICATION_HTML = (
+    b"<!doctype html><html><body><h1>Namerena data</h1></body></html>".replace(
+        b"Namerena", "Naměřená".encode("utf-8")
+    )
+)
 
 
 def _resolver(_hostname: str, _port: int) -> tuple[str, ...]:
@@ -105,11 +110,10 @@ def _successful_responses() -> list[cez_http_auth.HttpResponse]:
             ),
             ("Set-Cookie", "ticket=b; Secure"),
         ),
-        _response(200, b"candidate application response"),
         _response(
             200,
-            b'{"meters":[]}',
-            ("Content-Type", "application/json; charset=utf-8"),
+            PND_APPLICATION_HTML,
+            ("Content-Type", "text/html; charset=utf-8"),
         ),
     ]
 
@@ -592,7 +596,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         ).authenticate()
         self.assertEqual(result.code, "auth_operation_timeout")
 
-    def test_authenticated_dashboard_json_proves_authentication(self) -> None:
+    def test_final_pnd_application_page_proves_authentication(self) -> None:
         transport = _FakeTransport(_successful_responses())
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
         client = cez_http_auth.CezHttpAuthClient(
@@ -607,10 +611,10 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         )
         self.assertEqual(
             [request[0] for request in transport.requests],
-            ["GET", "GET", "POST", "GET", "GET"],
+            ["GET", "GET", "POST", "GET"],
         )
         self.assertEqual(
-            transport.requests[-1][1], cez_http_auth.CEZ_PND_AUTH_CHECK_URL
+            transport.requests[-1][1], cez_http_auth.CEZ_PND_START_URL
         )
         self.assertEqual(client._cookies.count, 0)
         self.assertTrue(transport.closed)

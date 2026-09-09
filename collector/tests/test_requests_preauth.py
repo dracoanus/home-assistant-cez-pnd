@@ -15,6 +15,11 @@ from collector_service.requests_preauth import RequestsPreauthCompatibilityClien
 
 GLOBAL_IP = "93.184.216.34"
 LOGIN_URL = "https://mepas.cez.cz/cas/login?service=opaque"
+PND_APPLICATION_HTML = (
+    b"<!doctype html><html><body><h1>Namerena data</h1></body></html>".replace(
+        b"Namerena", "Naměřená".encode("utf-8")
+    )
+)
 
 
 class _Headers(dict[str, str]):
@@ -97,11 +102,10 @@ class RequestsPreauthTests(unittest.TestCase):
                         Location="https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
                     ),
                 ),
-                _Response(200, _Headers()),
                 _Response(
                     200,
-                    _Headers({"Content-Type": "application/json"}),
-                    (b'{"meters":[]}',),
+                    _Headers({"Content-Type": "text/html; charset=utf-8"}),
+                    (PND_APPLICATION_HTML,),
                 ),
             ]
         )
@@ -130,7 +134,7 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
         self.assertEqual(
             [call[0] for call in session.calls],
-            ["GET", "GET", "POST", "GET", "GET"],
+            ["GET", "GET", "POST", "GET"],
         )
         self.assertEqual(
             resolved,
@@ -138,7 +142,6 @@ class RequestsPreauthTests(unittest.TestCase):
                 ("pnd.cezdistribuce.cz", 443),
                 ("mepas.cez.cz", 443),
                 ("mepas.cez.cz", 443),
-                ("pnd.cezdistribuce.cz", 443),
                 ("pnd.cezdistribuce.cz", 443),
             ],
         )
@@ -148,12 +151,13 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertIn(b"username=private-user", posts[0][2]["data"])
         self.assertIn(b"password=private-password", posts[0][2]["data"])
         self.assertEqual(session.cookie_names_before_request[2], ("session",))
-        self.assertEqual(session.cookie_names_before_request[4], ("session",))
+        self.assertEqual(session.cookie_names_before_request[3], ("session",))
         self.assertEqual(
-            session.calls[-1][1], cez_http_auth.CEZ_PND_AUTH_CHECK_URL
+            session.calls[-1][1], cez_http_auth.CEZ_PND_START_URL
         )
         self.assertEqual(
-            session.calls[-1][2]["headers"]["Accept"], "*/*"
+            session.calls[-1][2]["headers"]["Accept"],
+            "text/html,application/xhtml+xml",
         )
         self.assertTrue(
             all(
@@ -170,6 +174,7 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertNotIn("private-user", rendered_events)
         self.assertNotIn("private-password", rendered_events)
         self.assertNotIn("private-cookie-value", rendered_events)
+        self.assertNotIn("Naměřená data", rendered_events)
         self.assertEqual(
             [event.event for event in events],
             [
@@ -186,7 +191,7 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertTrue(session.cookies.cleared)
         self.assertTrue(session.closed)
 
-    def test_login_page_at_auth_check_is_not_authentication_proof(self) -> None:
+    def test_final_login_page_is_not_authentication_proof(self) -> None:
         session = self._active_auth_session(
             _Response(
                 200,
@@ -198,22 +203,29 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
         self.assertEqual(result.code, "auth_state_unverified")
 
-    def test_redirect_to_login_at_auth_check_is_not_followed(self) -> None:
+    def test_final_redirect_back_to_login_is_rejected(self) -> None:
         session = self._active_auth_session(
-            _Response(302, _Headers(Location=LOGIN_URL), ())
+            [
+                _Response(302, _Headers(Location=LOGIN_URL), ()),
+                _Response(
+                    200,
+                    _Headers({"Content-Type": "text/html"}),
+                    (b"<html><form><input type='password'></form></html>",),
+                ),
+            ]
         )
         result = self._run_active_auth(session)
         self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
-        self.assertEqual(result.code, "auth_state_unverified")
+        self.assertEqual(result.code, "auth_destination_rejected")
         self.assertEqual(len(session.calls), 5)
 
-    def test_non_object_json_is_not_authentication_proof(self) -> None:
-        for body in (b"not-json", b"[]"):
+    def test_malformed_final_html_is_not_authentication_proof(self) -> None:
+        for body in (b"\xff", b"<html><h1>Namerena data"):
             with self.subTest(body=body):
                 session = self._active_auth_session(
                     _Response(
                         200,
-                        _Headers({"Content-Type": "application/json"}),
+                        _Headers({"Content-Type": "text/html"}),
                         (body,),
                     )
                 )
@@ -221,26 +233,82 @@ class RequestsPreauthTests(unittest.TestCase):
                 self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
                 self.assertEqual(result.code, "auth_state_unverified")
 
+    def test_non_200_final_application_response_is_rejected(self) -> None:
+        session = self._active_auth_session(
+            _Response(
+                503,
+                _Headers({"Content-Type": "text/html"}),
+                (PND_APPLICATION_HTML,),
+            )
+        )
+        result = self._run_active_auth(session)
+        self.assertEqual(result.code, "auth_state_unverified")
+
+    def test_obvious_failure_pages_are_rejected(self) -> None:
+        cases = (
+            b"<html><form><input type='password'></form>" + PND_APPLICATION_HTML,
+            PND_APPLICATION_HTML + b"<div>g-recaptcha</div>",
+            "<html><h1>Naměřená data</h1><div>probíhá údržba</div></html>".encode(),
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                result = self._run_active_auth(
+                    self._active_auth_session(
+                        _Response(
+                            200,
+                            _Headers({"Content-Type": "text/html"}),
+                            (body,),
+                        )
+                    )
+                )
+                self.assertEqual(result.code, "auth_state_unverified")
+
+    def test_wrong_final_host_and_path_are_rejected(self) -> None:
+        for location in (
+            "https://attacker.example/cezpnd2/external/dashboard/view",
+            "https://pnd.cezdistribuce.cz/outside",
+        ):
+            with self.subTest(location=location):
+                session = self._active_auth_session(
+                    [], post_location=location
+                )
+                result = self._run_active_auth(session)
+                self.assertEqual(result.code, "auth_destination_rejected")
+                self.assertEqual(len(session.calls), 3)
+
+    def test_oversized_application_html_is_rejected(self) -> None:
+        response = cez_http_auth.HttpResponse(
+            200,
+            (("Content-Type", "text/html"),),
+            PND_APPLICATION_HTML + b"x" * cez_http_auth.MAX_RESPONSE_BODY_BYTES,
+        )
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_http_auth._verify_authenticated_application_page(response)
+        self.assertEqual(raised.exception.code, "auth_state_unverified")
+
     @staticmethod
-    def _active_auth_session(verification: _Response) -> _Session:
+    def _active_auth_session(
+        final_responses: _Response | list[_Response],
+        *,
+        post_location: str = "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
+    ) -> _Session:
         form = b'''<html><form method="post" action="/cas/login">
         <input type="hidden" name="execution" value="e1s1">
         <input name="username"><input name="password" type="password">
         </form></html>'''
-        return _Session(
-            [
+        responses = [
                 _Response(302, _Headers(Location=LOGIN_URL)),
                 _Response(200, _Headers(), (form,)),
                 _Response(
                     302,
-                    _Headers(
-                        Location="https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
-                    ),
+                    _Headers(Location=post_location),
                 ),
-                _Response(200, _Headers()),
-                verification,
             ]
-        )
+        if isinstance(final_responses, list):
+            responses.extend(final_responses)
+        else:
+            responses.append(final_responses)
+        return _Session(responses)
 
     @staticmethod
     def _run_active_auth(session: _Session) -> cez_http_auth.AuthResult:
