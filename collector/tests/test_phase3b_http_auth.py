@@ -151,8 +151,32 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             jar.header_for("https://mepas.cez.cz/cas/login"), "session=private"
         )
 
-    def test_unapproved_or_non_parent_cookie_domains_are_rejected(self) -> None:
-        for domain in (".cz", ".com", "example.com", "pnd.cezdistribuce.cz"):
+    def test_invalid_cookie_syntax_has_fixed_code(self) -> None:
+        for raw_cookie in ("missing-separator", "name=value; Domain", "name=value; Domain=a; Domain=b"):
+            with self.subTest(raw_cookie=raw_cookie):
+                jar = cez_http_auth._MemoryCookieJar()
+                with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                    jar.absorb(
+                        _response(200, b"", ("Set-Cookie", raw_cookie)),
+                        "https://dip.cezdistribuce.cz/login",
+                    )
+                self.assertEqual(
+                    raised.exception.code, "auth_cookie_invalid_syntax"
+                )
+
+    def test_invalid_cookie_name_has_fixed_code(self) -> None:
+        for raw_cookie in ("=value", "bad name=value"):
+            with self.subTest(raw_cookie=raw_cookie):
+                jar = cez_http_auth._MemoryCookieJar()
+                with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                    jar.absorb(
+                        _response(200, b"", ("Set-Cookie", raw_cookie)),
+                        "https://dip.cezdistribuce.cz/login",
+                    )
+                self.assertEqual(raised.exception.code, "auth_cookie_invalid_name")
+
+    def test_invalid_cookie_domain_has_fixed_code(self) -> None:
+        for domain in ("..cezdistribuce.cz", "127.0.0.1"):
             with self.subTest(domain=domain):
                 jar = cez_http_auth._MemoryCookieJar()
                 with self.assertRaises(cez_http_auth._AuthFailure) as raised:
@@ -164,7 +188,41 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                         ),
                         "https://dip.cezdistribuce.cz/login",
                     )
-                self.assertEqual(raised.exception.code, "auth_cookie_invalid")
+                self.assertEqual(
+                    raised.exception.code, "auth_cookie_invalid_domain"
+                )
+
+    def test_cookie_domain_mismatch_has_fixed_code(self) -> None:
+        for domain in (".com", "example.com", "pnd.cezdistribuce.cz"):
+            with self.subTest(domain=domain):
+                jar = cez_http_auth._MemoryCookieJar()
+                with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                    jar.absorb(
+                        _response(
+                            200,
+                            b"",
+                            ("Set-Cookie", f"session=private; Domain={domain}; Secure"),
+                        ),
+                        "https://dip.cezdistribuce.cz/login",
+                    )
+                self.assertEqual(
+                    raised.exception.code, "auth_cookie_domain_mismatch"
+                )
+
+    def test_cookie_domain_not_allowed_has_fixed_code(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            jar.absorb(
+                _response(
+                    200,
+                    b"",
+                    ("Set-Cookie", "session=private; Domain=.cz; Secure"),
+                ),
+                "https://dip.cezdistribuce.cz/login",
+            )
+        self.assertEqual(
+            raised.exception.code, "auth_cookie_domain_not_allowed"
+        )
 
     def test_cookie_is_never_sent_to_unreviewed_hostname(self) -> None:
         jar = cez_http_auth._MemoryCookieJar()
@@ -178,7 +236,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         )
         with self.assertRaises(cez_http_auth._AuthFailure) as raised:
             jar.header_for("https://unreviewed.cezdistribuce.cz/")
-        self.assertEqual(raised.exception.code, "auth_cookie_invalid")
+        self.assertEqual(raised.exception.code, "auth_cookie_domain_not_allowed")
 
     def test_cookie_limits_and_cleanup_remain_enforced(self) -> None:
         jar = cez_http_auth._MemoryCookieJar()
@@ -219,8 +277,17 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             emit=events.append,
         )
         result = client.authenticate()
-        rendered = repr(events) + repr(result)
-        self.assertEqual(result.code, "auth_cookie_invalid")
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            cez_http_auth.emit_json_event(
+                cez_http_auth.SafeHttpAuthEvent.from_result(result)
+            )
+        rendered = repr(events) + output.getvalue()
+        self.assertEqual(result.code, "auth_cookie_domain_mismatch")
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["event"], "http_auth_result")
+        self.assertEqual(payload["code"], "auth_cookie_domain_mismatch")
+        self.assertTrue(payload["timestamp"].endswith("Z"))
         self.assertNotIn("session", rendered)
         self.assertNotIn("private-cookie", rendered)
         self.assertNotIn("example.com", rendered)
