@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import socket
@@ -48,11 +49,14 @@ class _FakeTlsContext:
     verify_mode = ssl.CERT_REQUIRED
     minimum_version = ssl.TLSVersion.TLSv1_2
 
-    def __init__(self) -> None:
+    def __init__(self, wrap_error=None) -> None:
         self.server_hostname = None
+        self.wrap_error = wrap_error
 
     def wrap_socket(self, sock, *, server_hostname: str):
         self.server_hostname = server_hostname
+        if self.wrap_error is not None:
+            raise self.wrap_error
         return sock
 
 
@@ -76,7 +80,9 @@ class _FakeResponse:
 
 
 class _FakeConnection:
-    def __init__(self, host, port, response: _FakeResponse) -> None:
+    def __init__(
+        self, host, port, response: _FakeResponse, *, write_error=None, response_error=None
+    ) -> None:
         self.host = host
         self.port = port
         self.response = response
@@ -85,8 +91,12 @@ class _FakeConnection:
         self.target = None
         self.headers: list[tuple[str, str]] = []
         self.body = None
+        self.write_error = write_error
+        self.response_error = response_error
 
     def putrequest(self, method, target, **_kwargs) -> None:
+        if self.write_error is not None:
+            raise self.write_error
         self.method = method
         self.target = target
 
@@ -97,6 +107,8 @@ class _FakeConnection:
         self.body = body
 
     def getresponse(self):
+        if self.response_error is not None:
+            raise self.response_error
         return self.response
 
     def close(self) -> None:
@@ -105,13 +117,22 @@ class _FakeConnection:
 
 
 class _Harness:
-    def __init__(self, response: _FakeResponse | None = None, connect_error=None):
+    def __init__(
+        self,
+        response: _FakeResponse | None = None,
+        connect_error=None,
+        write_error=None,
+        response_error=None,
+        tls_error=None,
+    ):
         self.resolve_calls = 0
         self.sockets: list[_FakeSocket] = []
-        self.context = _FakeTlsContext()
+        self.context = _FakeTlsContext(tls_error)
         self.connection = None
         self.response = response or _FakeResponse()
         self.connect_error = connect_error
+        self.write_error = write_error
+        self.response_error = response_error
 
     def resolve(self, _hostname: str, _port: int):
         self.resolve_calls += 1
@@ -123,7 +144,13 @@ class _Harness:
         return sock
 
     def connection_factory(self, host: str, port: int):
-        self.connection = _FakeConnection(host, port, self.response)
+        self.connection = _FakeConnection(
+            host,
+            port,
+            self.response,
+            write_error=self.write_error,
+            response_error=self.response_error,
+        )
         return self.connection
 
     def transport(self) -> StrictHttpsTransport:
@@ -224,8 +251,11 @@ class Phase3CStrictTransportTests(unittest.TestCase):
 
         second = _Harness().transport()
         destination = _destination(second)
-        with self.assertRaises(StrictTransportError):
+        with self.assertRaises(StrictTransportError) as raised:
             _request(second, destination, method="DELETE")
+        self.assertEqual(
+            raised.exception.code, "auth_transport_invariant_failed"
+        )
 
     def test_get_and_post_use_expected_request_target(self) -> None:
         get_harness = _Harness()
@@ -249,14 +279,59 @@ class Phase3CStrictTransportTests(unittest.TestCase):
         self.assertEqual(post_harness.connection.body, b"a=b")
 
     def test_response_body_and_header_bounds(self) -> None:
-        for response in (
-            _FakeResponse(body=b"x" * 1025),
-            _FakeResponse(headers=(("X-Large", "x" * (64 * 1024)),)),
+        for response, expected_code in (
+            (_FakeResponse(body=b"x" * 1025), "auth_response_body_limit"),
+            (
+                _FakeResponse(headers=(("X-Large", "x" * (64 * 1024)),)),
+                "auth_response_header_limit",
+            ),
         ):
             harness = _Harness(response)
             transport = harness.transport()
-            with self.subTest(response=response), self.assertRaises(StrictTransportError):
+            with self.subTest(response=response), self.assertRaises(
+                StrictTransportError
+            ) as raised:
                 _request(transport, _destination(transport))
+            self.assertEqual(raised.exception.code, expected_code)
+
+    def test_connect_request_and_response_failures_have_fixed_codes(self) -> None:
+        cases = (
+            (_Harness(connect_error=OSError("private connect IP detail")), "auth_connect_failed"),
+            (_Harness(write_error=ValueError("private Cookie header detail")), "auth_request_write_failed"),
+            (
+                _Harness(
+                    response_error=http.client.BadStatusLine(
+                        "private response and URL detail"
+                    )
+                ),
+                "auth_response_protocol_failed",
+            ),
+            (
+                _Harness(
+                    _FakeResponse(read_error=OSError("private response body detail"))
+                ),
+                "auth_response_protocol_failed",
+            ),
+        )
+        for harness, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                transport = harness.transport()
+                with self.assertRaises(StrictTransportError) as raised:
+                    _request(transport, _destination(transport))
+                self.assertEqual(raised.exception.code, expected_code)
+                rendered = repr(raised.exception) + str(raised.exception)
+                self.assertNotIn("private", rendered)
+                self.assertNotIn(HOST, rendered)
+                self.assertNotIn(IPV4, rendered)
+
+    def test_tls_verification_failure_keeps_existing_code(self) -> None:
+        harness = _Harness(
+            tls_error=ssl.SSLCertVerificationError(1, "private certificate detail")
+        )
+        transport = harness.transport()
+        with self.assertRaises(StrictTransportError) as raised:
+            _request(transport, _destination(transport))
+        self.assertEqual(raised.exception.code, "auth_tls_verification_failed")
 
     def test_connect_read_and_total_timeout_fail_closed(self) -> None:
         for harness in (
@@ -281,6 +356,28 @@ class Phase3CStrictTransportTests(unittest.TestCase):
 
 
 class Phase3COneShotModeTests(unittest.TestCase):
+    def test_transport_diagnostic_codes_keep_generic_safe_event(self) -> None:
+        for code in (
+            "auth_transport_invariant_failed",
+            "auth_connect_failed",
+            "auth_request_write_failed",
+            "auth_response_protocol_failed",
+            "auth_response_header_limit",
+            "auth_response_body_limit",
+        ):
+            with self.subTest(code=code):
+                result = cez_http_auth.AuthResult(
+                    cez_http_auth.AuthStatus.FAILED, code
+                )
+                self.assertEqual(
+                    cez_http_auth._failure_event(result.code), "protocol_error"
+                )
+                event = cez_http_auth.SafeHttpAuthEvent("protocol_error")
+                rendered = json.dumps(event.as_dict()) + repr(result)
+                self.assertNotIn("https://", rendered)
+                self.assertNotIn("Cookie", rendered)
+                self.assertNotIn(IPV4, rendered)
+
     def test_http_mode_is_disabled_by_default(self) -> None:
         self.assertIsNone(
             runtime_config._load_http_auth_discovery_configuration({})

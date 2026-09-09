@@ -22,6 +22,12 @@ SAFE_TRANSPORT_CODES = frozenset(
         "auth_tls_verification_failed",
         "auth_operation_timeout",
         "auth_protocol_error",
+        "auth_transport_invariant_failed",
+        "auth_connect_failed",
+        "auth_request_write_failed",
+        "auth_response_protocol_failed",
+        "auth_response_header_limit",
+        "auth_response_body_limit",
     }
 )
 
@@ -112,7 +118,7 @@ class StrictHttpsTransport:
         """Connect to a validated IP and issue one non-redirecting HTTPS request."""
 
         if self._closed:
-            raise StrictTransportError("auth_protocol_error")
+            raise StrictTransportError("auth_transport_invariant_failed")
         method = method.upper()
         parsed = urlsplit(destination.url)
         if (
@@ -126,7 +132,7 @@ class StrictHttpsTransport:
             or body is not None and method != "POST"
             or body is not None and len(body) > 64 * 1024
         ):
-            raise StrictTransportError("auth_protocol_error")
+            raise StrictTransportError("auth_transport_invariant_failed")
         if any(
             name.lower()
             in {
@@ -139,7 +145,7 @@ class StrictHttpsTransport:
             }
             for name in headers
         ):
-            raise StrictTransportError("auth_protocol_error")
+            raise StrictTransportError("auth_transport_invariant_failed")
 
         try:
             addresses = tuple(
@@ -164,6 +170,7 @@ class StrictHttpsTransport:
         self._active_socket = tls_socket
         connection = self._connection_factory(destination.hostname, 443)
         connection.sock = tls_socket
+        phase = "request_write"
         try:
             request_target = parsed.path or "/"
             if parsed.query:
@@ -177,6 +184,7 @@ class StrictHttpsTransport:
             if body is not None:
                 connection.putheader("Content-Length", str(len(body)))
             connection.endheaders(body)
+            phase = "response_protocol"
             self._set_read_timeout(tls_socket, read_timeout, deadline)
             response = connection.getresponse()
             header_pairs = tuple((name, value) for name, value in response.getheaders())
@@ -185,9 +193,10 @@ class StrictHttpsTransport:
                 for name, value in header_pairs
             )
             if header_size > 64 * 1024:
-                raise StrictTransportError("auth_protocol_error")
+                raise StrictTransportError("auth_response_header_limit")
             chunks: list[bytes] = []
             length = 0
+            phase = "response_body"
             while True:
                 self._set_read_timeout(tls_socket, read_timeout, deadline)
                 chunk = response.read(
@@ -198,14 +207,19 @@ class StrictHttpsTransport:
                 chunks.append(chunk)
                 length += len(chunk)
                 if length > maximum_body_bytes:
-                    raise StrictTransportError("auth_protocol_error")
+                    raise StrictTransportError("auth_response_body_limit")
             return HttpResponse(response.status, header_pairs, b"".join(chunks))
         except StrictTransportError:
             raise
         except (TimeoutError, socket.timeout) as error:
             raise StrictTransportError("auth_operation_timeout") from error
         except (http.client.HTTPException, OSError, ValueError) as error:
-            raise StrictTransportError("auth_protocol_error") from error
+            code = (
+                "auth_request_write_failed"
+                if phase == "request_write"
+                else "auth_response_protocol_failed"
+            )
+            raise StrictTransportError(code) from error
         finally:
             connection.close()
             self._active_socket = None
@@ -259,7 +273,7 @@ class StrictHttpsTransport:
                 last_error = error
         if isinstance(last_error, (TimeoutError, socket.timeout)):
             raise StrictTransportError("auth_operation_timeout") from last_error
-        raise StrictTransportError("auth_protocol_error") from last_error
+        raise StrictTransportError("auth_connect_failed") from last_error
 
     def _set_read_timeout(
         self, connection: socket.socket, read_timeout: float, deadline: float

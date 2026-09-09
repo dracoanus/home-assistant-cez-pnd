@@ -64,7 +64,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.5"
+assert VERSION == "0.3.6"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -214,6 +214,18 @@ assert (
     "                continue"
 ) in HTTP_AUTH_SOURCE
 assert "AuthStatus.NEEDS_LIVE_VERIFICATION" in HTTP_AUTH_SOURCE
+for transport_diagnostic_code in (
+    "auth_transport_invariant_failed",
+    "auth_connect_failed",
+    "auth_request_write_failed",
+    "auth_response_protocol_failed",
+    "auth_response_header_limit",
+    "auth_response_body_limit",
+):
+    assert transport_diagnostic_code in HTTP_AUTH_SOURCE
+    assert transport_diagnostic_code in STRICT_TRANSPORT_SOURCE
+assert "header_size > 64 * 1024" in STRICT_TRANSPORT_SOURCE
+assert "length > maximum_body_bytes" in STRICT_TRANSPORT_SOURCE
 assert '"http_auth_result"' in HTTP_AUTH_SOURCE
 assert "SafeHttpAuthEvent.from_result(result)" in SERVER_SOURCE
 assert "auth_success_condition_needs_live_verification" in HTTP_AUTH_SOURCE
@@ -354,7 +366,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.5"',
+    'version: "0.3.6"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
