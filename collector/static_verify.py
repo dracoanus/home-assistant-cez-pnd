@@ -70,7 +70,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.12"
+assert VERSION == "0.3.13"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -396,7 +396,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.12"',
+    'version: "0.3.13"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

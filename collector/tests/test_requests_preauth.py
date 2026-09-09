@@ -98,6 +98,11 @@ class RequestsPreauthTests(unittest.TestCase):
                     ),
                 ),
                 _Response(200, _Headers()),
+                _Response(
+                    200,
+                    _Headers({"Content-Type": "application/json"}),
+                    (b'{"meters":[]}',),
+                ),
             ]
         )
         resolved: list[tuple[str, int]] = []
@@ -122,14 +127,18 @@ class RequestsPreauthTests(unittest.TestCase):
             resolver=transport.resolve,
             emit=events.append,
         ).authenticate()
-        self.assertEqual(result.status, cez_http_auth.AuthStatus.NEEDS_LIVE_VERIFICATION)
-        self.assertEqual([call[0] for call in session.calls], ["GET", "GET", "POST", "GET"])
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
+        self.assertEqual(
+            [call[0] for call in session.calls],
+            ["GET", "GET", "POST", "GET", "GET"],
+        )
         self.assertEqual(
             resolved,
             [
                 ("pnd.cezdistribuce.cz", 443),
                 ("mepas.cez.cz", 443),
                 ("mepas.cez.cz", 443),
+                ("pnd.cezdistribuce.cz", 443),
                 ("pnd.cezdistribuce.cz", 443),
             ],
         )
@@ -139,6 +148,10 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertIn(b"username=private-user", posts[0][2]["data"])
         self.assertIn(b"password=private-password", posts[0][2]["data"])
         self.assertEqual(session.cookie_names_before_request[2], ("session",))
+        self.assertEqual(session.cookie_names_before_request[4], ("session",))
+        self.assertEqual(
+            session.calls[-1][1], cez_http_auth.CEZ_PND_AUTH_CHECK_URL
+        )
         rendered_events = repr([event.as_dict() for event in events])
         self.assertNotIn("private-user", rendered_events)
         self.assertNotIn("private-password", rendered_events)
@@ -152,12 +165,84 @@ class RequestsPreauthTests(unittest.TestCase):
                 "login_form_validated",
                 "credentials_submitted",
                 "auth_redirect_observed",
-                "auth_state_needs_live_verification",
+                "authenticated",
                 "http_auth_cleanup_complete",
             ],
         )
         self.assertTrue(session.cookies.cleared)
         self.assertTrue(session.closed)
+
+    def test_login_page_at_auth_check_is_not_authentication_proof(self) -> None:
+        session = self._active_auth_session(
+            _Response(
+                200,
+                _Headers({"Content-Type": "text/html"}),
+                (b"<html><form action='/cas/login'></form></html>",),
+            )
+        )
+        result = self._run_active_auth(session)
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
+        self.assertEqual(result.code, "auth_state_unverified")
+
+    def test_redirect_to_login_at_auth_check_is_not_followed(self) -> None:
+        session = self._active_auth_session(
+            _Response(302, _Headers(Location=LOGIN_URL), ())
+        )
+        result = self._run_active_auth(session)
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
+        self.assertEqual(result.code, "auth_state_unverified")
+        self.assertEqual(len(session.calls), 5)
+
+    def test_non_object_json_is_not_authentication_proof(self) -> None:
+        for body in (b"not-json", b"[]"):
+            with self.subTest(body=body):
+                session = self._active_auth_session(
+                    _Response(
+                        200,
+                        _Headers({"Content-Type": "application/json"}),
+                        (body,),
+                    )
+                )
+                result = self._run_active_auth(session)
+                self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
+                self.assertEqual(result.code, "auth_state_unverified")
+
+    @staticmethod
+    def _active_auth_session(verification: _Response) -> _Session:
+        form = b'''<html><form method="post" action="/cas/login">
+        <input type="hidden" name="execution" value="e1s1">
+        <input name="username"><input name="password" type="password">
+        </form></html>'''
+        return _Session(
+            [
+                _Response(302, _Headers(Location=LOGIN_URL)),
+                _Response(200, _Headers(), (form,)),
+                _Response(
+                    302,
+                    _Headers(
+                        Location="https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
+                    ),
+                ),
+                _Response(200, _Headers()),
+                verification,
+            ]
+        )
+
+    @staticmethod
+    def _run_active_auth(session: _Session) -> cez_http_auth.AuthResult:
+        transport = __import__(
+            "collector_service.requests_preauth", fromlist=["RequestsSessionTransport"]
+        ).RequestsSessionTransport(
+            resolver=_resolver,
+            session_factory=lambda: session,
+        )
+        return cez_http_auth.CezHttpAuthClient(
+            runtime_config.HttpAuthDiscoveryConfiguration(
+                username="private-user", password="private-password"
+            ),
+            transport,
+            resolver=transport.resolve,
+        ).authenticate()
 
     def test_mode_is_explicit_and_mutually_exclusive(self) -> None:
         self.assertFalse(runtime_config._load_requests_preauth_compatibility_mode({}))
@@ -352,6 +437,34 @@ class RequestsPreauthTests(unittest.TestCase):
             self.assertEqual(server.main(), 1)
         transport_class.assert_called_once_with()
         authenticate.assert_called_once_with()
+
+    def test_server_accepts_only_positive_active_auth_proof(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            requests_preauth_compatibility=False,
+            http_auth_discovery=runtime_config.HttpAuthDiscoveryConfiguration(
+                username="private-user", password="private-password"
+            ),
+        )
+        result = cez_http_auth.AuthResult(
+            cez_http_auth.AuthStatus.AUTHENTICATED,
+            "auth_authenticated_endpoint_verified",
+        )
+        fake_transport = mock.Mock()
+        fake_transport.resolve = mock.Mock()
+        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch(
+            "collector_service.requests_preauth.RequestsSessionTransport",
+            return_value=fake_transport,
+        ), mock.patch.object(
+            server.CezHttpAuthClient, "authenticate", return_value=result
+        ), mock.patch(
+            "sys.stdout", io.StringIO()
+        ):
+            self.assertEqual(server.main(), 0)
 
 
 

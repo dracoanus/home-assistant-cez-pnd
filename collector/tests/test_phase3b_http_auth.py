@@ -106,6 +106,11 @@ def _successful_responses() -> list[cez_http_auth.HttpResponse]:
             ("Set-Cookie", "ticket=b; Secure"),
         ),
         _response(200, b"candidate application response"),
+        _response(
+            200,
+            b'{"meters":[]}',
+            ("Content-Type", "application/json; charset=utf-8"),
+        ),
     ]
 
 
@@ -376,12 +381,12 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             )
         rendered = repr(events) + output.getvalue()
         self.assertEqual(
-            result.code, "auth_success_condition_needs_live_verification"
+            result.code, "auth_authenticated_endpoint_verified"
         )
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["event"], "http_auth_result")
         self.assertEqual(
-            payload["code"], "auth_success_condition_needs_live_verification"
+            payload["code"], "auth_authenticated_endpoint_verified"
         )
         self.assertTrue(payload["timestamp"].endswith("Z"))
         self.assertNotIn("session", rendered)
@@ -587,7 +592,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         ).authenticate()
         self.assertEqual(result.code, "auth_operation_timeout")
 
-    def test_candidate_flow_returns_needs_live_verification_not_authenticated(self) -> None:
+    def test_authenticated_dashboard_json_proves_authentication(self) -> None:
         transport = _FakeTransport(_successful_responses())
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
         client = cez_http_auth.CezHttpAuthClient(
@@ -595,12 +600,18 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         )
         result = client.authenticate()
         self.assertEqual(
-            result.status, cez_http_auth.AuthStatus.NEEDS_LIVE_VERIFICATION
+            result.status, cez_http_auth.AuthStatus.AUTHENTICATED
         )
         self.assertEqual(
-            result.code, "auth_success_condition_needs_live_verification"
+            result.code, "auth_authenticated_endpoint_verified"
         )
-        self.assertEqual([request[0] for request in transport.requests], ["GET", "GET", "POST", "GET"])
+        self.assertEqual(
+            [request[0] for request in transport.requests],
+            ["GET", "GET", "POST", "GET", "GET"],
+        )
+        self.assertEqual(
+            transport.requests[-1][1], cez_http_auth.CEZ_PND_AUTH_CHECK_URL
+        )
         self.assertEqual(client._cookies.count, 0)
         self.assertTrue(transport.closed)
         self.assertEqual(events[-1].event, "http_auth_cleanup_complete")
@@ -660,7 +671,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                 _configuration(), transport, resolver=_resolver
             ).authenticate()
         self.assertEqual(
-            result.status, cez_http_auth.AuthStatus.NEEDS_LIVE_VERIFICATION
+            result.status, cez_http_auth.AuthStatus.AUTHENTICATED
         )
         self.assertFalse(transport.trust_environment)
 

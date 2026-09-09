@@ -495,8 +495,8 @@ class Phase3COneShotModeTests(unittest.TestCase):
             ),
         )
         result = cez_http_auth.AuthResult(
-            cez_http_auth.AuthStatus.NEEDS_LIVE_VERIFICATION,
-            "auth_success_condition_needs_live_verification",
+            cez_http_auth.AuthStatus.AUTHENTICATED,
+            "auth_authenticated_endpoint_verified",
         )
         fake_transport = mock.Mock()
         fake_transport.resolve = mock.Mock()
