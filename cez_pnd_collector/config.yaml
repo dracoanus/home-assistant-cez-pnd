@@ -1,5 +1,5 @@
 name: "CEZ PND Collector"
-version: "0.3.8"
+version: "0.3.9"
 slug: cez_pnd_collector
 description: "Authenticated CEZ PND Collector API (offline deployment-validation stage)."
 url: "https://github.com/dracoanus/home-assistant-cez-pnd"
@@ -41,6 +41,7 @@ options:
   tls_private_key_b64: null
   cez_discovery_mode: false
   cez_http_auth_discovery_mode: false
+  cez_requests_preauth_compatibility_mode: false
   cez_allowed_origins: []
 schema:
   meter_id: "match(^mtr_[a-f0-9]{32}$)"
@@ -49,6 +50,7 @@ schema:
   tls_private_key_b64: password
   cez_discovery_mode: bool
   cez_http_auth_discovery_mode: bool
+  cez_requests_preauth_compatibility_mode: bool
   cez_start_url: url?
   cez_auth_origin: url?
   cez_allowed_origins:

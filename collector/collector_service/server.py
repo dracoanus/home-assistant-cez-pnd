@@ -123,6 +123,15 @@ def main() -> int:
         outcome = run_discovery(configuration.discovery, emit_json_event)
         return 0 if outcome.succeeded and outcome.cleanup_verified else 1
 
+    if getattr(configuration, "requests_preauth_compatibility", False):
+        from .requests_preauth import RequestsPreauthCompatibilityClient
+
+        result = RequestsPreauthCompatibilityClient(
+            emit=emit_http_auth_json_event,
+        ).run()
+        emit_http_auth_json_event(SafeHttpAuthEvent.from_result(result))
+        return 0 if result.status is AuthStatus.NEEDS_LIVE_VERIFICATION else 1
+
     http_auth_configuration = getattr(configuration, "http_auth_discovery", None)
     if http_auth_configuration is not None:
         from .strict_http_transport import StrictHttpsTransport

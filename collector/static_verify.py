@@ -18,13 +18,19 @@ HTTP_AUTH_SOURCE = (ROOT / "collector_service" / "cez_http_auth.py").read_text(
 STRICT_TRANSPORT_SOURCE = (
     ROOT / "collector_service" / "strict_http_transport.py"
 ).read_text(encoding="utf-8")
+REQUESTS_PREAUTH_SOURCE = (
+    ROOT / "collector_service" / "requests_preauth.py"
+).read_text(encoding="utf-8")
+REQUESTS_COMPATIBILITY_REQUIREMENTS = (
+    ROOT / "requirements-requests-compatibility.txt"
+).read_text(encoding="utf-8")
 STRUCTURED_LOGGING_SOURCE = (
     ROOT / "collector_service" / "structured_logging.py"
 ).read_text(encoding="utf-8")
 NON_HTTP_AUTH_SOURCE = "\n".join(
     path.read_text(encoding="utf-8")
     for path in SOURCE_FILES
-    if path.name != "cez_http_auth.py"
+    if path.name not in {"cez_http_auth.py", "requests_preauth.py"}
 )
 RUNTIME_CONFIG_SOURCE = (ROOT / "collector_service" / "runtime_config.py").read_text(
     encoding="utf-8"
@@ -64,7 +70,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.8"
+assert VERSION == "0.3.9"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -74,12 +80,17 @@ assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
     "/opt/collector-service/collector_service"
 ) in DOCKERFILE
-assert "RUN " not in DOCKERFILE
-assert "USER root" not in DOCKERFILE
+assert DOCKERFILE.count("USER root") == 1
+assert DOCKERFILE.count("RUN ") == 1
+assert "pip install --disable-pip-version-check --no-cache-dir --no-deps --only-binary=:all:" in DOCKERFILE
 assert "USER 2000:2000" in DOCKERFILE
 assert 'CMD ["/opt/collector-venv/bin/python", "-m", "collector_service.server"]' in DOCKERFILE
-for installer in ("apt-get", "apt ", "pip install", "apk add", "curl ", "wget "):
+for installer in ("apt-get", "apt ", "apk add", "curl ", "wget "):
     assert installer not in DOCKERFILE
+assert REQUESTS_COMPATIBILITY_REQUIREMENTS.splitlines() == [
+    "requests==2.32.5",
+    "charset-normalizer==3.4.3",
+]
 
 for forbidden in (
     "--no-sandbox",
@@ -231,6 +242,12 @@ assert '"http_auth_result"' in HTTP_AUTH_SOURCE
 assert "SafeHttpAuthEvent.from_result(result)" in SERVER_SOURCE
 assert "auth_success_condition_needs_live_verification" in HTTP_AUTH_SOURCE
 assert "requests" not in HTTP_AUTH_SOURCE
+assert "requests.Session()" in REQUESTS_PREAUTH_SOURCE
+assert "session.trust_env = False" in REQUESTS_PREAUTH_SOURCE
+assert "allow_redirects=False" in REQUESTS_PREAUTH_SOURCE
+assert "verify=True" in REQUESTS_PREAUTH_SOURCE
+assert "validate_destination(url, state, \"GET\", self._resolver)" in REQUESTS_PREAUTH_SOURCE
+assert "CREDENTIAL_SUBMISSION" not in REQUESTS_PREAUTH_SOURCE
 assert "BeautifulSoup" not in HTTP_AUTH_SOURCE
 assert re.search(
     r"^\s*(?:import logging|from logging import)", HTTP_AUTH_SOURCE, re.MULTILINE
@@ -258,6 +275,7 @@ assert "ProxyHandler" not in STRICT_TRANSPORT_SOURCE
 assert "HTTPSConnection" not in STRICT_TRANSPORT_SOURCE
 assert "MAX_ADDRESS_ATTEMPTS = 4" in STRICT_TRANSPORT_SOURCE
 assert 'options.get("cez_http_auth_discovery_mode", False)' in RUNTIME_CONFIG_SOURCE
+assert 'options.get("cez_requests_preauth_compatibility_mode", False)' in RUNTIME_CONFIG_SOURCE
 assert "discovery_config_conflicting_modes" in RUNTIME_CONFIG_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
@@ -367,7 +385,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.8"',
+    'version: "0.3.9"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -407,6 +425,8 @@ assert "tls_private_key_b64" in APP_MANIFEST
 assert "  cez_discovery_mode: false" in APP_MANIFEST
 assert "  cez_http_auth_discovery_mode: false" in APP_MANIFEST
 assert "  cez_http_auth_discovery_mode: bool" in APP_MANIFEST
+assert "  cez_requests_preauth_compatibility_mode: false" in APP_MANIFEST
+assert "  cez_requests_preauth_compatibility_mode: bool" in APP_MANIFEST
 assert "  cez_allowed_origins: []" in APP_MANIFEST
 assert "  cez_start_url: url?" in APP_MANIFEST
 assert "  cez_auth_origin: url?" in APP_MANIFEST

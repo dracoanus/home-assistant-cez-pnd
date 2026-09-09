@@ -62,3 +62,15 @@ only fixed non-secret events, destroys its session, and exits with
 This mode is for a separately authorized HA OS live test only. See the
 [Phase 3 document](../docs/phase3a-cez-auth-discovery.md) for its pinned DNS,
 TLS, redirect, credential, evidence, and open-verification requirements.
+
+## Temporary requests PREAUTH compatibility mode
+
+`cez_requests_preauth_compatibility_mode` is disabled by default and is
+mutually exclusive with both discovery modes above. When explicitly enabled,
+it follows only the reviewed PREAUTH `GET` redirect chain with
+`requests.Session`, stops before form parsing or credential submission, clears
+its memory-only cookies, and exits. TLS verification and manual per-hop
+destination/DNS validation remain mandatory. The library performs its own DNS
+lookup for the connection after validation, so this experiment does not have
+the strict transport's validated-IP connection guarantee and is not the final
+transport architecture.

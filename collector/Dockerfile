@@ -1,5 +1,10 @@
 FROM ghcr.io/dracoanus/home-assistant-cez-pnd-collector-runtime:0.1.0@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc
 
+USER root
+COPY --chown=0:0 --chmod=0444 requirements-requests-compatibility.txt /tmp/requirements-requests-compatibility.txt
+RUN /opt/collector-venv/bin/pip install --disable-pip-version-check --no-cache-dir --no-deps --only-binary=:all: --requirement /tmp/requirements-requests-compatibility.txt \
+    && rm -f /tmp/requirements-requests-compatibility.txt
+
 COPY --chown=0:0 --chmod=0555 collector_service /opt/collector-service/collector_service
 
 USER 2000:2000
