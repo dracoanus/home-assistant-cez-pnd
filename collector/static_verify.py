@@ -26,6 +26,7 @@ NON_HTTP_AUTH_SOURCE = "\n".join(
 RUNTIME_CONFIG_SOURCE = (ROOT / "collector_service" / "runtime_config.py").read_text(
     encoding="utf-8"
 )
+SERVER_SOURCE = (ROOT / "collector_service" / "server.py").read_text(encoding="utf-8")
 DISCOVERY_SOURCE = (ROOT / "collector_service" / "cez_discovery.py").read_text(
     encoding="utf-8"
 )
@@ -60,7 +61,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.0"
+assert VERSION == "0.3.1"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
@@ -190,6 +191,8 @@ assert "MAX_HTML_BYTES = 256 * 1024" in HTTP_AUTH_SOURCE
 assert "MAX_FORM_CONTROLS = 64" in HTTP_AUTH_SOURCE
 assert "MAX_COOKIE_COUNT = 32" in HTTP_AUTH_SOURCE
 assert "AuthStatus.NEEDS_LIVE_VERIFICATION" in HTTP_AUTH_SOURCE
+assert '"http_auth_result"' in HTTP_AUTH_SOURCE
+assert "SafeHttpAuthEvent.from_result(result)" in SERVER_SOURCE
 assert "auth_success_condition_needs_live_verification" in HTTP_AUTH_SOURCE
 assert "requests" not in HTTP_AUTH_SOURCE
 assert "BeautifulSoup" not in HTTP_AUTH_SOURCE
@@ -326,7 +329,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.0"',
+    'version: "0.3.1"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

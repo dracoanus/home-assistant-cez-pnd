@@ -130,6 +130,7 @@ def main() -> int:
         except Exception:
             emit_http_auth_json_event(SafeHttpAuthEvent("protocol_error"))
             return 1
+        emit_http_auth_json_event(SafeHttpAuthEvent.from_result(result))
         return 0 if result.status is AuthStatus.NEEDS_LIVE_VERIFICATION else 1
 
     try:

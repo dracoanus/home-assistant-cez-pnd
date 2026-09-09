@@ -307,6 +307,63 @@ class Phase3COneShotModeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cez_http_auth.SafeHttpAuthEvent("preauth_reached", "attacker.invalid")
 
+    def test_http_auth_failed_result_emits_only_fixed_status_and_code(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            http_auth_discovery=runtime_config.HttpAuthDiscoveryConfiguration(
+                username="private-user", password="private-password"
+            ),
+        )
+        result = cez_http_auth.AuthResult(
+            cez_http_auth.AuthStatus.FAILED, "auth_state_unverified"
+        )
+        output = io.StringIO()
+        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch(
+            "collector_service.strict_http_transport.StrictHttpsTransport"
+        ), mock.patch.object(
+            server.CezHttpAuthClient, "authenticate", return_value=result
+        ), mock.patch("sys.stdout", output):
+            self.assertEqual(server.main(), 1)
+        self.assertEqual(
+            output.getvalue().strip(),
+            '{"event":"http_auth_result","status":"failed","code":"auth_state_unverified"}',
+        )
+        self.assertNotIn("private-user", output.getvalue())
+        self.assertNotIn("private-password", output.getvalue())
+
+    def test_http_auth_unverified_result_emits_fixed_status_and_code(self) -> None:
+        result = cez_http_auth.AuthResult(
+            cez_http_auth.AuthStatus.NEEDS_LIVE_VERIFICATION,
+            "auth_success_condition_needs_live_verification",
+        )
+        event = cez_http_auth.SafeHttpAuthEvent.from_result(result)
+        self.assertEqual(
+            event.as_dict(),
+            {
+                "event": "http_auth_result",
+                "status": "needs_live_verification",
+                "code": "auth_success_condition_needs_live_verification",
+            },
+        )
+
+    def test_http_auth_result_rejects_unapproved_code(self) -> None:
+        with self.assertRaises(ValueError):
+            cez_http_auth.AuthResult(
+                cez_http_auth.AuthStatus.FAILED, "raw private exception detail"
+            )
+        with self.assertRaises(ValueError):
+            cez_http_auth.AuthResult("failed", "auth_state_unverified")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            cez_http_auth.SafeHttpAuthEvent(
+                "http_auth_result",
+                status=cez_http_auth.AuthStatus.FAILED,
+                code="raw private exception detail",
+            )
+
     def test_conflicting_modes_fail_before_browser_or_network(self) -> None:
         with mock.patch("socket.getaddrinfo") as resolver, mock.patch.object(
             server, "run_discovery"

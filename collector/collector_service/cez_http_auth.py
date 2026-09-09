@@ -53,6 +53,7 @@ class AuthStatus(str, Enum):
 SAFE_HTTP_AUTH_EVENTS = frozenset(
     {
         "http_auth_started",
+        "http_auth_result",
         "preauth_reached",
         "login_form_validated",
         "credentials_submitted",
@@ -77,17 +78,32 @@ REVIEWED_HOSTNAMES = frozenset(
 class SafeHttpAuthEvent:
     event: str
     hostname: str | None = None
+    status: AuthStatus | None = None
+    code: str | None = None
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
+        if self.event == "http_auth_result":
+            if self.hostname is not None or self.status is None or self.code is None:
+                raise ValueError("invalid HTTP authentication result event")
+            AuthResult(self.status, self.code)
+        elif self.status is not None or self.code is not None:
+            raise ValueError("unexpected HTTP authentication result fields")
+
+    @classmethod
+    def from_result(cls, result: AuthResult) -> SafeHttpAuthEvent:
+        return cls("http_auth_result", status=result.status, code=result.code)
 
     def as_dict(self) -> dict[str, str]:
         result = {"event": self.event}
         if self.hostname is not None:
             result["hostname"] = self.hostname
+        if self.status is not None and self.code is not None:
+            result["status"] = self.status.value
+            result["code"] = self.code
         return result
 
 
@@ -124,6 +140,8 @@ class AuthResult:
     code: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.status, AuthStatus):
+            raise ValueError("unsafe authentication result status")
         if self.status is AuthStatus.FAILED and self.code not in SAFE_ERROR_CODES:
             raise ValueError("unsafe authentication result code")
         if (
