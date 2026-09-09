@@ -70,7 +70,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.10"
+assert VERSION == "0.3.11"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -208,6 +208,14 @@ assert "MAX_REDIRECTS = 8" in HTTP_AUTH_SOURCE
 assert "MAX_RESPONSE_BODY_BYTES = 512 * 1024" in HTTP_AUTH_SOURCE
 assert "MAX_HTML_BYTES = 256 * 1024" in HTTP_AUTH_SOURCE
 assert "MAX_FORM_CONTROLS = 64" in HTTP_AUTH_SOURCE
+assert "MAX_FORM_VALUE_BYTES = 4096" in HTTP_AUTH_SOURCE
+for form_limit_code in (
+    "auth_form_document_too_large",
+    "auth_form_control_limit",
+    "auth_form_name_too_large",
+    "auth_form_value_too_large",
+):
+    assert form_limit_code in HTTP_AUTH_SOURCE
 assert "MAX_COOKIE_COUNT = 32" in HTTP_AUTH_SOURCE
 assert 'REVIEWED_COOKIE_DOMAINS = frozenset({"cez.cz", "cezdistribuce.cz"})' in HTTP_AUTH_SOURCE
 assert 'domain == boundary or domain.endswith("." + boundary)' in HTTP_AUTH_SOURCE
@@ -388,7 +396,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.10"',
+    'version: "0.3.11"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

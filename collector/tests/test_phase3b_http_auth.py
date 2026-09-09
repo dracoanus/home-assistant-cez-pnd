@@ -508,7 +508,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             ),
             (
                 _response(200, b"<form>" + b"x" * cez_http_auth.MAX_HTML_BYTES),
-                "auth_form_too_large",
+                "auth_form_document_too_large",
             ),
             (
                 _response(
@@ -518,7 +518,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                         b'value="' + b"x" * (cez_http_auth.MAX_FORM_VALUE_BYTES + 1) + b'"',
                     ),
                 ),
-                "auth_form_too_large",
+                "auth_form_value_too_large",
             ),
         )
         for response, code in cases:
@@ -541,7 +541,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         )
         malformed = FORM_HTML.replace(b"</form>", b"")
         for html, code in (
-            (excessive, "auth_form_too_large"),
+            (excessive, "auth_form_control_limit"),
             (malformed, "auth_form_invalid"),
         ):
             transport = _FakeTransport(
@@ -552,6 +552,18 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                     _configuration(), transport, resolver=_resolver
                 ).authenticate()
                 self.assertEqual(result.code, code)
+
+    def test_oversized_form_control_name_has_fixed_branch_code(self) -> None:
+        oversized_name = FORM_HTML.replace(
+            b'name="execution"', b'name="' + b"n" * 257 + b'"'
+        )
+        transport = _FakeTransport(
+            [_response(302, b"", ("Location", LOGIN_URL)), _response(200, oversized_name)]
+        )
+        result = cez_http_auth.CezHttpAuthClient(
+            _configuration(), transport, resolver=_resolver
+        ).authenticate()
+        self.assertEqual(result.code, "auth_form_name_too_large")
 
     def test_total_operation_deadline_fails_closed(self) -> None:
         times = iter((0.0, 0.0, 61.0))
