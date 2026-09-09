@@ -18,6 +18,9 @@ HTTP_AUTH_SOURCE = (ROOT / "collector_service" / "cez_http_auth.py").read_text(
 STRICT_TRANSPORT_SOURCE = (
     ROOT / "collector_service" / "strict_http_transport.py"
 ).read_text(encoding="utf-8")
+STRUCTURED_LOGGING_SOURCE = (
+    ROOT / "collector_service" / "structured_logging.py"
+).read_text(encoding="utf-8")
 NON_HTTP_AUTH_SOURCE = "\n".join(
     path.read_text(encoding="utf-8")
     for path in SOURCE_FILES
@@ -61,8 +64,12 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.1"
+assert VERSION == "0.3.2"
 assert f'__version__ = "{VERSION}"' in SOURCE
+assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
+assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
+assert '{"timestamp": utc_timestamp(now), **fields}' in STRUCTURED_LOGGING_SOURCE
+assert SOURCE.count("from .structured_logging import structured_event_json") == 3
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
     "/opt/collector-service/collector_service"
@@ -114,7 +121,7 @@ assert "ssl.PROTOCOL_TLS_SERVER" in SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
-assert '"event":"service_stopped"' in SOURCE
+assert '"event": "service_stopped"' in SERVER_SOURCE
 assert (
     'SUPERVISOR_SELF_INFO_URL = "http://supervisor/addons/self/info"'
     in RUNTIME_CONFIG_SOURCE
@@ -190,13 +197,16 @@ assert "MAX_RESPONSE_BODY_BYTES = 512 * 1024" in HTTP_AUTH_SOURCE
 assert "MAX_HTML_BYTES = 256 * 1024" in HTTP_AUTH_SOURCE
 assert "MAX_FORM_CONTROLS = 64" in HTTP_AUTH_SOURCE
 assert "MAX_COOKIE_COUNT = 32" in HTTP_AUTH_SOURCE
+assert 'REVIEWED_COOKIE_DOMAINS = frozenset({"cez.cz", "cezdistribuce.cz"})' in HTTP_AUTH_SOURCE
 assert "AuthStatus.NEEDS_LIVE_VERIFICATION" in HTTP_AUTH_SOURCE
 assert '"http_auth_result"' in HTTP_AUTH_SOURCE
 assert "SafeHttpAuthEvent.from_result(result)" in SERVER_SOURCE
 assert "auth_success_condition_needs_live_verification" in HTTP_AUTH_SOURCE
 assert "requests" not in HTTP_AUTH_SOURCE
 assert "BeautifulSoup" not in HTTP_AUTH_SOURCE
-assert "logging" not in HTTP_AUTH_SOURCE
+assert re.search(
+    r"^\s*(?:import logging|from logging import)", HTTP_AUTH_SOURCE, re.MULTILINE
+) is None
 assert "CezHttpAuthClient" not in (
     ROOT / "collector_service" / "api.py"
 ).read_text(encoding="utf-8")
@@ -329,7 +339,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.1"',
+    'version: "0.3.2"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

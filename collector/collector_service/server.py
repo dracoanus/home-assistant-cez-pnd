@@ -22,6 +22,7 @@ from .runtime_config import (
     PrivateConfigurationError,
     load_runtime_configuration,
 )
+from .structured_logging import structured_event_json
 
 
 BIND_ADDRESS = "0.0.0.0"
@@ -94,21 +95,28 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
 def main() -> int:
     os.umask(0o077)
     if os.geteuid() != 2000 or os.getegid() != 2000:
-        print('{"event":"startup_failed","code":"non_root_identity_mismatch"}', file=sys.stderr)
+        print(
+            structured_event_json(
+                {"event": "startup_failed", "code": "non_root_identity_mismatch"}
+            ),
+            file=sys.stderr,
+        )
         return 1
     try:
         configuration = load_runtime_configuration()
     except (PrivateConfigurationError, DiscoveryConfigurationError) as error:
         print(
-            json.dumps(
-                {"event": "startup_failed", "code": error.code},
-                separators=(",", ":"),
-            ),
+            structured_event_json({"event": "startup_failed", "code": error.code}),
             file=sys.stderr,
         )
         return 1
     except (OSError, ValueError, json.JSONDecodeError):
-        print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
+        print(
+            structured_event_json(
+                {"event": "startup_failed", "code": "invalid_private_configuration"}
+            ),
+            file=sys.stderr,
+        )
         return 1
 
     if configuration.discovery is not None:
@@ -138,19 +146,23 @@ def main() -> int:
         server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
         server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
     except (OSError, ValueError, json.JSONDecodeError):
-        print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
+        print(
+            structured_event_json(
+                {"event": "startup_failed", "code": "invalid_private_configuration"}
+            ),
+            file=sys.stderr,
+        )
         return 1
 
     print(
-        json.dumps(
+        structured_event_json(
             {
                 "event": "service_started",
                 "bind": BIND_ADDRESS,
                 "port": BIND_PORT,
                 "transport": "https",
                 "configuration_source": configuration.source,
-            },
-            separators=(",", ":"),
+            }
         ),
         flush=True,
     )
@@ -161,21 +173,20 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-        print('{"event":"service_stopped"}', flush=True)
+        print(structured_event_json({"event": "service_stopped"}), flush=True)
     return 0
 
 
 def _audit(response: ApiResponse, method: str) -> None:
     print(
-        json.dumps(
+        structured_event_json(
             {
                 "event": "request_completed",
                 "request_id": response.request_id,
                 "method": method,
                 "route": response.route,
                 "status": response.status,
-            },
-            separators=(",", ":"),
+            }
         ),
         flush=True,
     )

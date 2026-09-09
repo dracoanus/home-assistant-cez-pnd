@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import socket
 import ssl
 from types import SimpleNamespace
@@ -328,9 +329,12 @@ class Phase3COneShotModeTests(unittest.TestCase):
             server.CezHttpAuthClient, "authenticate", return_value=result
         ), mock.patch("sys.stdout", output):
             self.assertEqual(server.main(), 1)
-        self.assertEqual(
-            output.getvalue().strip(),
-            '{"event":"http_auth_result","status":"failed","code":"auth_state_unverified"}',
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["event"], "http_auth_result")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["code"], "auth_state_unverified")
+        self.assertRegex(
+            payload["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
         )
         self.assertNotIn("private-user", output.getvalue())
         self.assertNotIn("private-password", output.getvalue())
@@ -425,7 +429,11 @@ class Phase3COneShotModeTests(unittest.TestCase):
             side_effect=RuntimeError("private transport detail"),
         ), mock.patch("sys.stdout", output):
             self.assertEqual(server.main(), 1)
-        self.assertEqual(output.getvalue().strip(), '{"event":"protocol_error"}')
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["event"], "protocol_error")
+        self.assertRegex(
+            payload["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+        )
 
 
 if __name__ == "__main__":

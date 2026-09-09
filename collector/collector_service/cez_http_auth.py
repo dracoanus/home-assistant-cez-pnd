@@ -12,13 +12,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from html.parser import HTMLParser
 import ipaddress
-import json
 import socket
 import time
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from .runtime_config import DiscoveryConfiguration, HttpAuthDiscoveryConfiguration
+from .structured_logging import structured_event_json
 
 
 CEZ_PND_START_URL = (
@@ -72,6 +72,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
 REVIEWED_HOSTNAMES = frozenset(
     {"pnd.cezdistribuce.cz", "mepas.cez.cz", "dip.cezdistribuce.cz"}
 )
+REVIEWED_COOKIE_DOMAINS = frozenset({"cez.cz", "cezdistribuce.cz"})
 
 
 @dataclass(frozen=True)
@@ -449,14 +450,53 @@ def _parse_login_form(html: bytes, page_url: str) -> _ParsedForm:
     return candidates[0]
 
 
+@dataclass(frozen=True)
+class _Cookie:
+    domain: str = field(repr=False)
+    name: str = field(repr=False)
+    value: str = field(repr=False)
+    host_only: bool
+
+
+def _domain_matches(hostname: str, domain: str) -> bool:
+    return hostname == domain or hostname.endswith("." + domain)
+
+
+def _normalize_cookie_domain(value: str) -> str:
+    domain = value.strip().lower()
+    if domain.startswith("."):
+        domain = domain[1:]
+    labels = domain.split(".")
+    if (
+        not domain
+        or len(domain) > 253
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in label)
+            for label in labels
+        )
+    ):
+        raise _AuthFailure("auth_cookie_invalid")
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        return domain
+    raise _AuthFailure("auth_cookie_invalid")
+
+
 class _MemoryCookieJar:
-    """Small exact-host cookie jar with bounded, memory-only values."""
+    """Small CEZ-bound cookie jar with bounded, memory-only values."""
 
     def __init__(self) -> None:
-        self._cookies: dict[tuple[str, str], str] = {}
+        self._cookies: dict[tuple[str, str, bool], _Cookie] = {}
 
     def absorb(self, response: HttpResponse, response_url: str) -> None:
-        hostname = urlsplit(response_url).hostname or ""
+        hostname = (urlsplit(response_url).hostname or "").lower()
+        if hostname not in REVIEWED_HOSTNAMES:
+            raise _AuthFailure("auth_cookie_invalid")
         for name, value in response.headers:
             if name.lower() != "set-cookie":
                 continue
@@ -467,23 +507,40 @@ class _MemoryCookieJar:
             cookie_name = cookie_name.strip()
             if not separator or not cookie_name or any(ch in cookie_name for ch in "\r\n\t ;,"):
                 raise _AuthFailure("auth_cookie_invalid")
-            attributes = {
-                item.partition("=")[0].strip().lower(): item.partition("=")[2].strip()
-                for item in value.split(";")[1:]
-            }
-            domain = attributes.get("domain", hostname).lstrip(".").lower()
-            if domain != hostname:
+            domain_attributes = []
+            for item in value.split(";")[1:]:
+                attribute, separator, attribute_value = item.partition("=")
+                if attribute.strip().lower() == "domain":
+                    if not separator:
+                        raise _AuthFailure("auth_cookie_invalid")
+                    domain_attributes.append(attribute_value)
+            if len(domain_attributes) > 1:
                 raise _AuthFailure("auth_cookie_invalid")
-            self._cookies[(hostname, cookie_name)] = cookie_value
+            host_only = not domain_attributes
+            domain = (
+                hostname
+                if host_only
+                else _normalize_cookie_domain(domain_attributes[0])
+            )
+            if not host_only and (
+                domain not in REVIEWED_COOKIE_DOMAINS
+                or not _domain_matches(hostname, domain)
+            ):
+                raise _AuthFailure("auth_cookie_invalid")
+            cookie = _Cookie(domain, cookie_name, cookie_value, host_only)
+            self._cookies[(domain, cookie_name, host_only)] = cookie
             if len(self._cookies) > MAX_COOKIE_COUNT:
                 raise _AuthFailure("auth_cookie_limit")
 
     def header_for(self, url: str) -> str | None:
-        hostname = urlsplit(url).hostname or ""
+        hostname = (urlsplit(url).hostname or "").lower()
+        if hostname not in REVIEWED_HOSTNAMES:
+            raise _AuthFailure("auth_cookie_invalid")
         pairs = [
-            f"{name}={value}"
-            for (domain, name), value in self._cookies.items()
-            if domain == hostname
+            f"{cookie.name}={cookie.value}"
+            for cookie in self._cookies.values()
+            if (cookie.host_only and cookie.domain == hostname)
+            or (not cookie.host_only and _domain_matches(hostname, cookie.domain))
         ]
         value = "; ".join(pairs)
         if len(value.encode("utf-8")) > MAX_COOKIE_COUNT * MAX_COOKIE_BYTES:
@@ -737,4 +794,4 @@ def _failure_event(code: str) -> str:
 def emit_json_event(event: SafeHttpAuthEvent) -> None:
     """Emit one allowlisted event without URLs, queries, or secret values."""
 
-    print(json.dumps(event.as_dict(), separators=(",", ":")), flush=True)
+    print(structured_event_json(event.as_dict()), flush=True)

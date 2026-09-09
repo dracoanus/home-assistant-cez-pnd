@@ -128,6 +128,18 @@ def _configuration() -> runtime_config.DiscoveryConfiguration:
 
 
 class Phase3ADiscoveryTests(unittest.TestCase):
+    def test_discovery_json_emitter_adds_timestamp_without_changing_event(self) -> None:
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            cez_discovery.emit_json_event(
+                cez_discovery.SafeDiscoveryEvent("browser_started")
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["event"], "browser_started")
+        self.assertRegex(
+            payload["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+        )
+
     def test_discovery_configuration_is_optional_for_normal_startup(self) -> None:
         self.assertIsNone(
             runtime_config._load_discovery_configuration(

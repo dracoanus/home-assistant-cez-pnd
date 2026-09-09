@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import secrets
 from types import SimpleNamespace
@@ -109,6 +110,121 @@ def _successful_responses() -> list[cez_http_auth.HttpResponse]:
 
 
 class Phase3BHttpAuthTests(unittest.TestCase):
+    def test_host_only_cookie_is_sent_only_to_exact_reviewed_host(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        jar.absorb(
+            _response(200, b"", ("Set-Cookie", "session=private; Secure")),
+            "https://dip.cezdistribuce.cz/login",
+        )
+        self.assertEqual(
+            jar.header_for("https://dip.cezdistribuce.cz/login"),
+            "session=private",
+        )
+        self.assertIsNone(
+            jar.header_for("https://pnd.cezdistribuce.cz/cezpnd2")
+        )
+
+    def test_reviewed_parent_domain_cookie_matches_reviewed_sibling(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        jar.absorb(
+            _response(
+                200,
+                b"",
+                ("Set-Cookie", "session=private; Domain=.cezdistribuce.cz; Secure"),
+            ),
+            "https://dip.cezdistribuce.cz/login",
+        )
+        self.assertEqual(
+            jar.header_for("https://pnd.cezdistribuce.cz/cezpnd2"),
+            "session=private",
+        )
+
+    def test_reviewed_cez_parent_domain_cookie_is_accepted(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        jar.absorb(
+            _response(
+                200, b"", ("Set-Cookie", "session=private; Domain=.cez.cz; Secure")
+            ),
+            "https://mepas.cez.cz/cas/login",
+        )
+        self.assertEqual(
+            jar.header_for("https://mepas.cez.cz/cas/login"), "session=private"
+        )
+
+    def test_unapproved_or_non_parent_cookie_domains_are_rejected(self) -> None:
+        for domain in (".cz", ".com", "example.com", "pnd.cezdistribuce.cz"):
+            with self.subTest(domain=domain):
+                jar = cez_http_auth._MemoryCookieJar()
+                with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                    jar.absorb(
+                        _response(
+                            200,
+                            b"",
+                            ("Set-Cookie", f"session=private; Domain={domain}; Secure"),
+                        ),
+                        "https://dip.cezdistribuce.cz/login",
+                    )
+                self.assertEqual(raised.exception.code, "auth_cookie_invalid")
+
+    def test_cookie_is_never_sent_to_unreviewed_hostname(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        jar.absorb(
+            _response(
+                200,
+                b"",
+                ("Set-Cookie", "session=private; Domain=.cezdistribuce.cz; Secure"),
+            ),
+            "https://dip.cezdistribuce.cz/login",
+        )
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            jar.header_for("https://unreviewed.cezdistribuce.cz/")
+        self.assertEqual(raised.exception.code, "auth_cookie_invalid")
+
+    def test_cookie_limits_and_cleanup_remain_enforced(self) -> None:
+        jar = cez_http_auth._MemoryCookieJar()
+        for index in range(cez_http_auth.MAX_COOKIE_COUNT):
+            jar.absorb(
+                _response(200, b"", ("Set-Cookie", f"c{index}=v; Secure")),
+                "https://dip.cezdistribuce.cz/login",
+            )
+        self.assertEqual(jar.count, cez_http_auth.MAX_COOKIE_COUNT)
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            jar.absorb(
+                _response(200, b"", ("Set-Cookie", "overflow=v; Secure")),
+                "https://dip.cezdistribuce.cz/login",
+            )
+        self.assertEqual(raised.exception.code, "auth_cookie_limit")
+        jar.clear()
+        self.assertEqual(jar.count, 0)
+        with self.assertRaises(cez_http_auth._AuthFailure) as oversized:
+            jar.absorb(
+                _response(
+                    200,
+                    b"",
+                    ("Set-Cookie", "large=" + "x" * cez_http_auth.MAX_COOKIE_BYTES),
+                ),
+                "https://dip.cezdistribuce.cz/login",
+            )
+        self.assertEqual(oversized.exception.code, "auth_cookie_limit")
+
+    def test_invalid_cookie_diagnostics_do_not_contain_cookie_material(self) -> None:
+        raw_cookie = "session=private-cookie; Domain=example.com"
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        client = cez_http_auth.CezHttpAuthClient(
+            _configuration(),
+            _FakeTransport(
+                [_response(302, b"", ("Location", LOGIN_URL), ("Set-Cookie", raw_cookie))]
+            ),
+            resolver=_resolver,
+            emit=events.append,
+        )
+        result = client.authenticate()
+        rendered = repr(events) + repr(result)
+        self.assertEqual(result.code, "auth_cookie_invalid")
+        self.assertNotIn("session", rendered)
+        self.assertNotIn("private-cookie", rendered)
+        self.assertNotIn("example.com", rendered)
+
     def test_approved_preauth_destination(self) -> None:
         normalized = cez_http_auth.validate_destination(
             cez_http_auth.CEZ_PND_START_URL,
@@ -374,6 +490,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         fake_server = mock.Mock()
         fake_server.socket = object()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
+        output = io.StringIO()
         configuration = SimpleNamespace(
             verifier=mock.Mock(),
             tls_context=mock.Mock(wrap_socket=mock.Mock(return_value=object())),
@@ -390,9 +507,18 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             cez_http_auth.CezHttpAuthClient, "authenticate"
         ) as authenticate, mock.patch.object(
             server.signal, "signal"
-        ), mock.patch("sys.stdout", io.StringIO()):
+        ), mock.patch("sys.stdout", output):
             self.assertEqual(server.main(), 0)
         authenticate.assert_not_called()
+        payloads = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            [payload["event"] for payload in payloads],
+            ["service_started", "service_stopped"],
+        )
+        for payload in payloads:
+            self.assertRegex(
+                payload["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+            )
 
     def test_current_synthetic_api_semantics_are_unchanged(self) -> None:
         token = secrets.token_urlsafe(32)
