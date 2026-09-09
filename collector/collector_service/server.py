@@ -10,7 +10,18 @@ import socket
 import sys
 
 from .api import ApiResponse, CollectorApi
-from .runtime_config import PrivateConfigurationError, load_runtime_configuration
+from .cez_discovery import emit_json_event, run_discovery
+from .cez_http_auth import (
+    AuthStatus,
+    CezHttpAuthClient,
+    SafeHttpAuthEvent,
+    emit_json_event as emit_http_auth_json_event,
+)
+from .runtime_config import (
+    DiscoveryConfigurationError,
+    PrivateConfigurationError,
+    load_runtime_configuration,
+)
 
 
 BIND_ADDRESS = "0.0.0.0"
@@ -87,10 +98,7 @@ def main() -> int:
         return 1
     try:
         configuration = load_runtime_configuration()
-        server = CollectorHttpServer((BIND_ADDRESS, BIND_PORT), CollectorRequestHandler)
-        server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
-        server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
-    except PrivateConfigurationError as error:
+    except (PrivateConfigurationError, DiscoveryConfigurationError) as error:
         print(
             json.dumps(
                 {"event": "startup_failed", "code": error.code},
@@ -99,6 +107,35 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    except (OSError, ValueError, json.JSONDecodeError):
+        print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
+        return 1
+
+    if configuration.discovery is not None:
+        outcome = run_discovery(configuration.discovery, emit_json_event)
+        return 0 if outcome.succeeded and outcome.cleanup_verified else 1
+
+    http_auth_configuration = getattr(configuration, "http_auth_discovery", None)
+    if http_auth_configuration is not None:
+        from .strict_http_transport import StrictHttpsTransport
+
+        try:
+            transport = StrictHttpsTransport()
+            result = CezHttpAuthClient(
+                http_auth_configuration,
+                transport,
+                resolver=transport.resolve,
+                emit=emit_http_auth_json_event,
+            ).authenticate()
+        except Exception:
+            emit_http_auth_json_event(SafeHttpAuthEvent("protocol_error"))
+            return 1
+        return 0 if result.status is AuthStatus.NEEDS_LIVE_VERIFICATION else 1
+
+    try:
+        server = CollectorHttpServer((BIND_ADDRESS, BIND_PORT), CollectorRequestHandler)
+        server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
+        server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
     except (OSError, ValueError, json.JSONDecodeError):
         print('{"event":"startup_failed","code":"invalid_private_configuration"}', file=sys.stderr)
         return 1

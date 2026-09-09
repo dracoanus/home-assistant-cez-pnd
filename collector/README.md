@@ -1,8 +1,9 @@
 # Collector service skeleton
 
-This directory is the initial Phase 2B Collector service and API foundation.
-It contains only synthetic offline measurement data and never starts Chromium,
-contacts CEZ, accepts CEZ credentials, or exposes browser control.
+This directory contains the Phase 2B synthetic Collector service and the
+unreleased Phase 3A one-shot authentication-discovery foundation. Normal
+service mode remains synthetic-only. No browser control is exposed through
+the Collector API.
 
 The complete Synology/Docker offline smoke profile has passed. See the
 [Phase 2B validation evidence](../docs/phase2b-collector-service-validation.md).
@@ -33,9 +34,8 @@ Selenium.
   They do not contain headers, query strings, tokens, measurement values, DOM,
   screenshots, or process details.
 
-Version `0.2.2` retains the experimental HA OS deployment bootstrap and its
-fixed authenticated self-info endpoint at the Supervisor v2 App path. It adds
-only allowlisted, non-secret private-configuration failure-stage codes.
+Release `0.2.3` retains the experimental HA OS deployment bootstrap and its
+authenticated self-info endpoint at the Supervisor v1 App path.
 The non-root service retrieves only its own Supervisor-managed App options.
 Options hold a token SHA-256 verifier, never the plaintext bearer token, plus
 the TLS certificate/private key. TLS material is loaded through mode-0600 files
@@ -46,6 +46,13 @@ Production pairing, rotation/revocation UX, TLS issuance and renewal, and HA
 App `/data` ownership/backup behavior remain **OPEN / NEEDS VERIFICATION**.
 The complete design and gate are in the
 [Collector HA App plan](../docs/phase2b-collector-ha-app.md).
+
+When explicitly enabled through Supervisor options, Phase 3A runs one
+temporary browser session and exits. Credentials remain in memory and the
+temporary `/tmp` profile only for that run. A local CONNECT proxy permits only
+the configured HTTPS origins on port 443, Chromium DNS is disabled, downloads
+are denied, and browser/driver logs are discarded. See the
+[Phase 3A discovery design](../docs/phase3a-cez-auth-discovery.md).
 
 ## API
 
@@ -80,6 +87,6 @@ short-lived test-only TLS and bearer material, starts this image without a
 published host port, exercises the three API routes, and verifies graceful
 shutdown. It is not a production configuration or pairing design.
 
-The prepared production-oriented App manifest references the future immutable
-`0.2.2` GHCR image and exposes no host port. This change does not publish the
-image; publication requires a separate review.
+The App manifest references the immutable released `0.2.3` GHCR image and
+exposes no host port. Phase 3A remains unreleased source pending review and
+offline validation.

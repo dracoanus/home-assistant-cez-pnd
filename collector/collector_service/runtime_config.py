@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import base64
 import binascii
 import json
@@ -12,6 +12,7 @@ from pathlib import Path
 import ssl
 import tempfile
 from typing import Iterator
+import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -49,6 +50,23 @@ PRIVATE_CONFIGURATION_ERROR_CODES = frozenset(
     }
 )
 
+DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
+    {
+        "discovery_config_invalid_mode",
+        "discovery_config_missing_start_url",
+        "discovery_config_invalid_start_url",
+        "discovery_config_missing_auth_origin",
+        "discovery_config_invalid_auth_origin",
+        "discovery_config_invalid_allowed_origins",
+        "discovery_config_missing_username",
+        "discovery_config_invalid_username",
+        "discovery_config_missing_password",
+        "discovery_config_invalid_password",
+        "discovery_config_invalid_http_mode",
+        "discovery_config_conflicting_modes",
+    }
+)
+
 
 class PrivateConfigurationError(ValueError):
     """Fail-closed configuration error containing only an allowlisted code."""
@@ -60,6 +78,35 @@ class PrivateConfigurationError(ValueError):
         super().__init__(code)
 
 
+class DiscoveryConfigurationError(ValueError):
+    """Fail-closed discovery configuration error with a fixed safe code."""
+
+    def __init__(self, code: str) -> None:
+        if code not in DISCOVERY_CONFIGURATION_ERROR_CODES:
+            raise ValueError("unknown discovery configuration error code")
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True)
+class DiscoveryConfiguration:
+    """Ephemeral CEZ discovery inputs loaded only from Supervisor options."""
+
+    start_url: str
+    auth_origin: str
+    allowed_origins: frozenset[str]
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class HttpAuthDiscoveryConfiguration:
+    """Ephemeral credentials for the fixed-contract HTTP discovery mode."""
+
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+
+
 @dataclass(frozen=True)
 class RuntimeConfiguration:
     """Validated API verifier and an initialized TLS server context."""
@@ -67,6 +114,8 @@ class RuntimeConfiguration:
     verifier: TokenVerifier
     tls_context: ssl.SSLContext
     source: str
+    discovery: DiscoveryConfiguration | None = None
+    http_auth_discovery: HttpAuthDiscoveryConfiguration | None = None
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -95,12 +144,19 @@ def load_runtime_configuration() -> RuntimeConfiguration:
             raise PrivateConfigurationError(
                 "private_config_invalid_token_verifier"
             ) from error
+        _validate_discovery_modes(options)
+        discovery = _load_discovery_configuration(options)
+        http_auth_discovery = _load_http_auth_discovery_configuration(options)
+        options.pop("cez_username", None)
+        options.pop("cez_password", None)
         certificate = _decode_tls_option(options, "tls_certificate_b64")
         private_key = _decode_tls_option(options, "tls_private_key_b64")
         return RuntimeConfiguration(
             verifier=verifier,
             tls_context=_context_from_memory(certificate, private_key),
             source="supervisor_self_info",
+            discovery=discovery,
+            http_auth_discovery=http_auth_discovery,
         )
 
     try:
@@ -117,6 +173,159 @@ def load_runtime_configuration() -> RuntimeConfiguration:
     except (OSError, ValueError, ssl.SSLError) as error:
         raise PrivateConfigurationError("private_config_file_tls_load_failed") from error
     return RuntimeConfiguration(verifier=verifier, tls_context=context, source="files")
+
+
+def _load_discovery_configuration(
+    options: dict[str, object],
+) -> DiscoveryConfiguration | None:
+    """Load one-shot discovery inputs without persisting or exposing secrets."""
+
+    enabled = options.get("cez_discovery_mode", False)
+    if not isinstance(enabled, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_mode")
+    if not enabled:
+        return None
+
+    from .cez_discovery import (
+        normalize_https_origin,
+        normalize_start_url,
+        origin_from_url,
+    )
+
+    start_url = _required_discovery_text(
+        options,
+        "cez_start_url",
+        "discovery_config_missing_start_url",
+        "discovery_config_invalid_start_url",
+        maximum_bytes=2048,
+    )
+    auth_origin = _required_discovery_text(
+        options,
+        "cez_auth_origin",
+        "discovery_config_missing_auth_origin",
+        "discovery_config_invalid_auth_origin",
+        maximum_bytes=512,
+    )
+    try:
+        start_url = normalize_start_url(start_url)
+    except ValueError as error:
+        raise DiscoveryConfigurationError(
+            "discovery_config_invalid_start_url"
+        ) from error
+    try:
+        auth_origin = normalize_https_origin(auth_origin)
+    except ValueError as error:
+        raise DiscoveryConfigurationError(
+            "discovery_config_invalid_auth_origin"
+        ) from error
+
+    raw_origins = options.get("cez_allowed_origins")
+    if not isinstance(raw_origins, list) or not 1 <= len(raw_origins) <= 8:
+        raise DiscoveryConfigurationError(
+            "discovery_config_invalid_allowed_origins"
+        )
+    try:
+        allowed_origins = frozenset(
+            normalize_https_origin(origin)
+            for origin in raw_origins
+            if isinstance(origin, str)
+        )
+    except ValueError as error:
+        raise DiscoveryConfigurationError(
+            "discovery_config_invalid_allowed_origins"
+        ) from error
+    if (
+        len(allowed_origins) != len(raw_origins)
+        or origin_from_url(start_url) not in allowed_origins
+        or auth_origin not in allowed_origins
+    ):
+        raise DiscoveryConfigurationError(
+            "discovery_config_invalid_allowed_origins"
+        )
+
+    username = _required_discovery_text(
+        options,
+        "cez_username",
+        "discovery_config_missing_username",
+        "discovery_config_invalid_username",
+        maximum_bytes=320,
+    )
+    password = _required_discovery_text(
+        options,
+        "cez_password",
+        "discovery_config_missing_password",
+        "discovery_config_invalid_password",
+        maximum_bytes=1024,
+    )
+    return DiscoveryConfiguration(
+        start_url=start_url,
+        auth_origin=auth_origin,
+        allowed_origins=allowed_origins,
+        username=username,
+        password=password,
+    )
+
+
+def _validate_discovery_modes(options: dict[str, object]) -> None:
+    selenium_mode = options.get("cez_discovery_mode", False)
+    http_mode = options.get("cez_http_auth_discovery_mode", False)
+    if not isinstance(selenium_mode, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_mode")
+    if not isinstance(http_mode, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if selenium_mode and http_mode:
+        raise DiscoveryConfigurationError("discovery_config_conflicting_modes")
+
+
+def _load_http_auth_discovery_configuration(
+    options: dict[str, object],
+) -> HttpAuthDiscoveryConfiguration | None:
+    """Load credentials for the fixed, non-configurable HTTP destination policy."""
+
+    enabled = options.get("cez_http_auth_discovery_mode", False)
+    if not isinstance(enabled, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if not enabled:
+        return None
+    username = _required_discovery_text(
+        options,
+        "cez_username",
+        "discovery_config_missing_username",
+        "discovery_config_invalid_username",
+        maximum_bytes=320,
+    )
+    password = _required_discovery_text(
+        options,
+        "cez_password",
+        "discovery_config_missing_password",
+        "discovery_config_invalid_password",
+        maximum_bytes=1024,
+    )
+    return HttpAuthDiscoveryConfiguration(username=username, password=password)
+
+
+def _required_discovery_text(
+    options: dict[str, object],
+    name: str,
+    missing_code: str,
+    invalid_code: str,
+    *,
+    maximum_bytes: int,
+) -> str:
+    value = options.get(name)
+    if value is None or value == "":
+        raise DiscoveryConfigurationError(missing_code)
+    if not isinstance(value, str):
+        raise DiscoveryConfigurationError(invalid_code)
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as error:
+        raise DiscoveryConfigurationError(invalid_code) from error
+    if len(encoded) > maximum_bytes or any(
+        unicodedata.category(character).startswith("C") for character in value
+    ):
+        raise DiscoveryConfigurationError(invalid_code)
+    return value
 
 
 def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
