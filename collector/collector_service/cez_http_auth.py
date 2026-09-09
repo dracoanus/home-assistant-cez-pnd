@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from html.parser import HTMLParser
 import ipaddress
+import json
 import socket
 import time
 from typing import Callable, Mapping, Protocol, Sequence
@@ -23,6 +24,9 @@ from .structured_logging import structured_event_json
 
 CEZ_PND_START_URL = (
     "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
+)
+CEZ_PND_AUTH_CHECK_URL = (
+    "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view/data"
 )
 CONNECT_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 20.0
@@ -46,6 +50,7 @@ class AuthState(str, Enum):
 
 
 class AuthStatus(str, Enum):
+    AUTHENTICATED = "authenticated"
     NEEDS_LIVE_VERIFICATION = "needs_live_verification"
     FAILED = "failed"
 
@@ -58,6 +63,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "login_form_validated",
         "credentials_submitted",
         "auth_redirect_observed",
+        "authenticated",
         "auth_state_needs_live_verification",
         "destination_rejected",
         "dns_resolution_failed",
@@ -162,6 +168,11 @@ class AuthResult:
         if (
             self.status is AuthStatus.NEEDS_LIVE_VERIFICATION
             and self.code != "auth_success_condition_needs_live_verification"
+        ):
+            raise ValueError("unsafe authentication result code")
+        if (
+            self.status is AuthStatus.AUTHENTICATED
+            and self.code != "auth_authenticated_endpoint_verified"
         ):
             raise ValueError("unsafe authentication result code")
 
@@ -664,11 +675,19 @@ class CezHttpAuthClient:
             _validate_destination_contract(
                 final_url, AuthState.AUTHENTICATED, "GET"
             )
-            result = AuthResult(
-                AuthStatus.NEEDS_LIVE_VERIFICATION,
-                "auth_success_condition_needs_live_verification",
+            verification = self._request(
+                "GET",
+                CEZ_PND_AUTH_CHECK_URL,
+                AuthState.AUTHENTICATED,
+                deadline,
+                extra_headers={"Accept": "application/json"},
             )
-            self._emit(SafeHttpAuthEvent("auth_state_needs_live_verification"))
+            _verify_authenticated_response(verification)
+            result = AuthResult(
+                AuthStatus.AUTHENTICATED,
+                "auth_authenticated_endpoint_verified",
+            )
+            self._emit(SafeHttpAuthEvent("authenticated"))
         except _AuthFailure as error:
             result = AuthResult(AuthStatus.FAILED, error.code)
             self._emit(SafeHttpAuthEvent(_failure_event(error.code)))
@@ -803,6 +822,24 @@ def _single_header(
     if len(values) != 1 or not values[0] or "\r" in values[0] or "\n" in values[0]:
         return None
     return values[0]
+
+
+def _verify_authenticated_response(response: HttpResponse) -> None:
+    """Require a bounded JSON object from the authenticated dashboard endpoint."""
+
+    content_type = _single_header(response.headers, "content-type")
+    if (
+        response.status != 200
+        or content_type is None
+        or content_type.split(";", 1)[0].strip().lower() != "application/json"
+    ):
+        raise _AuthFailure("auth_state_unverified")
+    try:
+        payload = json.loads(response.body.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise _AuthFailure("auth_state_unverified") from error
+    if not isinstance(payload, dict):
+        raise _AuthFailure("auth_state_unverified")
 
 
 def _failure_event(code: str) -> str:
