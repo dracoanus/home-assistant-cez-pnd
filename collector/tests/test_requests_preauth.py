@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 from urllib.parse import parse_qsl
 
-from collector_service import cez_http_auth, runtime_config, server
+from collector_service import cez_http_auth, requests_preauth, runtime_config, server
 from collector_service.requests_preauth import RequestsPreauthCompatibilityClient
 
 
@@ -72,6 +72,31 @@ class _Session:
         self.closed = True
 
 
+class _FailingSession(_Session):
+    def __init__(self, error: Exception) -> None:
+        super().__init__([])
+        self.error = error
+
+    def request(self, method: str, url: str, **kwargs: object) -> _Response:
+        raise self.error
+
+
+class _FakeRequestException(Exception):
+    pass
+
+
+class _FakeTimeout(_FakeRequestException):
+    pass
+
+
+class _FakeConnectTimeout(_FakeTimeout):
+    pass
+
+
+class _FakeReadTimeout(_FakeTimeout):
+    pass
+
+
 def _resolver(hostname: str, port: int) -> tuple[str, ...]:
     assert hostname in cez_http_auth.REVIEWED_HOSTNAMES
     assert port == 443
@@ -79,6 +104,62 @@ def _resolver(hostname: str, port: int) -> tuple[str, ...]:
 
 
 class RequestsPreauthTests(unittest.TestCase):
+    def test_timeout_constants_match_upstream_bounds(self) -> None:
+        self.assertEqual(cez_http_auth.CONNECT_TIMEOUT_SECONDS, 10.0)
+        self.assertEqual(cez_http_auth.READ_TIMEOUT_SECONDS, 30.0)
+        self.assertEqual(cez_http_auth.TOTAL_TIMEOUT_SECONDS, 60.0)
+
+    def test_requests_timeout_family_maps_to_operation_timeout(self) -> None:
+        for error in (
+            _FakeTimeout("private timeout detail"),
+            _FakeConnectTimeout("private connect detail"),
+            _FakeReadTimeout("private read detail"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                failure = self._transport_failure(error)
+                self.assertEqual(failure.code, "auth_operation_timeout")
+                self.assertNotIn("private", str(failure))
+
+    def test_generic_requests_error_remains_transport_failed(self) -> None:
+        failure = self._transport_failure(
+            _FakeRequestException("private request detail")
+        )
+        self.assertEqual(failure.code, "auth_transport_failed")
+        self.assertNotIn("private request detail", str(failure))
+
+    @staticmethod
+    def _transport_failure(error: Exception) -> cez_http_auth._AuthFailure:
+        transport = requests_preauth.RequestsSessionTransport(
+            resolver=_resolver,
+            session_factory=lambda: _FailingSession(error),
+        )
+        destination = cez_http_auth.ValidatedDestination(
+            cez_http_auth.CEZ_PND_START_URL,
+            "pnd.cezdistribuce.cz",
+            443,
+            (GLOBAL_IP,),
+        )
+        exception_types = (
+            (_FakeTimeout, _FakeConnectTimeout, _FakeReadTimeout),
+            (_FakeRequestException,),
+        )
+        with mock.patch.object(
+            requests_preauth,
+            "_requests_exception_types",
+            return_value=exception_types,
+        ), unittest.TestCase().assertRaises(cez_http_auth._AuthFailure) as raised:
+            transport.request(
+                "GET",
+                destination,
+                headers={},
+                body=None,
+                connect_timeout=10.0,
+                read_timeout=30.0,
+                total_timeout=60.0,
+                maximum_body_bytes=cez_http_auth.MAX_RESPONSE_BODY_BYTES,
+            )
+        return raised.exception
+
     def test_active_auth_reuses_session_through_form_post_and_auth_redirects(self) -> None:
         class _Cookie:
             domain = ".cez.cz"
@@ -143,6 +224,7 @@ class RequestsPreauthTests(unittest.TestCase):
             ],
         )
         self.assertTrue(all(call[2]["allow_redirects"] is False for call in session.calls))
+        self.assertTrue(all(call[2]["timeout"] == (10.0, 30.0) for call in session.calls))
         posts = [call for call in session.calls if call[0] == "POST"]
         self.assertEqual(len(posts), 1)
         post_fields = parse_qsl(posts[0][2]["data"].decode("utf-8"), keep_blank_values=True)
