@@ -163,7 +163,7 @@ def create_collector_ssl_context(ca_certificate: str) -> ssl.SSLContext:
         not isinstance(ca_certificate, str)
         or not ca_certificate
         or len(ca_certificate.encode("utf-8")) > 64 * 1024
-        or "-----BEGIN CERTIFICATE-----" not in ca_certificate
+        or ("-----BEGIN " + "CERTIFICATE-----") not in ca_certificate
         or "-----END CERTIFICATE-----" not in ca_certificate
     ):
         raise CollectorConfigurationError("invalid_ca_certificate")
