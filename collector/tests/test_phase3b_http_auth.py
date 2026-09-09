@@ -531,6 +531,15 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                 ).authenticate()
                 self.assertEqual(result.code, code)
 
+    def test_form_value_at_32k_boundary_is_accepted(self) -> None:
+        boundary_value = b"x" * cez_http_auth.MAX_FORM_VALUE_BYTES
+        html = FORM_HTML.replace(
+            b'value="e1s1"', b'value="' + boundary_value + b'"'
+        )
+        form = cez_http_auth._parse_login_form(html, LOGIN_URL)
+        values = {name: value for name, value, _input_type in form.controls}
+        self.assertEqual(len(values["execution"].encode("utf-8")), 32 * 1024)
+
     def test_excessive_form_controls_and_malformed_html_are_rejected(self) -> None:
         excessive = (
             b'<html><body><form method="post" action="/cas/login">'
