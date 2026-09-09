@@ -240,6 +240,13 @@ class Phase3CStrictTransportTests(unittest.TestCase):
             with self.subTest(attribute=attribute), self.assertRaises(ValueError):
                 StrictHttpsTransport(tls_context=fake)
 
+    def test_default_tls_context_offers_only_http11_alpn(self) -> None:
+        context = mock.Mock()
+        with mock.patch.object(ssl, "create_default_context", return_value=context):
+            created = create_strict_tls_context()
+        self.assertIs(created, context)
+        context.set_alpn_protocols.assert_called_once_with(["http/1.1"])
+
     def test_no_proxy_redirect_or_arbitrary_method_support(self) -> None:
         harness = _Harness(_FakeResponse(status=302, headers=(("Location", "/next"),)))
         transport = harness.transport()

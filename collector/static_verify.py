@@ -118,6 +118,7 @@ assert "value_kwh\": 0" not in SOURCE
 assert "BIND_ADDRESS = \"0.0.0.0\"" in SOURCE
 assert "BIND_PORT = 8443" in SOURCE
 assert "ssl.PROTOCOL_TLS_SERVER" in SOURCE
+assert 'context.set_alpn_protocols(["http/1.1"])' in STRICT_TRANSPORT_SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
