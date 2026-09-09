@@ -46,6 +46,7 @@ def create_strict_tls_context() -> ssl.SSLContext:
     """Create a system-trust context with hostname checks and TLS 1.2+."""
 
     context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    context.set_alpn_protocols(["http/1.1"])
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
@@ -214,11 +215,7 @@ class StrictHttpsTransport:
         except (TimeoutError, socket.timeout) as error:
             raise StrictTransportError("auth_operation_timeout") from error
         except (http.client.HTTPException, OSError, ValueError) as error:
-            code = (
-                "auth_request_write_failed"
-                if phase == "request_write"
-                else "auth_response_protocol_failed"
-            )
+            code = _response_code(phase, "auth_response_protocol_failed")
             raise StrictTransportError(code) from error
         finally:
             connection.close()
@@ -295,3 +292,7 @@ class StrictHttpsTransport:
                 proto=socket.IPPROTO_TCP,
             )
         )
+
+
+def _response_code(phase: str, response_code: str) -> str:
+    return "auth_request_write_failed" if phase == "request_write" else response_code
