@@ -288,8 +288,9 @@ class Phase3BHttpAuthTests(unittest.TestCase):
 
     def test_candidate_flow_returns_needs_live_verification_not_authenticated(self) -> None:
         transport = _FakeTransport(_successful_responses())
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
         client = cez_http_auth.CezHttpAuthClient(
-            _configuration(), transport, resolver=_resolver
+            _configuration(), transport, resolver=_resolver, emit=events.append
         )
         result = client.authenticate()
         self.assertEqual(
@@ -301,6 +302,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         self.assertEqual([request[0] for request in transport.requests], ["GET", "GET", "POST", "GET"])
         self.assertEqual(client._cookies.count, 0)
         self.assertTrue(transport.closed)
+        self.assertEqual(events[-1].event, "http_auth_cleanup_complete")
 
     def test_credentials_absent_from_result_repr_and_exception_display(self) -> None:
         transport = _FakeTransport(_successful_responses())
