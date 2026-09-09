@@ -1,0 +1,47 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to CEZ PND Collector",
+        "description": "Configure the local Collector API. CEZ account credentials are never requested or stored in Home Assistant Core.",
+        "data": {
+          "collector_url": "Collector HTTPS URL",
+          "meter_id": "Opaque meter ID",
+          "api_token": "Collector API token",
+          "ca_certificate": "Collector CA certificate (PEM)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update Collector API credential",
+        "description": "Enter a replacement limited Collector API token.",
+        "data": {
+          "api_token": "Collector API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the Collector",
+      "invalid_auth": "The Collector API token was rejected",
+      "invalid_configuration": "The Collector connection settings are invalid",
+      "invalid_response": "The Collector returned an invalid response",
+      "invalid_tls": "The Collector TLS certificate could not be verified"
+    },
+    "abort": {
+      "already_configured": "This meter is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "collector_health": {"name": "Collector health"},
+      "source_status": {"name": "Source status"},
+      "data_timestamp": {"name": "Data timestamp"},
+      "last_attempt": {"name": "Last attempt"},
+      "last_success": {"name": "Last success"},
+      "completeness": {"name": "Completeness"},
+      "valid_count": {"name": "Valid count"},
+      "missing_count": {"name": "Missing count"},
+      "dataset_revision": {"name": "Dataset revision"},
+      "grid_import": {"name": "Grid import interval"}
+    }
+  }
+}
