@@ -8,6 +8,7 @@ import json
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from urllib.parse import parse_qsl
 
 from collector_service import cez_http_auth, runtime_config, server
 from collector_service.requests_preauth import RequestsPreauthCompatibilityClient
@@ -15,11 +16,7 @@ from collector_service.requests_preauth import RequestsPreauthCompatibilityClien
 
 GLOBAL_IP = "93.184.216.34"
 LOGIN_URL = "https://mepas.cez.cz/cas/login?service=opaque"
-PND_APPLICATION_HTML = (
-    b"<!doctype html><html><body><h1>Namerena data</h1></body></html>".replace(
-        b"Namerena", "Naměřená".encode("utf-8")
-    )
-)
+PND_APPLICATION_HTML = b"<!doctype html><html><body><main id='app'></main></body></html>"
 
 
 class _Headers(dict[str, str]):
@@ -148,12 +145,27 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertTrue(all(call[2]["allow_redirects"] is False for call in session.calls))
         posts = [call for call in session.calls if call[0] == "POST"]
         self.assertEqual(len(posts), 1)
-        self.assertIn(b"username=private-user", posts[0][2]["data"])
-        self.assertIn(b"password=private-password", posts[0][2]["data"])
+        post_fields = parse_qsl(posts[0][2]["data"].decode("utf-8"), keep_blank_values=True)
+        self.assertEqual(post_fields.count(("username", "private-user")), 1)
+        self.assertEqual(post_fields.count(("password", "private-password")), 1)
+        self.assertEqual(post_fields.count(("_eventId", "submit")), 1)
+        self.assertEqual(post_fields.count(("submit", "PŘIHLÁSIT SE")), 1)
+        self.assertEqual(posts[0][2]["headers"]["Accept"], "*/*")
+        self.assertEqual(
+            posts[0][2]["headers"]["Content-Type"],
+            "application/x-www-form-urlencoded",
+        )
+        self.assertEqual(posts[0][2]["headers"]["Referer"], LOGIN_URL)
         self.assertEqual(session.cookie_names_before_request[2], ("session",))
         self.assertEqual(session.cookie_names_before_request[3], ("session",))
         self.assertEqual(
             session.calls[-1][1], cez_http_auth.CEZ_PND_START_URL
+        )
+        self.assertTrue(
+            all(
+                call[1] != cez_http_auth.CEZ_PND_DASHBOARD_DATA_URL
+                for call in session.calls
+            )
         )
         self.assertEqual(
             session.calls[-1][2]["headers"]["Accept"],
@@ -174,7 +186,7 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertNotIn("private-user", rendered_events)
         self.assertNotIn("private-password", rendered_events)
         self.assertNotIn("private-cookie-value", rendered_events)
-        self.assertNotIn("Naměřená data", rendered_events)
+        self.assertNotIn(LOGIN_URL, rendered_events)
         self.assertEqual(
             [event.event for event in events],
             [
@@ -203,6 +215,47 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
         self.assertEqual(result.code, "auth_state_unverified")
 
+    def test_existing_event_and_submit_controls_are_preserved_once(self) -> None:
+        form = b'''<html><form method="post" action="/cas/login">
+        <input type="hidden" name="_eventId" value="continue">
+        <input type="hidden" name="submit" value="Existing label">
+        <input name="username"><input name="password" type="password">
+        </form></html>'''
+        session = self._active_auth_session(
+            _Response(
+                200,
+                _Headers({"Content-Type": "text/html"}),
+                (PND_APPLICATION_HTML,),
+            ),
+            form=form,
+        )
+        result = self._run_active_auth(session)
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
+        post = next(call for call in session.calls if call[0] == "POST")
+        fields = parse_qsl(post[2]["data"].decode("utf-8"), keep_blank_values=True)
+        self.assertEqual(fields.count(("_eventId", "continue")), 1)
+        self.assertEqual(fields.count(("submit", "Existing label")), 1)
+        self.assertEqual(sum(name == "_eventId" for name, _ in fields), 1)
+        self.assertEqual(sum(name == "submit" for name, _ in fields), 1)
+        self.assertEqual(sum(name == "username" for name, _ in fields), 1)
+        self.assertEqual(sum(name == "password" for name, _ in fields), 1)
+
+    def test_final_pnd_response_does_not_require_html_content_type(self) -> None:
+        session = self._active_auth_session(_Response(200, _Headers(), (b"bounded",)))
+        result = self._run_active_auth(session)
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
+
+    def test_referer_and_form_action_must_use_the_same_credential_host(self) -> None:
+        form = b'''<html><form method="post" action="https://dip.cezdistribuce.cz/login">
+        <input name="username"><input name="password" type="password">
+        </form></html>'''
+        session = self._active_auth_session(
+            _Response(200, _Headers(), (PND_APPLICATION_HTML,)), form=form
+        )
+        result = self._run_active_auth(session)
+        self.assertEqual(result.code, "auth_destination_rejected")
+        self.assertFalse(any(call[0] == "POST" for call in session.calls))
+
     def test_final_redirect_back_to_login_is_rejected(self) -> None:
         session = self._active_auth_session(
             [
@@ -220,7 +273,7 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 5)
 
     def test_malformed_final_html_is_not_authentication_proof(self) -> None:
-        for body in (b"\xff", b"<html><h1>Namerena data"):
+        for body in (b"\xff", b"<html><form><div>unfinished"):
             with self.subTest(body=body):
                 session = self._active_auth_session(
                     _Response(
@@ -248,6 +301,8 @@ class RequestsPreauthTests(unittest.TestCase):
         cases = (
             b"<html><form><input type='password'></form>" + PND_APPLICATION_HTML,
             PND_APPLICATION_HTML + b"<div>g-recaptcha</div>",
+            PND_APPLICATION_HTML + b"<div>invalid credentials</div>",
+            PND_APPLICATION_HTML + b"<div>account locked</div>",
             "<html><h1>Naměřená data</h1><div>probíhá údržba</div></html>".encode(),
         )
         for body in cases:
@@ -291,11 +346,13 @@ class RequestsPreauthTests(unittest.TestCase):
         final_responses: _Response | list[_Response],
         *,
         post_location: str = "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
+        form: bytes | None = None,
     ) -> _Session:
-        form = b'''<html><form method="post" action="/cas/login">
-        <input type="hidden" name="execution" value="e1s1">
-        <input name="username"><input name="password" type="password">
-        </form></html>'''
+        if form is None:
+            form = b'''<html><form method="post" action="/cas/login">
+            <input type="hidden" name="execution" value="e1s1">
+            <input name="username"><input name="password" type="password">
+            </form></html>'''
         responses = [
                 _Response(302, _Headers(Location=LOGIN_URL)),
                 _Response(200, _Headers(), (form,)),
