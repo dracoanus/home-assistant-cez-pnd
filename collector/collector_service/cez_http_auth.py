@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from html.parser import HTMLParser
 import ipaddress
-import json
 import socket
 import time
 from typing import Callable, Mapping, Protocol, Sequence
@@ -25,7 +24,7 @@ from .structured_logging import structured_event_json
 CEZ_PND_START_URL = (
     "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
 )
-CEZ_PND_AUTH_CHECK_URL = (
+CEZ_PND_DASHBOARD_DATA_URL = (
     "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view/data"
 )
 CEZ_HTTP_USER_AGENT = (
@@ -445,6 +444,65 @@ class _LoginFormParser(HTMLParser):
             self.malformed = True
 
 
+class _PndApplicationPageParser(HTMLParser):
+    """Recognize the bounded, non-secret PND application success marker."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.h1_values: list[str] = []
+        self.text_values: list[str] = []
+        self._h1_parts: list[str] | None = None
+        self._form_depth = 0
+        self.login_form_present = False
+        self.malformed = False
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        tag = tag.lower()
+        attributes = {name.lower(): value or "" for name, value in attrs}
+        if tag == "form":
+            self._form_depth += 1
+            if self._form_depth > 1:
+                self.malformed = True
+            action = attributes.get("action", "").casefold()
+            if attributes.get("id", "").casefold() == "fm1" or any(
+                marker in action for marker in ("/cas", "/login", "/idp")
+            ):
+                self.login_form_present = True
+        elif tag == "input" and self._form_depth:
+            if attributes.get("type", "text").lower() == "password":
+                self.login_form_present = True
+        elif tag == "h1":
+            if self._h1_parts is not None:
+                self.malformed = True
+            self._h1_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "form":
+            if self._form_depth == 0:
+                self.malformed = True
+            else:
+                self._form_depth -= 1
+        elif tag == "h1":
+            if self._h1_parts is None:
+                self.malformed = True
+            else:
+                self.h1_values.append(" ".join("".join(self._h1_parts).split()))
+                self._h1_parts = None
+
+    def handle_data(self, data: str) -> None:
+        self.text_values.append(data)
+        if self._h1_parts is not None:
+            self._h1_parts.append(data)
+
+    def close(self) -> None:
+        super().close()
+        if self._form_depth or self._h1_parts is not None:
+            self.malformed = True
+
+
 def _parse_login_form(html: bytes, page_url: str) -> _ParsedForm:
     if len(html) > MAX_HTML_BYTES:
         raise _AuthFailure("auth_form_document_too_large")
@@ -679,14 +737,7 @@ class CezHttpAuthClient:
             _validate_destination_contract(
                 final_url, AuthState.AUTHENTICATED, "GET"
             )
-            verification = self._request(
-                "GET",
-                CEZ_PND_AUTH_CHECK_URL,
-                AuthState.AUTHENTICATED,
-                deadline,
-                extra_headers={"Accept": "*/*"},
-            )
-            _verify_authenticated_response(verification)
+            _verify_authenticated_application_page(response)
             result = AuthResult(
                 AuthStatus.AUTHENTICATED,
                 "auth_authenticated_endpoint_verified",
@@ -828,21 +879,47 @@ def _single_header(
     return values[0]
 
 
-def _verify_authenticated_response(response: HttpResponse) -> None:
-    """Require a bounded JSON object from the authenticated dashboard endpoint."""
+def _verify_authenticated_application_page(response: HttpResponse) -> None:
+    """Require the bounded application marker and reject known auth/error pages."""
 
+    if len(response.body) > MAX_RESPONSE_BODY_BYTES:
+        raise _AuthFailure("auth_state_unverified")
     content_type = _single_header(response.headers, "content-type")
     if (
         response.status != 200
         or content_type is None
-        or content_type.split(";", 1)[0].strip().lower() != "application/json"
+        or content_type.split(";", 1)[0].strip().lower()
+        not in {"text/html", "application/xhtml+xml"}
     ):
         raise _AuthFailure("auth_state_unverified")
     try:
-        payload = json.loads(response.body.decode("utf-8", errors="strict"))
-    except (UnicodeError, json.JSONDecodeError) as error:
+        parser = _PndApplicationPageParser()
+        parser.feed(response.body.decode("utf-8", errors="strict"))
+        parser.close()
+    except (UnicodeError, ValueError) as error:
         raise _AuthFailure("auth_state_unverified") from error
-    if not isinstance(payload, dict):
+    page_text = " ".join(" ".join(parser.text_values).split()).casefold()
+    failure_markers = (
+        "recaptcha",
+        "g-recaptcha",
+        "captcha challenge",
+        "neplatné uživatelské jméno",
+        "chybné jméno",
+        "invalid credentials",
+        "bad credentials",
+        "odstávka",
+        "probíhá údržba",
+        "under maintenance",
+    )
+    has_application_marker = any(
+        "naměřená data" in value.casefold() for value in parser.h1_values
+    )
+    if (
+        parser.malformed
+        or parser.login_form_present
+        or any(marker in page_text for marker in failure_markers)
+        or not has_application_marker
+    ):
         raise _AuthFailure("auth_state_unverified")
 
 
