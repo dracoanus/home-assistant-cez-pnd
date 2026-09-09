@@ -21,7 +21,9 @@ FORBIDDEN_CONTENT = {
     "bearer token value": re.compile(r"Bearer\s+[A-Za-z0-9_-]{43,}"),
     "numeric EAN/ELM value": re.compile(r"(?<!\d)\d{18}(?!\d)"),
     "CEZ credential assignment": re.compile(
-        r"(?i)\bCEZ_(?:USERNAME|PASSWORD)\s*[:=]\s*['\"]?[A-Za-z0-9@._+-]{4,}"
+        r"(?im)^[ \t]*(?:export[ \t]+)?CEZ_(?:USERNAME|PASSWORD)"
+        r"[ \t]*[:=](?![ \t]*['\"]?(?:password\?|null)['\"]?"
+        r"[ \t]*(?:#.*)?$)[ \t]*['\"]?[^\r\n#]{4,}"
     ),
 }
 FORBIDDEN_SUFFIXES = frozenset({".crt", ".key", ".log", ".p12", ".pem", ".pfx", ".pyc", ".pyo"})

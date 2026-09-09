@@ -39,6 +39,20 @@ class PullRequestPolicyTest(unittest.TestCase):
             with self.subTest(sample=sample), self.assertRaises(ValueError):
                 validate_content(PurePosixPath("collector/example.txt"), sample)
 
+    def test_password_schema_is_allowed_but_values_are_rejected(self) -> None:
+        validate_content(
+            PurePosixPath("cez_pnd_collector/config.yaml"),
+            "cez_username: password?\ncez_password: password?\n",
+        )
+        for assignment in (
+            "cez_username: owner@example.invalid",
+            "CEZ_PASSWORD=not-a-real-secret",
+        ):
+            with self.subTest(assignment=assignment), self.assertRaises(ValueError):
+                validate_content(
+                    PurePosixPath("cez_pnd_collector/config.yaml"), assignment
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

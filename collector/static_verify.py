@@ -12,9 +12,26 @@ REPOSITORY_ROOT = ROOT.parent
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 SOURCE_FILES = sorted((ROOT / "collector_service").glob("*.py"))
 SOURCE = "\n".join(path.read_text(encoding="utf-8") for path in SOURCE_FILES)
+HTTP_AUTH_SOURCE = (ROOT / "collector_service" / "cez_http_auth.py").read_text(
+    encoding="utf-8"
+)
+STRICT_TRANSPORT_SOURCE = (
+    ROOT / "collector_service" / "strict_http_transport.py"
+).read_text(encoding="utf-8")
+NON_HTTP_AUTH_SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in SOURCE_FILES
+    if path.name != "cez_http_auth.py"
+)
 RUNTIME_CONFIG_SOURCE = (ROOT / "collector_service" / "runtime_config.py").read_text(
     encoding="utf-8"
 )
+DISCOVERY_SOURCE = (ROOT / "collector_service" / "cez_discovery.py").read_text(
+    encoding="utf-8"
+)
+RESTRICTED_PROXY_SOURCE = (
+    ROOT / "collector_service" / "restricted_proxy.py"
+).read_text(encoding="utf-8")
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 WORKFLOW = (
     REPOSITORY_ROOT / ".github" / "workflows" / "publish-collector-service.yaml"
@@ -73,7 +90,10 @@ for forbidden in (
     "pnd.cezdistribuce.cz",
     "mepas.cez.cz",
     "dip.cezdistribuce.cz",
-    "selenium.webdriver",
+):
+    assert forbidden not in NON_HTTP_AUTH_SOURCE
+
+for forbidden in (
     "subprocess",
     "os.system",
     "shell=True",
@@ -122,6 +142,82 @@ assert "tls_private_key_b64" in SOURCE
 assert 'source="supervisor_self_info"' in SOURCE
 assert "tempfile.mkstemp" in SOURCE and "os.fchmod(descriptor, 0o600)" in SOURCE
 assert "os.unlink(path)" in SOURCE
+assert "from selenium import webdriver" in DISCOVERY_SOURCE
+assert 'binary_location = "/usr/bin/chromium"' in DISCOVERY_SOURCE
+assert 'executable_path="/usr/bin/chromedriver"' in DISCOVERY_SOURCE
+assert "--headless=new" in DISCOVERY_SOURCE
+assert "--proxy-server=http://127.0.0.1:" in DISCOVERY_SOURCE
+assert "--host-resolver-rules=MAP * ~NOTFOUND" in DISCOVERY_SOURCE
+assert 'super().__init__(("127.0.0.1", 0)' in RESTRICTED_PROXY_SOURCE
+assert 'port_text != "443"' in RESTRICTED_PROXY_SOURCE
+assert "ipaddress.ip_address(address[0]).is_global" in RESTRICTED_PROXY_SOURCE
+assert '"Browser.setDownloadBehavior", {"behavior": "deny"}' in DISCOVERY_SOURCE
+assert "driver.delete_all_cookies()" in DISCOVERY_SOURCE
+assert "shutil.rmtree(runtime_directory)" in DISCOVERY_SOURCE
+assert "log_output=os.devnull" in DISCOVERY_SOURCE
+assert "driver.get(configuration.start_url)" in DISCOVERY_SOURCE
+assert "configuration.username" in DISCOVERY_SOURCE
+assert "configuration.password" in DISCOVERY_SOURCE
+for forbidden_argument in (
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu-sandbox",
+    "--disable-seccomp-filter-sandbox",
+):
+    assert f'"{forbidden_argument}"' in DISCOVERY_SOURCE
+assert "cez_username" not in (ROOT / "collector_service" / "api.py").read_text(
+    encoding="utf-8"
+)
+assert "cez_password" not in (ROOT / "collector_service" / "api.py").read_text(
+    encoding="utf-8"
+)
+assert "os.environ.get(\"CEZ_" not in SOURCE
+assert (
+    '"https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"'
+    in HTTP_AUTH_SOURCE
+)
+for required_host in (
+    "pnd.cezdistribuce.cz",
+    "mepas.cez.cz",
+    "dip.cezdistribuce.cz",
+):
+    assert required_host in HTTP_AUTH_SOURCE
+assert "trust_environment" in HTTP_AUTH_SOURCE
+assert "follows_redirects" in HTTP_AUTH_SOURCE
+assert "MAX_REDIRECTS = 8" in HTTP_AUTH_SOURCE
+assert "MAX_RESPONSE_BODY_BYTES = 512 * 1024" in HTTP_AUTH_SOURCE
+assert "MAX_HTML_BYTES = 256 * 1024" in HTTP_AUTH_SOURCE
+assert "MAX_FORM_CONTROLS = 64" in HTTP_AUTH_SOURCE
+assert "MAX_COOKIE_COUNT = 32" in HTTP_AUTH_SOURCE
+assert "AuthStatus.NEEDS_LIVE_VERIFICATION" in HTTP_AUTH_SOURCE
+assert "auth_success_condition_needs_live_verification" in HTTP_AUTH_SOURCE
+assert "requests" not in HTTP_AUTH_SOURCE
+assert "BeautifulSoup" not in HTTP_AUTH_SOURCE
+assert "logging" not in HTTP_AUTH_SOURCE
+assert "CezHttpAuthClient" not in (
+    ROOT / "collector_service" / "api.py"
+).read_text(encoding="utf-8")
+for forbidden_tls in (
+    "ssl._create_unverified_context",
+    "ssl.CERT_NONE",
+    "check_hostname = False",
+):
+    assert forbidden_tls not in STRICT_TRANSPORT_SOURCE
+assert "ssl.create_default_context" in STRICT_TRANSPORT_SOURCE
+assert "ssl.CERT_REQUIRED" in STRICT_TRANSPORT_SOURCE
+assert "ssl.TLSVersion.TLSv1_2" in STRICT_TRANSPORT_SOURCE
+assert "server_hostname=destination.hostname" in STRICT_TRANSPORT_SOURCE
+assert 'connection.putheader("Host", destination.hostname)' in STRICT_TRANSPORT_SOURCE
+assert "raw_socket.connect(endpoint)" in STRICT_TRANSPORT_SOURCE
+assert "connection.sock = tls_socket" in STRICT_TRANSPORT_SOURCE
+assert "socket.getaddrinfo" in STRICT_TRANSPORT_SOURCE
+assert "trust_environment = False" in STRICT_TRANSPORT_SOURCE
+assert "follows_redirects = False" in STRICT_TRANSPORT_SOURCE
+assert "ProxyHandler" not in STRICT_TRANSPORT_SOURCE
+assert "HTTPSConnection" not in STRICT_TRANSPORT_SOURCE
+assert "MAX_ADDRESS_ATTEMPTS = 4" in STRICT_TRANSPORT_SOURCE
+assert 'options.get("cez_http_auth_discovery_mode", False)' in RUNTIME_CONFIG_SOURCE
+assert "discovery_config_conflicting_modes" in RUNTIME_CONFIG_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW
@@ -267,6 +363,16 @@ assert "api_token_sha256" in APP_MANIFEST
 assert "api_token:" not in APP_MANIFEST
 assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
+assert "  cez_discovery_mode: false" in APP_MANIFEST
+assert "  cez_http_auth_discovery_mode: false" in APP_MANIFEST
+assert "  cez_http_auth_discovery_mode: bool" in APP_MANIFEST
+assert "  cez_allowed_origins: []" in APP_MANIFEST
+assert "  cez_start_url: url?" in APP_MANIFEST
+assert "  cez_auth_origin: url?" in APP_MANIFEST
+assert "  cez_username: password?" in APP_MANIFEST
+assert "  cez_password: password?" in APP_MANIFEST
+assert "cez_username:" not in APP_MANIFEST.split("schema:", 1)[0]
+assert "cez_password:" not in APP_MANIFEST.split("schema:", 1)[0]
 assert "plaintext bearer token" in APP_DOCUMENTATION
 assert (
     "0.2.1 HA OS DEPLOYMENT GATE FAILED CLOSED / RUNTIME BOOTSTRAP"
@@ -291,10 +397,13 @@ print("PASS: root-owned mode-0555 source is set atomically by COPY")
 print("PASS: explicit non-root UID/GID 2000:2000")
 print("PASS: exactly three versioned read-only API routes")
 print("PASS: TLS and constant-time bearer verifier required")
-print("PASS: no CEZ hosts, browser control, commands, or sandbox weakening")
+print("PASS: CEZ hosts exist only in the reviewed Phase 3B destination contract")
 print("PASS: missing measurement is null, never synthesized zero")
 print("PASS: immutable GHCR workflow retains SBOM and provenance")
 print("PASS: isolated non-root offline container smoke profile")
 print("PASS: PR validation workflow is read-only, pinned, and offline")
 print("PASS: production App wrapper is prebuilt-image-only and least-privilege")
 print("PASS: HA bootstrap stores only the API verifier and fails closed")
+print("PASS: one-shot CEZ discovery is explicit, allowlisted, and non-secret")
+print("PASS: browserless CEZ auth is offline-only, redirect-explicit, and fail-closed")
+print("PASS: CEZ TLS transport pins validated IPs while preserving hostname identity")
