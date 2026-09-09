@@ -529,7 +529,7 @@ class _MemoryCookieJar:
                 else _normalize_cookie_domain(domain_attributes[0])
             )
             if not host_only and not _domain_matches(hostname, domain):
-                raise _AuthFailure("auth_cookie_domain_mismatch")
+                continue
             if not host_only and domain not in REVIEWED_COOKIE_DOMAINS:
                 raise _AuthFailure("auth_cookie_domain_not_allowed")
             cookie = _Cookie(domain, cookie_name, cookie_value, host_only)

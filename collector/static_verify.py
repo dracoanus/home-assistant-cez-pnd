@@ -64,7 +64,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.3"
+assert VERSION == "0.3.4"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -207,6 +207,10 @@ for cookie_error_code in (
 ):
     assert cookie_error_code in HTTP_AUTH_SOURCE
 assert '"auth_cookie_invalid"' not in HTTP_AUTH_SOURCE
+assert (
+    "if not host_only and not _domain_matches(hostname, domain):\n"
+    "                continue"
+) in HTTP_AUTH_SOURCE
 assert "AuthStatus.NEEDS_LIVE_VERIFICATION" in HTTP_AUTH_SOURCE
 assert '"http_auth_result"' in HTTP_AUTH_SOURCE
 assert "SafeHttpAuthEvent.from_result(result)" in SERVER_SOURCE
@@ -348,7 +352,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.3"',
+    'version: "0.3.4"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
