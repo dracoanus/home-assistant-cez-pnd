@@ -131,6 +131,12 @@ SAFE_ERROR_CODES = frozenset(
         "auth_dns_resolution_failed",
         "auth_tls_verification_failed",
         "auth_protocol_error",
+        "auth_transport_invariant_failed",
+        "auth_connect_failed",
+        "auth_request_write_failed",
+        "auth_response_protocol_failed",
+        "auth_response_header_limit",
+        "auth_response_body_limit",
         "auth_cleanup_failed",
         "auth_state_unverified",
     }
@@ -798,7 +804,17 @@ def _failure_event(code: str) -> str:
         return "tls_verification_failed"
     if code == "auth_operation_timeout":
         return "timeout"
-    if code in {"auth_protocol_error", "auth_redirect_invalid", "auth_redirect_limit"}:
+    if code in {
+        "auth_protocol_error",
+        "auth_transport_invariant_failed",
+        "auth_connect_failed",
+        "auth_request_write_failed",
+        "auth_response_protocol_failed",
+        "auth_response_header_limit",
+        "auth_response_body_limit",
+        "auth_redirect_invalid",
+        "auth_redirect_limit",
+    }:
         return "protocol_error"
     return "authentication_failed"
 
