@@ -152,6 +152,20 @@ class RequestsPreauthTests(unittest.TestCase):
         self.assertEqual(
             session.calls[-1][1], cez_http_auth.CEZ_PND_AUTH_CHECK_URL
         )
+        self.assertEqual(
+            session.calls[-1][2]["headers"]["Accept"], "*/*"
+        )
+        self.assertTrue(
+            all(
+                call[2]["headers"]["User-Agent"]
+                == cez_http_auth.CEZ_HTTP_USER_AGENT
+                for call in session.calls
+            )
+        )
+        self.assertIsNone(session.calls[-1][2]["data"])
+        self.assertNotIn("Referer", session.calls[-1][2]["headers"])
+        self.assertNotIn("X-Requested-With", session.calls[-1][2]["headers"])
+        self.assertNotIn("Content-Type", session.calls[-1][2]["headers"])
         rendered_events = repr([event.as_dict() for event in events])
         self.assertNotIn("private-user", rendered_events)
         self.assertNotIn("private-password", rendered_events)

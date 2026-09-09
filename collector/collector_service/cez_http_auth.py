@@ -28,6 +28,10 @@ CEZ_PND_START_URL = (
 CEZ_PND_AUTH_CHECK_URL = (
     "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view/data"
 )
+CEZ_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 CONNECT_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 20.0
 TOTAL_TIMEOUT_SECONDS = 60.0
@@ -680,7 +684,7 @@ class CezHttpAuthClient:
                 CEZ_PND_AUTH_CHECK_URL,
                 AuthState.AUTHENTICATED,
                 deadline,
-                extra_headers={"Accept": "application/json"},
+                extra_headers={"Accept": "*/*"},
             )
             _verify_authenticated_response(verification)
             result = AuthResult(
@@ -773,7 +777,7 @@ class CezHttpAuthClient:
         )
         headers = {
             "Accept": "text/html,application/xhtml+xml",
-            "User-Agent": "CEZ-PND-Collector/phase3b",
+            "User-Agent": CEZ_HTTP_USER_AGENT,
         }
         transport_manages_cookies = getattr(self._transport, "manages_cookies", False)
         if not transport_manages_cookies:
