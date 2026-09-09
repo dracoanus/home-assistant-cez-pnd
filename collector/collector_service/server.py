@@ -134,10 +134,10 @@ def main() -> int:
 
     http_auth_configuration = getattr(configuration, "http_auth_discovery", None)
     if http_auth_configuration is not None:
-        from .strict_http_transport import StrictHttpsTransport
+        from .requests_preauth import RequestsSessionTransport
 
         try:
-            transport = StrictHttpsTransport()
+            transport = RequestsSessionTransport()
             result = CezHttpAuthClient(
                 http_auth_configuration,
                 transport,

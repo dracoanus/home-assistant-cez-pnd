@@ -51,13 +51,18 @@ is not exposed through the Collector HTTP API.
 
 ## One-shot Phase 3C HTTP authentication discovery
 
-`cez_http_auth_discovery_mode` is disabled by default. It uses the existing
-masked CEZ username and password with the fixed reviewed HTTP destination
-contract; the generic Selenium URL/origin settings do not expand this policy.
+`cez_http_auth_discovery_mode` is disabled by default. It uses a
+redirect-disabled, TLS-verifying `requests.Session` with the existing masked
+CEZ username and password and the fixed reviewed HTTP destination contract;
+the generic Selenium URL/origin settings do not expand this policy.
 It performs one bounded attempt, never calls data/export endpoints, reports
 only fixed non-secret events, destroys its session, and exits with
 `needs_live_verification`. Do not enable it together with
 `cez_discovery_mode`; conflicting modes fail before network or browser startup.
+Every hop still receives the existing HTTPS/port/hostname/path/method and
+all-global DNS validation. `requests` performs a second DNS resolution for the
+actual connection, so this active compatibility transport does not provide the
+old strict transport's pinned-IP guarantee.
 
 This mode is for a separately authorized HA OS live test only. See the
 [Phase 3 document](../docs/phase3a-cez-auth-discovery.md) for its pinned DNS,

@@ -58,6 +58,7 @@ class StrictHttpsTransport:
 
     trust_environment = False
     follows_redirects = False
+    manages_cookies = False
 
     def __init__(
         self,

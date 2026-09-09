@@ -1,9 +1,9 @@
-"""Temporary requests.Session compatibility experiment for PREAUTH GETs only."""
+"""Requests transport and the retained PREAUTH-only compatibility experiment."""
 
 from __future__ import annotations
 
 import time
-from typing import Callable, Iterable, Protocol, Sequence
+from typing import Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urljoin, urlsplit
 
 from .cez_http_auth import (
@@ -22,6 +22,8 @@ from .cez_http_auth import (
     SAFE_ERROR_CODES,
     SafeHttpAuthEvent,
     TOTAL_TIMEOUT_SECONDS,
+    HttpResponse,
+    ValidatedDestination,
     _AuthFailure,
     _default_resolver,
     _failure_event,
@@ -61,6 +63,120 @@ def _default_session() -> _Session:
     return session
 
 
+class RequestsSessionTransport:
+    """Redirect-disabled requests transport with bounded, memory-only state."""
+
+    trust_environment = False
+    follows_redirects = False
+    manages_cookies = True
+
+    def __init__(
+        self,
+        *,
+        resolver: Resolver = _default_resolver,
+        session_factory: Callable[[], _Session] = _default_session,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._resolver = resolver
+        self._session = session_factory()
+        self._monotonic = monotonic
+        self._closed = False
+        if self._session.trust_env:
+            self.close()
+            raise ValueError("proxy-enabled session rejected")
+
+    def resolve(self, hostname: str, port: int) -> Sequence[str]:
+        if self._closed or port != 443:
+            raise _AuthFailure("auth_dns_resolution_failed")
+        return self._resolver(hostname, port)
+
+    def request(
+        self,
+        method: str,
+        destination: ValidatedDestination,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        connect_timeout: float,
+        read_timeout: float,
+        total_timeout: float,
+        maximum_body_bytes: int,
+    ) -> HttpResponse:
+        if self._closed or method not in {"GET", "POST"}:
+            raise _AuthFailure("auth_transport_policy_invalid")
+        deadline = self._monotonic() + total_timeout
+        response: _Response | None = None
+        try:
+            response = self._session.request(
+                method,
+                destination.url,
+                headers=headers,
+                data=body,
+                allow_redirects=False,
+                verify=True,
+                timeout=(connect_timeout, read_timeout),
+                stream=True,
+            )
+            header_pairs = tuple(
+                (str(name), str(value))
+                for name, value in response.headers.items()  # type: ignore[attr-defined]
+            )
+            header_size = sum(
+                len(name.encode("utf-8")) + len(value.encode("utf-8")) + 4
+                for name, value in header_pairs
+            )
+            if header_size > MAX_RESPONSE_HEADER_BYTES:
+                raise _AuthFailure("auth_response_header_limit")
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if self._monotonic() > deadline:
+                    raise _AuthFailure("auth_operation_timeout")
+                size += len(chunk)
+                if size > maximum_body_bytes:
+                    raise _AuthFailure("auth_response_body_limit")
+                chunks.append(chunk)
+            self._validate_memory_cookies(self._session.cookies)
+            status = response.status_code
+            if self._monotonic() > deadline:
+                raise _AuthFailure("auth_operation_timeout")
+            if not isinstance(status, int) or not 100 <= status <= 599:
+                raise _AuthFailure("auth_response_invalid")
+            return HttpResponse(status, header_pairs, b"".join(chunks))
+        except _AuthFailure:
+            raise
+        except (TimeoutError, OSError) as error:
+            raise _AuthFailure("auth_transport_failed") from error
+        except Exception as error:
+            code = getattr(error, "code", "auth_transport_failed")
+            if code not in SAFE_ERROR_CODES:
+                code = "auth_transport_failed"
+            raise _AuthFailure(code) from error
+        finally:
+            if response is not None:
+                response.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._session.cookies.clear()  # type: ignore[attr-defined]
+        self._session.close()
+        self._closed = True
+
+    @staticmethod
+    def _validate_memory_cookies(cookies: object) -> None:
+        values = list(cookies)  # type: ignore[arg-type]
+        if len(values) > MAX_COOKIE_COUNT:
+            raise _AuthFailure("auth_cookie_limit")
+        for cookie in values:
+            domain = _normalize_cookie_domain(str(cookie.domain))
+            if not _is_reviewed_cookie_domain(domain):
+                raise _AuthFailure("auth_cookie_domain_not_allowed")
+            size = len(f"{cookie.name}={cookie.value}".encode("utf-8"))
+            if size > MAX_COOKIE_BYTES:
+                raise _AuthFailure("auth_cookie_limit")
+
+
 class RequestsPreauthCompatibilityClient:
     """Follow only the CEZ PREAUTH GET chain through requests.Session."""
 
@@ -79,22 +195,39 @@ class RequestsPreauthCompatibilityClient:
 
     def run(self) -> AuthResult:
         result = AuthResult(AuthStatus.FAILED, "auth_transport_failed")
-        session: _Session | None = None
+        transport: RequestsSessionTransport | None = None
         try:
             self._emit(SafeHttpAuthEvent("http_auth_started"))
-            session = self._session_factory()
-            if session.trust_env:
-                raise _AuthFailure("auth_transport_policy_invalid")
+            transport = RequestsSessionTransport(
+                resolver=self._resolver,
+                session_factory=self._session_factory,
+                monotonic=self._monotonic,
+            )
             deadline = self._monotonic() + TOTAL_TIMEOUT_SECONDS
             url = CEZ_PND_START_URL
             state = AuthState.PREAUTH
             redirects = 0
             while True:
-                destination = validate_destination(url, state, "GET", self._resolver)
-                response = self._get(session, destination.url, deadline)
-                if not 300 <= response[0] < 400:
+                destination = validate_destination(url, state, "GET", transport.resolve)
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise _AuthFailure("auth_operation_timeout")
+                response = transport.request(
+                    "GET",
+                    destination,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml",
+                        "User-Agent": "CEZ-PND-Collector/requests-preauth-compatibility",
+                    },
+                    body=None,
+                    connect_timeout=min(CONNECT_TIMEOUT_SECONDS, remaining),
+                    read_timeout=min(READ_TIMEOUT_SECONDS, remaining),
+                    total_timeout=remaining,
+                    maximum_body_bytes=MAX_RESPONSE_BODY_BYTES,
+                )
+                if not 300 <= response.status < 400:
                     hostname = urlsplit(destination.url).hostname
-                    if response[0] != 200 or hostname not in {
+                    if response.status != 200 or hostname not in {
                         "mepas.cez.cz",
                         "dip.cezdistribuce.cz",
                     }:
@@ -108,7 +241,7 @@ class RequestsPreauthCompatibilityClient:
                 redirects += 1
                 if redirects > MAX_REDIRECTS:
                     raise _AuthFailure("auth_redirect_limit")
-                location = _single_header(response[1], "location")
+                location = _single_header(response.headers, "location")
                 if location is None:
                     raise _AuthFailure("auth_redirect_invalid")
                 url = urljoin(destination.url, location)
@@ -128,82 +261,11 @@ class RequestsPreauthCompatibilityClient:
             self._emit(SafeHttpAuthEvent("authentication_failed"))
         finally:
             try:
-                if session is not None:
-                    session.cookies.clear()  # type: ignore[attr-defined]
-                    session.close()
+                if transport is not None:
+                    transport.close()
             except Exception:
                 result = AuthResult(AuthStatus.FAILED, "auth_cleanup_failed")
                 self._emit(SafeHttpAuthEvent("http_auth_cleanup_failed"))
             else:
                 self._emit(SafeHttpAuthEvent("http_auth_cleanup_complete"))
         return result
-
-    def _get(
-        self, session: _Session, url: str, deadline: float
-    ) -> tuple[int, tuple[tuple[str, str], ...]]:
-        remaining = deadline - self._monotonic()
-        if remaining <= 0:
-            raise _AuthFailure("auth_operation_timeout")
-        response: _Response | None = None
-        try:
-            response = session.request(
-                "GET",
-                url,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml",
-                    "User-Agent": "CEZ-PND-Collector/requests-preauth-compatibility",
-                },
-                allow_redirects=False,
-                verify=True,
-                timeout=(
-                    min(CONNECT_TIMEOUT_SECONDS, remaining),
-                    min(READ_TIMEOUT_SECONDS, remaining),
-                ),
-                stream=True,
-            )
-            headers = tuple((str(name), str(value)) for name, value in response.headers.items())  # type: ignore[attr-defined]
-            header_size = sum(
-                len(name.encode("utf-8")) + len(value.encode("utf-8")) + 4
-                for name, value in headers
-            )
-            if header_size > MAX_RESPONSE_HEADER_BYTES:
-                raise _AuthFailure("auth_response_header_limit")
-            body_size = 0
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if self._monotonic() > deadline:
-                    raise _AuthFailure("auth_operation_timeout")
-                body_size += len(chunk)
-                if body_size > MAX_RESPONSE_BODY_BYTES:
-                    raise _AuthFailure("auth_response_body_limit")
-            self._validate_memory_cookies(session.cookies)
-            status = response.status_code
-            if self._monotonic() > deadline:
-                raise _AuthFailure("auth_operation_timeout")
-            if not isinstance(status, int) or not 100 <= status <= 599:
-                raise _AuthFailure("auth_response_invalid")
-            return status, headers
-        except _AuthFailure:
-            raise
-        except (TimeoutError, OSError) as error:
-            raise _AuthFailure("auth_transport_failed") from error
-        except Exception as error:
-            code = getattr(error, "code", "auth_transport_failed")
-            if code not in SAFE_ERROR_CODES:
-                code = "auth_transport_failed"
-            raise _AuthFailure(code) from error
-        finally:
-            if response is not None:
-                response.close()
-
-    @staticmethod
-    def _validate_memory_cookies(cookies: object) -> None:
-        values = list(cookies)  # type: ignore[arg-type]
-        if len(values) > MAX_COOKIE_COUNT:
-            raise _AuthFailure("auth_cookie_limit")
-        for cookie in values:
-            domain = _normalize_cookie_domain(str(cookie.domain))
-            if not _is_reviewed_cookie_domain(domain):
-                raise _AuthFailure("auth_cookie_domain_not_allowed")
-            size = len(f"{cookie.name}={cookie.value}".encode("utf-8"))
-            if size > MAX_COOKIE_BYTES:
-                raise _AuthFailure("auth_cookie_limit")

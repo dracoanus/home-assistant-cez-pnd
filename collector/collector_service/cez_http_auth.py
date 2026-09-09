@@ -186,6 +186,7 @@ class HttpTransport(Protocol):
 
     trust_environment: bool
     follows_redirects: bool
+    manages_cookies: bool
 
     def request(
         self,
@@ -749,9 +750,11 @@ class CezHttpAuthClient:
             "Accept": "text/html,application/xhtml+xml",
             "User-Agent": "CEZ-PND-Collector/phase3b",
         }
-        cookie = self._cookies.header_for(destination.url)
-        if cookie is not None:
-            headers["Cookie"] = cookie
+        transport_manages_cookies = getattr(self._transport, "manages_cookies", False)
+        if not transport_manages_cookies:
+            cookie = self._cookies.header_for(destination.url)
+            if cookie is not None:
+                headers["Cookie"] = cookie
         if extra_headers:
             headers.update(extra_headers)
         try:
@@ -782,7 +785,8 @@ class CezHttpAuthClient:
         )
         if header_bytes > MAX_RESPONSE_HEADER_BYTES:
             raise _AuthFailure("auth_response_too_large")
-        self._cookies.absorb(response, destination.url)
+        if not transport_manages_cookies:
+            self._cookies.absorb(response, destination.url)
         return response
 
 

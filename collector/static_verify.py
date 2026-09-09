@@ -70,7 +70,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.9"
+assert VERSION == "0.3.10"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -246,8 +246,11 @@ assert "requests.Session()" in REQUESTS_PREAUTH_SOURCE
 assert "session.trust_env = False" in REQUESTS_PREAUTH_SOURCE
 assert "allow_redirects=False" in REQUESTS_PREAUTH_SOURCE
 assert "verify=True" in REQUESTS_PREAUTH_SOURCE
-assert "validate_destination(url, state, \"GET\", self._resolver)" in REQUESTS_PREAUTH_SOURCE
-assert "CREDENTIAL_SUBMISSION" not in REQUESTS_PREAUTH_SOURCE
+assert "validate_destination(url, state, \"GET\", transport.resolve)" in REQUESTS_PREAUTH_SOURCE
+assert "class RequestsSessionTransport" in REQUESTS_PREAUTH_SOURCE
+assert "manages_cookies = True" in REQUESTS_PREAUTH_SOURCE
+assert "from .requests_preauth import RequestsSessionTransport" in SERVER_SOURCE
+assert "StrictHttpsTransport" not in SERVER_SOURCE
 assert "BeautifulSoup" not in HTTP_AUTH_SOURCE
 assert re.search(
     r"^\s*(?:import logging|from logging import)", HTTP_AUTH_SOURCE, re.MULTILINE
@@ -385,7 +388,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.9"',
+    'version: "0.3.10"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -467,4 +470,5 @@ print("PASS: production App wrapper is prebuilt-image-only and least-privilege")
 print("PASS: HA bootstrap stores only the API verifier and fails closed")
 print("PASS: one-shot CEZ discovery is explicit, allowlisted, and non-secret")
 print("PASS: browserless CEZ auth is offline-only, redirect-explicit, and fail-closed")
-print("PASS: CEZ TLS transport pins validated IPs while preserving hostname identity")
+print("PASS: retained strict transport still pins validated IPs")
+print("PASS: active requests auth validates every hop before its documented second DNS resolution")

@@ -428,7 +428,7 @@ class Phase3COneShotModeTests(unittest.TestCase):
         ), mock.patch.object(
             server, "load_runtime_configuration", return_value=configuration
         ), mock.patch(
-            "collector_service.strict_http_transport.StrictHttpsTransport"
+            "collector_service.requests_preauth.RequestsSessionTransport"
         ), mock.patch.object(
             server.CezHttpAuthClient, "authenticate", return_value=result
         ), mock.patch("sys.stdout", output):
@@ -505,7 +505,7 @@ class Phase3COneShotModeTests(unittest.TestCase):
         ), mock.patch.object(
             server, "load_runtime_configuration", return_value=configuration
         ), mock.patch(
-            "collector_service.strict_http_transport.StrictHttpsTransport",
+            "collector_service.requests_preauth.RequestsSessionTransport",
             return_value=fake_transport,
         ), mock.patch.object(
             server.CezHttpAuthClient, "authenticate", return_value=result
@@ -529,7 +529,7 @@ class Phase3COneShotModeTests(unittest.TestCase):
         ), mock.patch.object(
             server, "load_runtime_configuration", return_value=configuration
         ), mock.patch(
-            "collector_service.strict_http_transport.StrictHttpsTransport",
+            "collector_service.requests_preauth.RequestsSessionTransport",
             side_effect=RuntimeError("private transport detail"),
         ), mock.patch("sys.stdout", output):
             self.assertEqual(server.main(), 1)
