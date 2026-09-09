@@ -444,14 +444,12 @@ class _LoginFormParser(HTMLParser):
             self.malformed = True
 
 
-class _PndApplicationPageParser(HTMLParser):
-    """Recognize the bounded, non-secret PND application success marker."""
+class _PndFinalResponseParser(HTMLParser):
+    """Detect login forms and safely collect bounded final-response text."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.h1_values: list[str] = []
         self.text_values: list[str] = []
-        self._h1_parts: list[str] | None = None
         self._form_depth = 0
         self.login_form_present = False
         self.malformed = False
@@ -471,12 +469,11 @@ class _PndApplicationPageParser(HTMLParser):
             ):
                 self.login_form_present = True
         elif tag == "input" and self._form_depth:
-            if attributes.get("type", "text").lower() == "password":
+            if (
+                attributes.get("type", "text").lower() == "password"
+                or attributes.get("name", "").casefold() in {"username", "password"}
+            ):
                 self.login_form_present = True
-        elif tag == "h1":
-            if self._h1_parts is not None:
-                self.malformed = True
-            self._h1_parts = []
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -485,21 +482,13 @@ class _PndApplicationPageParser(HTMLParser):
                 self.malformed = True
             else:
                 self._form_depth -= 1
-        elif tag == "h1":
-            if self._h1_parts is None:
-                self.malformed = True
-            else:
-                self.h1_values.append(" ".join("".join(self._h1_parts).split()))
-                self._h1_parts = None
 
     def handle_data(self, data: str) -> None:
         self.text_values.append(data)
-        if self._h1_parts is not None:
-            self._h1_parts.append(data)
 
     def close(self) -> None:
         super().close()
-        if self._form_depth or self._h1_parts is not None:
+        if self._form_depth:
             self.malformed = True
 
 
@@ -517,7 +506,7 @@ def _parse_login_form(html: bytes, page_url: str) -> _ParsedForm:
         raise _AuthFailure("auth_form_invalid")
 
     candidates: list[_ParsedForm] = []
-    critical = {"username", "password", "execution", "_eventId", "lt"}
+    critical = {"username", "password", "execution", "_eventId", "lt", "submit"}
     for form in parser.forms:
         names = [name for name, _, _ in form.controls]
         if any(names.count(name) > 1 for name in critical):
@@ -707,12 +696,22 @@ class CezHttpAuthClient:
                 "POST",
                 self._resolver,
             )
+            referer, referer_host = _validate_destination_contract(
+                page_url, AuthState.CREDENTIAL_FORM, "GET"
+            )
+            if referer_host != action.hostname:
+                raise _AuthFailure("auth_destination_rejected")
             fields = [(name, value) for name, value, _ in form.controls]
             fields = [
                 (name, value)
                 for name, value in fields
                 if name not in {"username", "password"}
             ]
+            field_names = {name for name, _ in fields}
+            if "_eventId" not in field_names:
+                fields.append(("_eventId", "submit"))
+            if "submit" not in field_names:
+                fields.append(("submit", "PŘIHLÁSIT SE"))
             fields.extend(
                 (
                     ("username", self._credentials.username),
@@ -726,7 +725,11 @@ class CezHttpAuthClient:
                 AuthState.CREDENTIAL_SUBMISSION,
                 deadline,
                 body=encoded,
-                extra_headers={"Content-Type": "application/x-www-form-urlencoded"},
+                extra_headers={
+                    "Accept": "*/*",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": referer,
+                },
             )
             self._emit(SafeHttpAuthEvent("credentials_submitted", action.hostname))
             final_url, response = self._follow_auth_redirects(
@@ -880,20 +883,14 @@ def _single_header(
 
 
 def _verify_authenticated_application_page(response: HttpResponse) -> None:
-    """Require the bounded application marker and reject known auth/error pages."""
+    """Reject a bounded final response that is clearly login, auth, or error content."""
 
     if len(response.body) > MAX_RESPONSE_BODY_BYTES:
         raise _AuthFailure("auth_state_unverified")
-    content_type = _single_header(response.headers, "content-type")
-    if (
-        response.status != 200
-        or content_type is None
-        or content_type.split(";", 1)[0].strip().lower()
-        not in {"text/html", "application/xhtml+xml"}
-    ):
+    if response.status != 200:
         raise _AuthFailure("auth_state_unverified")
     try:
-        parser = _PndApplicationPageParser()
+        parser = _PndFinalResponseParser()
         parser.feed(response.body.decode("utf-8", errors="strict"))
         parser.close()
     except (UnicodeError, ValueError) as error:
@@ -907,18 +904,20 @@ def _verify_authenticated_application_page(response: HttpResponse) -> None:
         "chybné jméno",
         "invalid credentials",
         "bad credentials",
+        "zablokován",
+        "účet je uzamčen",
+        "account locked",
         "odstávka",
         "probíhá údržba",
         "under maintenance",
-    )
-    has_application_marker = any(
-        "naměřená data" in value.casefold() for value in parser.h1_values
+        "central authentication service",
+        "internal server error",
+        "service unavailable",
     )
     if (
         parser.malformed
         or parser.login_form_present
         or any(marker in page_text for marker in failure_markers)
-        or not has_application_marker
     ):
         raise _AuthFailure("auth_state_unverified")
 

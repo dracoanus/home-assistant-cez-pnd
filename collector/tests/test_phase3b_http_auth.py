@@ -26,11 +26,7 @@ FORM_HTML = b"""<!doctype html><html><body>
 <input type="text" name="username" value="">
 <input type="password" name="password" value="">
 </form></body></html>"""
-PND_APPLICATION_HTML = (
-    b"<!doctype html><html><body><h1>Namerena data</h1></body></html>".replace(
-        b"Namerena", "Naměřená".encode("utf-8")
-    )
-)
+PND_APPLICATION_HTML = b"<!doctype html><html><body><main id='app'></main></body></html>"
 
 
 def _resolver(_hostname: str, _port: int) -> tuple[str, ...]:
