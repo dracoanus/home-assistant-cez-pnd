@@ -119,7 +119,11 @@ SAFE_ERROR_CODES = frozenset(
         "auth_form_ambiguous",
         "auth_form_invalid",
         "auth_form_too_large",
-        "auth_cookie_invalid",
+        "auth_cookie_invalid_syntax",
+        "auth_cookie_invalid_name",
+        "auth_cookie_invalid_domain",
+        "auth_cookie_domain_mismatch",
+        "auth_cookie_domain_not_allowed",
         "auth_cookie_limit",
         "auth_operation_timeout",
         "auth_transport_policy_invalid",
@@ -479,12 +483,12 @@ def _normalize_cookie_domain(value: str) -> str:
             for label in labels
         )
     ):
-        raise _AuthFailure("auth_cookie_invalid")
+        raise _AuthFailure("auth_cookie_invalid_domain")
     try:
         ipaddress.ip_address(domain)
     except ValueError:
         return domain
-    raise _AuthFailure("auth_cookie_invalid")
+    raise _AuthFailure("auth_cookie_invalid_domain")
 
 
 class _MemoryCookieJar:
@@ -496,7 +500,7 @@ class _MemoryCookieJar:
     def absorb(self, response: HttpResponse, response_url: str) -> None:
         hostname = (urlsplit(response_url).hostname or "").lower()
         if hostname not in REVIEWED_HOSTNAMES:
-            raise _AuthFailure("auth_cookie_invalid")
+            raise _AuthFailure("auth_cookie_domain_not_allowed")
         for name, value in response.headers:
             if name.lower() != "set-cookie":
                 continue
@@ -505,28 +509,29 @@ class _MemoryCookieJar:
             first = value.split(";", 1)[0]
             cookie_name, separator, cookie_value = first.partition("=")
             cookie_name = cookie_name.strip()
-            if not separator or not cookie_name or any(ch in cookie_name for ch in "\r\n\t ;,"):
-                raise _AuthFailure("auth_cookie_invalid")
+            if not separator:
+                raise _AuthFailure("auth_cookie_invalid_syntax")
+            if not cookie_name or any(ch in cookie_name for ch in "\r\n\t ;,"):
+                raise _AuthFailure("auth_cookie_invalid_name")
             domain_attributes = []
             for item in value.split(";")[1:]:
                 attribute, separator, attribute_value = item.partition("=")
                 if attribute.strip().lower() == "domain":
                     if not separator:
-                        raise _AuthFailure("auth_cookie_invalid")
+                        raise _AuthFailure("auth_cookie_invalid_syntax")
                     domain_attributes.append(attribute_value)
             if len(domain_attributes) > 1:
-                raise _AuthFailure("auth_cookie_invalid")
+                raise _AuthFailure("auth_cookie_invalid_syntax")
             host_only = not domain_attributes
             domain = (
                 hostname
                 if host_only
                 else _normalize_cookie_domain(domain_attributes[0])
             )
-            if not host_only and (
-                domain not in REVIEWED_COOKIE_DOMAINS
-                or not _domain_matches(hostname, domain)
-            ):
-                raise _AuthFailure("auth_cookie_invalid")
+            if not host_only and not _domain_matches(hostname, domain):
+                raise _AuthFailure("auth_cookie_domain_mismatch")
+            if not host_only and domain not in REVIEWED_COOKIE_DOMAINS:
+                raise _AuthFailure("auth_cookie_domain_not_allowed")
             cookie = _Cookie(domain, cookie_name, cookie_value, host_only)
             self._cookies[(domain, cookie_name, host_only)] = cookie
             if len(self._cookies) > MAX_COOKIE_COUNT:
@@ -535,7 +540,7 @@ class _MemoryCookieJar:
     def header_for(self, url: str) -> str | None:
         hostname = (urlsplit(url).hostname or "").lower()
         if hostname not in REVIEWED_HOSTNAMES:
-            raise _AuthFailure("auth_cookie_invalid")
+            raise _AuthFailure("auth_cookie_domain_not_allowed")
         pairs = [
             f"{cookie.name}={cookie.value}"
             for cookie in self._cookies.values()
