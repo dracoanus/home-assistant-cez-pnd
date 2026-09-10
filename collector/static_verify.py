@@ -24,6 +24,15 @@ REQUESTS_PREAUTH_SOURCE = (
 DATA_PROBE_SOURCE = (ROOT / "collector_service" / "cez_data_probe.py").read_text(
     encoding="utf-8"
 )
+CSV_PARSER_SOURCE = (ROOT / "collector_service" / "cez_csv_parser.py").read_text(
+    encoding="utf-8"
+)
+CSV_MODELS_SOURCE = (ROOT / "collector_service" / "cez_csv_models.py").read_text(
+    encoding="utf-8"
+)
+THIRD_PARTY_NOTICES = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+    encoding="utf-8"
+)
 ENTRYPOINT_SOURCE = (ROOT / "collector_entrypoint.py").read_text(encoding="utf-8")
 REQUESTS_COMPATIBILITY_REQUIREMENTS = (
     ROOT / "requirements-requests-compatibility.txt"
@@ -395,6 +404,22 @@ for safe_meter_field in (
     "selection_mode",
 ):
     assert safe_meter_field in HTTP_AUTH_SOURCE
+assert "MAX_FILE_BYTES = 5 * 1024 * 1024" in CSV_PARSER_SOURCE
+assert "MAX_ROWS = 10_000" in CSV_PARSER_SOURCE
+assert "MAX_COLUMNS = 50" in CSV_PARSER_SOURCE
+assert "MAX_CELL_CHARACTERS = 128" in CSV_PARSER_SOURCE
+assert '("utf-8-sig", "utf-8", "cp1250", "iso-8859-2")' in CSV_PARSER_SOURCE
+assert 'SUPPORTED_DELIMITERS = (";", ",")' in CSV_PARSER_SOURCE
+assert 'Decimal("0.25")' in CSV_PARSER_SOURCE
+assert 'frozenset({"", "-", "--", "n/a", "na", "none", "null"})' in CSV_PARSER_SOURCE
+assert 'raise PndCsvParseError("csv_status_invalid")' in CSV_PARSER_SOURCE
+assert 'raise PndCsvParseError("csv_duplicate_conflict")' in CSV_PARSER_SOURCE
+assert "expected not in {92, 96, 100}" in CSV_PARSER_SOURCE
+assert "class IntervalRecord" in CSV_MODELS_SOURCE
+assert "class ParsedPndData" in CSV_MODELS_SOURCE
+assert "value_kwh: Decimal | None" in CSV_MODELS_SOURCE
+assert "Copyright (c) 2026 igracek" in CSV_PARSER_SOURCE
+assert "Copyright (c) 2026 igracek" in THIRD_PARTY_NOTICES
 assert '"data_probe_export_response_observed"' in HTTP_AUTH_SOURCE
 assert "class DataProbeExportObservation" in HTTP_AUTH_SOURCE
 assert 'headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL}' in DATA_PROBE_SOURCE
@@ -620,3 +645,4 @@ print("PASS: retained strict transport still pins validated IPs")
 print("PASS: active requests auth validates every hop before its documented second DNS resolution")
 print("PASS: one-shot authenticated data probe is bounded, exact-destination, and private")
 print("PASS: export observations and failure codes expose only bounded structural metadata")
+print("PASS: CEZ CSV parsing is bounded, decimal-exact, DST-aware, and MIT-attributed")
