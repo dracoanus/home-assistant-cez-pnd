@@ -351,6 +351,29 @@ assert '"https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"' in DAT
 assert "AuthState.DATA_PROBE_METERS" in HTTP_AUTH_SOURCE
 assert "AuthState.DATA_PROBE_METERS" in DATA_PROBE_SOURCE
 assert "return _Metadata(None, False, False, False), observation" in DATA_PROBE_SOURCE
+assert '"data_probe_metadata_root_invalid"' in HTTP_AUTH_SOURCE
+assert '"data_probe_export_response_observed"' in HTTP_AUTH_SOURCE
+assert "class DataProbeExportObservation" in HTTP_AUTH_SOURCE
+assert 'headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL}' in DATA_PROBE_SOURCE
+for channel in ("consumption", "production"):
+    for export_failure in (
+        "status_failed",
+        "empty",
+        "too_large",
+        "content_type_invalid",
+        "html_rejected",
+    ):
+        code = f"data_probe_{channel}_export_{export_failure}"
+        assert code in HTTP_AUTH_SOURCE
+assert 'prefix = f"data_probe_{channel}_export"' in DATA_PROBE_SOURCE
+for export_failure in (
+    "status_failed",
+    "empty",
+    "too_large",
+    "content_type_invalid",
+    "html_rejected",
+):
+    assert f'f"{{prefix}}_{export_failure}"' in DATA_PROBE_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW
@@ -532,9 +555,11 @@ for path in SOURCE_FILES:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id not in {"eval", "exec", "compile"}
 
+ast.parse(ENTRYPOINT_SOURCE, filename=str(ROOT / "collector_entrypoint.py"))
+
 print("PASS: immutable validated Debian runtime base")
 print("PASS: root-owned mode-0555 source is set atomically by COPY")
-print("PASS: explicit non-root UID/GID 2000:2000")
+print("PASS: root-only storage bootstrap drops permanently to UID/GID 2000:2000")
 print("PASS: exactly three versioned read-only API routes")
 print("PASS: TLS and constant-time bearer verifier required")
 print("PASS: CEZ hosts exist only in reviewed authentication/data-probe code")
@@ -549,3 +574,4 @@ print("PASS: browserless CEZ auth is offline-only, redirect-explicit, and fail-c
 print("PASS: retained strict transport still pins validated IPs")
 print("PASS: active requests auth validates every hop before its documented second DNS resolution")
 print("PASS: one-shot authenticated data probe is bounded, exact-destination, and private")
+print("PASS: export observations and failure codes expose only bounded structural metadata")

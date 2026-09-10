@@ -20,6 +20,7 @@ from .cez_http_auth import (
     CEZ_PND_START_URL,
     CezHttpAuthClient,
     DashboardMetadataObservation,
+    DataProbeExportObservation,
     HttpResponse,
     HttpTransport,
     MAX_RESPONSE_BODY_BYTES,
@@ -104,12 +105,12 @@ class CezDataProbe:
         )
 
         consumption = self._export(
-            client, metadata, interval_from, interval_to, "-1001", deadline,
+            client, metadata, interval_from, interval_to, "-1001", "consumption", deadline,
             "data_probe_consumption_export_failed",
         )
         self._emit(SafeHttpAuthEvent("consumption_export_received"))
         production = self._export(
-            client, metadata, interval_from, interval_to, "-1002", deadline,
+            client, metadata, interval_from, interval_to, "-1002", "production", deadline,
             "data_probe_production_export_failed",
         )
         self._emit(SafeHttpAuthEvent("production_export_received"))
@@ -275,6 +276,7 @@ class CezDataProbe:
         interval_from: str,
         interval_to: str,
         assembly_id: str,
+        channel: str,
         deadline: float,
         failure_code: str,
     ) -> bytes:
@@ -300,14 +302,24 @@ class CezDataProbe:
             failure_code,
             headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL},
         )
-        if (
-            response.status != 200
-            or not response.body
-            or len(response.body) > MAX_RESPONSE_BODY_BYTES
-            or _content_type(response) not in CSV_CONTENT_TYPES
-            or _looks_like_html_or_login(response.body)
-        ):
-            raise _AuthFailure(failure_code)
+        observation = _export_observation(channel, response)
+        self._emit(
+            SafeHttpAuthEvent(
+                "data_probe_export_response_observed",
+                export_observation=observation,
+            )
+        )
+        prefix = f"data_probe_{channel}_export"
+        if response.status != 200:
+            raise _AuthFailure(f"{prefix}_status_failed")
+        if not response.body:
+            raise _AuthFailure(f"{prefix}_empty")
+        if len(response.body) > MAX_RESPONSE_BODY_BYTES:
+            raise _AuthFailure(f"{prefix}_too_large")
+        if observation.looks_like_html or observation.looks_like_login:
+            raise _AuthFailure(f"{prefix}_html_rejected")
+        if observation.content_type_base not in CSV_CONTENT_TYPES:
+            raise _AuthFailure(f"{prefix}_content_type_invalid")
         return response.body
 
     def _store(self, summary: bytes, consumption: bytes, production: bytes) -> None:
@@ -496,18 +508,50 @@ def _encode_summary(fields: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-def _looks_like_html_or_login(body: bytes) -> bool:
+def _looks_like_html(body: bytes) -> bool:
+    sample = body[:8192].lstrip().lower()
+    return any(marker in sample for marker in (b"<!doctype html", b"<html"))
+
+
+def _looks_like_login(body: bytes) -> bool:
     sample = body[:8192].lstrip().lower()
     return any(
         marker in sample
-        for marker in (
-            b"<!doctype html",
-            b"<html",
-            b"<form",
-            b"type=\"password\"",
-            b"type='password'",
-            b"g-recaptcha",
-        )
+        for marker in (b"<form", b"type=\"password\"", b"type='password'", b"g-recaptcha")
+    )
+
+
+def _looks_like_json(body: bytes) -> bool:
+    try:
+        json.loads(body.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return False
+    return True
+
+
+def _header_present(response: HttpResponse, name: str) -> bool:
+    expected = name.lower()
+    return any(header_name.lower() == expected for header_name, _ in response.headers)
+
+
+def _export_observation(
+    channel: str, response: HttpResponse
+) -> DataProbeExportObservation:
+    body_bytes = len(response.body)
+    return DataProbeExportObservation(
+        channel=channel,
+        status=response.status,
+        body_bytes=body_bytes,
+        content_type_base=_safe_observed_content_type(response),
+        body_empty=body_bytes == 0,
+        body_limit_exceeded=body_bytes > MAX_RESPONSE_BODY_BYTES,
+        looks_like_html=_looks_like_html(response.body),
+        looks_like_login=_looks_like_login(response.body),
+        looks_like_json=_looks_like_json(response.body),
+        content_disposition_present=_header_present(
+            response, "content-disposition"
+        ),
+        content_encoding_present=_header_present(response, "content-encoding"),
     )
 
 

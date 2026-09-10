@@ -81,6 +81,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "dashboard_metadata_verified",
         "consumption_export_received",
         "production_export_received",
+        "data_probe_export_response_observed",
         "data_probe_complete",
         "data_probe_failed",
         "auth_state_needs_live_verification",
@@ -178,6 +179,56 @@ class DashboardMetadataObservation:
 
 
 @dataclass(frozen=True)
+class DataProbeExportObservation:
+    """Bounded structural evidence for one completed export response."""
+
+    channel: str
+    status: int
+    body_bytes: int
+    content_type_base: str
+    body_empty: bool
+    body_limit_exceeded: bool
+    looks_like_html: bool
+    looks_like_login: bool
+    looks_like_json: bool
+    content_disposition_present: bool
+    content_encoding_present: bool
+
+    def __post_init__(self) -> None:
+        if self.channel not in {"consumption", "production"}:
+            raise ValueError("unsafe data probe export channel")
+        if not 100 <= self.status <= 599:
+            raise ValueError("unsafe data probe export status")
+        if not 0 <= self.body_bytes <= MAX_RESPONSE_BODY_BYTES + 1:
+            raise ValueError("unsafe data probe export size")
+        if self.content_type_base != "unknown" and not _SAFE_MEDIA_TYPE.fullmatch(
+            self.content_type_base
+        ):
+            raise ValueError("unsafe data probe export content type")
+        if self.body_empty != (self.body_bytes == 0):
+            raise ValueError("inconsistent data probe export empty state")
+        if self.body_limit_exceeded != (
+            self.body_bytes > MAX_RESPONSE_BODY_BYTES
+        ):
+            raise ValueError("inconsistent data probe export size state")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "channel": self.channel,
+            "status": self.status,
+            "body_bytes": self.body_bytes,
+            "content_type_base": self.content_type_base,
+            "body_empty": self.body_empty,
+            "body_limit_exceeded": self.body_limit_exceeded,
+            "looks_like_html": self.looks_like_html,
+            "looks_like_login": self.looks_like_login,
+            "looks_like_json": self.looks_like_json,
+            "content_disposition_present": self.content_disposition_present,
+            "content_encoding_present": self.content_encoding_present,
+        }
+
+
+@dataclass(frozen=True)
 class SafeHttpAuthEvent:
     event: str
     hostname: str | None = None
@@ -187,13 +238,28 @@ class SafeHttpAuthEvent:
         default=None, repr=False
     )
     json_root_type: str | None = None
+    export_observation: DataProbeExportObservation | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "dashboard_metadata_unusable":
+        if self.event == "data_probe_export_response_observed":
+            if (
+                self.hostname is not None
+                or self.status is not None
+                or self.code is not None
+                or self.metadata_observation is not None
+                or self.json_root_type is not None
+                or self.export_observation is None
+            ):
+                raise ValueError("invalid data probe export observation event")
+        elif self.export_observation is not None:
+            raise ValueError("unexpected data probe export observation")
+        elif self.event == "dashboard_metadata_unusable":
             if (
                 self.hostname is not None
                 or self.status is not None
@@ -225,8 +291,8 @@ class SafeHttpAuthEvent:
     def from_result(cls, result: AuthResult) -> SafeHttpAuthEvent:
         return cls("http_auth_result", status=result.status, code=result.code)
 
-    def as_dict(self) -> dict[str, str]:
-        result = {"event": self.event}
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"event": self.event}
         if self.hostname is not None:
             result["hostname"] = self.hostname
         if self.status is not None and self.code is not None:
@@ -236,6 +302,8 @@ class SafeHttpAuthEvent:
             result.update(self.metadata_observation.as_dict())
         if self.json_root_type is not None:
             result["json_root_type"] = self.json_root_type
+        if self.export_observation is not None:
+            result.update(self.export_observation.as_dict())
         return result
 
 
@@ -286,6 +354,16 @@ SAFE_ERROR_CODES = frozenset(
         "data_probe_metadata_configured_elm_not_found",
         "data_probe_consumption_export_failed",
         "data_probe_production_export_failed",
+        "data_probe_consumption_export_status_failed",
+        "data_probe_consumption_export_empty",
+        "data_probe_consumption_export_too_large",
+        "data_probe_consumption_export_content_type_invalid",
+        "data_probe_consumption_export_html_rejected",
+        "data_probe_production_export_status_failed",
+        "data_probe_production_export_empty",
+        "data_probe_production_export_too_large",
+        "data_probe_production_export_content_type_invalid",
+        "data_probe_production_export_html_rejected",
         "data_probe_storage_failed",
     }
 )

@@ -94,6 +94,20 @@ class CollectorEntrypointTests(unittest.TestCase):
 
     def test_bootstrap_executes_server_only_after_privilege_drop(self) -> None:
         calls: list[str] = []
+
+        def execute(path: str, argv: list[str]) -> None:
+            self.assertEqual(path, "/opt/collector-venv/bin/python")
+            self.assertEqual(
+                argv,
+                [
+                    "/opt/collector-venv/bin/python",
+                    "-m",
+                    "collector_service.server",
+                ],
+            )
+            calls.append("exec")
+            raise OSError
+
         with mock.patch.object(
             collector_entrypoint.os, "getuid", return_value=0, create=True
         ), mock.patch.object(
@@ -109,10 +123,25 @@ class CollectorEntrypointTests(unittest.TestCase):
         ), mock.patch.object(
             collector_entrypoint.os,
             "execv",
-            side_effect=lambda *_args: (calls.append("exec"), (_ for _ in ()).throw(OSError()))[1],
+            side_effect=execute,
         ):
             self.assertEqual(collector_entrypoint.main(), 1)
         self.assertEqual(calls, ["prepare", "drop", "exec"])
+
+    def test_failed_identity_verification_cannot_continue_as_root(self) -> None:
+        with mock.patch.object(
+            collector_entrypoint.os, "setgroups", create=True
+        ), mock.patch.object(
+            collector_entrypoint.os, "setgid", create=True
+        ), mock.patch.object(
+            collector_entrypoint.os, "setuid", create=True
+        ), mock.patch.object(
+            collector_entrypoint.os, "getuid", return_value=0, create=True
+        ), mock.patch.object(
+            collector_entrypoint.os, "geteuid", return_value=0, create=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "privilege drop failed"):
+                collector_entrypoint.drop_privileges()
 
     def test_bootstrap_refuses_non_root_start(self) -> None:
         with mock.patch.object(
