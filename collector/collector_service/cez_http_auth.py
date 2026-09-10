@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from html.parser import HTMLParser
 import ipaddress
+import re
 import socket
 import time
 from typing import Callable, Mapping, Protocol, Sequence
@@ -74,6 +75,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "auth_redirect_observed",
         "authenticated",
         "data_probe_started",
+        "dashboard_metadata_response_observed",
         "dashboard_metadata_verified",
         "consumption_export_received",
         "production_export_received",
@@ -94,6 +96,83 @@ REVIEWED_HOSTNAMES = frozenset(
     {"pnd.cezdistribuce.cz", "mepas.cez.cz", "dip.cezdistribuce.cz"}
 )
 REVIEWED_COOKIE_DOMAINS = frozenset({"cez.cz", "cezdistribuce.cz"})
+_SAFE_METADATA_KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+_SAFE_MEDIA_TYPE = re.compile(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+\Z")
+_JSON_TYPE_NAMES = frozenset(
+    {"object", "array", "string", "number", "boolean", "null", "unknown"}
+)
+
+
+@dataclass(frozen=True)
+class DashboardMetadataObservation:
+    """Strictly structural, non-secret dashboard response evidence."""
+
+    status: int
+    body_bytes: int
+    content_type_base: str
+    json_parseable: bool
+    json_root_type: str
+    top_level_key_count: int | None = None
+    top_level_keys: tuple[str, ...] = ()
+    collection_types: tuple[tuple[str, str], ...] = ()
+    id_device_set_present: bool = False
+    id_device_set_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status != 200 or not 0 <= self.body_bytes <= MAX_RESPONSE_BODY_BYTES:
+            raise ValueError("unsafe dashboard metadata observation")
+        if self.content_type_base != "unknown" and not _SAFE_MEDIA_TYPE.fullmatch(
+            self.content_type_base
+        ):
+            raise ValueError("unsafe dashboard metadata content type")
+        if self.json_root_type not in _JSON_TYPE_NAMES:
+            raise ValueError("unsafe dashboard metadata root type")
+        if self.json_parseable == (self.json_root_type == "unknown"):
+            raise ValueError("inconsistent dashboard metadata JSON evidence")
+        if self.top_level_key_count is not None and not (
+            self.json_root_type == "object"
+            and 0 <= self.top_level_key_count <= MAX_RESPONSE_BODY_BYTES
+        ):
+            raise ValueError("unsafe dashboard metadata key count")
+        if len(self.top_level_keys) > 50 or self.top_level_keys != tuple(
+            sorted(set(self.top_level_keys))
+        ):
+            raise ValueError("unsafe dashboard metadata keys")
+        if any(
+            key != "[redacted-key]" and not _SAFE_METADATA_KEY.fullmatch(key)
+            for key in self.top_level_keys
+        ):
+            raise ValueError("unsafe dashboard metadata key")
+        if tuple(sorted(self.collection_types)) != self.collection_types:
+            raise ValueError("unsafe dashboard metadata collection types")
+        if any(
+            name not in {"meters", "devices", "electrometers"}
+            or value not in _JSON_TYPE_NAMES - {"unknown"}
+            for name, value in self.collection_types
+        ):
+            raise ValueError("unsafe dashboard metadata collection type")
+        if self.id_device_set_type is not None and self.id_device_set_type not in (
+            _JSON_TYPE_NAMES - {"unknown"}
+        ):
+            raise ValueError("unsafe dashboard metadata idDeviceSet type")
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "status": self.status,
+            "body_bytes": self.body_bytes,
+            "content_type_base": self.content_type_base,
+            "json_parseable": self.json_parseable,
+            "json_root_type": self.json_root_type,
+            "id_device_set_present": self.id_device_set_present,
+        }
+        if self.top_level_key_count is not None:
+            result["top_level_key_count"] = self.top_level_key_count
+            result["top_level_keys"] = list(self.top_level_keys)
+        if self.collection_types:
+            result["collection_types"] = dict(self.collection_types)
+        if self.id_device_set_type is not None:
+            result["id_device_set_type"] = self.id_device_set_type
+        return result
 
 
 @dataclass(frozen=True)
@@ -102,13 +181,26 @@ class SafeHttpAuthEvent:
     hostname: str | None = None
     status: AuthStatus | None = None
     code: str | None = None
+    metadata_observation: DashboardMetadataObservation | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "http_auth_result":
+        if self.event == "dashboard_metadata_response_observed":
+            if (
+                self.hostname is not None
+                or self.status is not None
+                or self.code is not None
+                or self.metadata_observation is None
+            ):
+                raise ValueError("invalid dashboard metadata observation event")
+        elif self.metadata_observation is not None:
+            raise ValueError("unexpected dashboard metadata observation")
+        elif self.event == "http_auth_result":
             if self.hostname is not None or self.status is None or self.code is None:
                 raise ValueError("invalid HTTP authentication result event")
             AuthResult(self.status, self.code)
@@ -126,6 +218,8 @@ class SafeHttpAuthEvent:
         if self.status is not None and self.code is not None:
             result["status"] = self.status.value
             result["code"] = self.code
+        if self.metadata_observation is not None:
+            result.update(self.metadata_observation.as_dict())
         return result
 
 
@@ -167,6 +261,13 @@ SAFE_ERROR_CODES = frozenset(
         "data_probe_auth_failed",
         "data_probe_metadata_failed",
         "data_probe_metadata_invalid",
+        "data_probe_metadata_content_type_invalid",
+        "data_probe_metadata_utf8_invalid",
+        "data_probe_metadata_json_invalid",
+        "data_probe_metadata_root_invalid",
+        "data_probe_metadata_id_device_set_invalid",
+        "data_probe_metadata_meter_collection_invalid",
+        "data_probe_metadata_configured_elm_not_found",
         "data_probe_consumption_export_failed",
         "data_probe_production_export_failed",
         "data_probe_storage_failed",
