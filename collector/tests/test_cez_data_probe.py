@@ -229,6 +229,16 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertEqual(session.calls[4][1], cez_http_auth.CEZ_PND_DASHBOARD_DATA_URL)
             export_calls = session.calls[5:]
             self.assertTrue(all(urlsplit(call[1]).path == "/cezpnd2/external/data/export" for call in export_calls))
+            for _, _, request in export_calls:
+                self.assertFalse(request["allow_redirects"])
+                self.assertEqual(request["headers"]["Accept"], "*/*")
+                self.assertEqual(
+                    request["headers"]["Referer"], cez_http_auth.CEZ_PND_START_URL
+                )
+                self.assertEqual(
+                    request["headers"]["User-Agent"],
+                    cez_http_auth.CEZ_HTTP_USER_AGENT,
+                )
             queries = [parse_qs(urlsplit(call[1]).query) for call in export_calls]
             self.assertEqual([query["idAssembly"] for query in queries], [["-1001"], ["-1002"]])
             for query in queries:
@@ -277,13 +287,19 @@ class CezDataProbeTests(unittest.TestCase):
             "authenticated",
             "dashboard_metadata_response_observed",
             "dashboard_metadata_verified",
+            "data_probe_export_response_observed",
             "consumption_export_received",
-            "production_export_received",
             "data_probe_complete",
             "http_auth_cleanup_complete",
         ]
         names = [event.event for event in events]
-        self.assertEqual([name for name in names if name in expected], expected)
+        filtered = [name for name in names if name in expected]
+        self.assertEqual(filtered.count("data_probe_export_response_observed"), 2)
+        self.assertLess(
+            filtered.index("consumption_export_received"),
+            filtered.index("data_probe_complete"),
+        )
+        self.assertIn("production_export_received", names)
 
     def test_optional_identifiers_are_omitted(self) -> None:
         client = _ProbeClient(
@@ -517,7 +533,7 @@ class CezDataProbeTests(unittest.TestCase):
                     _configuration(None), output_directory=output
                 ).collect(client)  # type: ignore[arg-type]
             self.assertEqual(
-                raised.exception.code, "data_probe_consumption_export_failed"
+                raised.exception.code, "data_probe_consumption_export_status_failed"
             )
 
             client = _ProbeClient(
@@ -532,32 +548,88 @@ class CezDataProbeTests(unittest.TestCase):
                     _configuration(None), output_directory=output
                 ).collect(client)  # type: ignore[arg-type]
             self.assertEqual(
-                raised.exception.code, "data_probe_production_export_failed"
+                raised.exception.code, "data_probe_production_export_status_failed"
             )
 
     def test_html_empty_and_oversized_exports_are_rejected(self) -> None:
         cases = (
-            _http_response(200, b"", "text/csv"),
-            _http_response(200, b"<html><form></form></html>", "text/html"),
-            _http_response(
-                200,
-                b"x" * (cez_http_auth.MAX_RESPONSE_BODY_BYTES + 1),
-                "text/csv",
+            (
+                _http_response(200, b"", "text/csv"),
+                "data_probe_consumption_export_empty",
+            ),
+            (
+                _http_response(200, b"<html><form></form></html>", "text/html"),
+                "data_probe_consumption_export_html_rejected",
+            ),
+            (
+                _http_response(
+                    200,
+                    b"x" * (cez_http_auth.MAX_RESPONSE_BODY_BYTES + 1),
+                    "text/csv",
+                ),
+                "data_probe_consumption_export_too_large",
+            ),
+            (
+                _http_response(200, b'{"error":true}', "application/json"),
+                "data_probe_consumption_export_content_type_invalid",
             ),
         )
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "probe"
-            for response in cases:
+            for response, expected in cases:
                 client = _ProbeClient([_http_response(200, b"{}"), response])
-                with self.subTest(size=len(response.body)), self.assertRaises(
+                with self.subTest(expected=expected), self.assertRaises(
                     cez_http_auth._AuthFailure
                 ) as raised:
                     cez_data_probe.CezDataProbe(
                         _configuration(None), output_directory=output
                     ).collect(client)  # type: ignore[arg-type]
-                self.assertEqual(
-                    raised.exception.code, "data_probe_consumption_export_failed"
-                )
+                self.assertEqual(raised.exception.code, expected)
+
+    def test_export_observation_is_structural_and_channel_specific(self) -> None:
+        private_body = b"private-household-csv\n"
+        response = cez_http_auth.HttpResponse(
+            503,
+            (
+                ("Content-Type", "Text/Plain; charset=utf-8"),
+                ("Content-Disposition", "private-filename"),
+                ("Content-Encoding", "private-encoding"),
+            ),
+            private_body,
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        client = _ProbeClient([_http_response(200, b"{}"), response])
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
+            cez_http_auth._AuthFailure
+        ) as raised:
+            cez_data_probe.CezDataProbe(
+                _configuration(None),
+                output_directory=Path(temporary) / "probe",
+                emit=events.append,
+            ).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(
+            raised.exception.code, "data_probe_consumption_export_status_failed"
+        )
+        observed = next(
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_export_response_observed"
+        )
+        self.assertEqual(observed["channel"], "consumption")
+        self.assertEqual(observed["status"], 503)
+        self.assertEqual(observed["body_bytes"], len(private_body))
+        self.assertEqual(observed["content_type_base"], "text/plain")
+        self.assertFalse(observed["body_empty"])
+        self.assertFalse(observed["body_limit_exceeded"])
+        self.assertFalse(observed["looks_like_html"])
+        self.assertFalse(observed["looks_like_login"])
+        self.assertFalse(observed["looks_like_json"])
+        self.assertTrue(observed["content_disposition_present"])
+        self.assertTrue(observed["content_encoding_present"])
+        rendered = json.dumps(observed)
+        self.assertNotIn(private_body.decode().strip(), rendered)
+        self.assertNotIn("private-filename", rendered)
+        self.assertNotIn("private-encoding", rendered)
 
     def test_atomic_writes_overwrite_without_accumulating_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
