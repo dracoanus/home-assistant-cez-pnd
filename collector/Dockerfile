@@ -6,11 +6,11 @@ RUN /opt/collector-venv/bin/pip install --disable-pip-version-check --no-cache-d
     && rm -f /tmp/requirements-requests-compatibility.txt
 
 COPY --chown=0:0 --chmod=0555 collector_service /opt/collector-service/collector_service
+COPY --chown=0:0 --chmod=0555 collector_entrypoint.py /opt/collector-service/collector_entrypoint.py
 
-USER 2000:2000
 WORKDIR /opt/collector-service
 
-CMD ["/opt/collector-venv/bin/python", "-m", "collector_service.server"]
+ENTRYPOINT ["/opt/collector-venv/bin/python", "/opt/collector-service/collector_entrypoint.py"]
 
 LABEL \
     org.opencontainers.image.title="CEZ PND Collector service skeleton" \

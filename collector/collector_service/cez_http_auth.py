@@ -56,6 +56,7 @@ class AuthState(str, Enum):
     AUTH_REDIRECTS = "auth_redirects"
     AUTHENTICATED = "authenticated"
     DATA_PROBE_METADATA = "data_probe_metadata"
+    DATA_PROBE_METERS = "data_probe_meters"
     DATA_PROBE_EXPORT = "data_probe_export"
 
 
@@ -76,6 +77,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "authenticated",
         "data_probe_started",
         "dashboard_metadata_response_observed",
+        "dashboard_metadata_unusable",
         "dashboard_metadata_verified",
         "consumption_export_received",
         "production_export_received",
@@ -184,13 +186,25 @@ class SafeHttpAuthEvent:
     metadata_observation: DashboardMetadataObservation | None = field(
         default=None, repr=False
     )
+    json_root_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "dashboard_metadata_response_observed":
+        if self.event == "dashboard_metadata_unusable":
+            if (
+                self.hostname is not None
+                or self.status is not None
+                or self.code is not None
+                or self.metadata_observation is not None
+                or self.json_root_type not in _JSON_TYPE_NAMES - {"unknown", "object"}
+            ):
+                raise ValueError("invalid dashboard metadata unusable event")
+        elif self.json_root_type is not None:
+            raise ValueError("unexpected dashboard metadata root type")
+        elif self.event == "dashboard_metadata_response_observed":
             if (
                 self.hostname is not None
                 or self.status is not None
@@ -220,6 +234,8 @@ class SafeHttpAuthEvent:
             result["code"] = self.code
         if self.metadata_observation is not None:
             result.update(self.metadata_observation.as_dict())
+        if self.json_root_type is not None:
+            result["json_root_type"] = self.json_root_type
         return result
 
 
@@ -406,6 +422,11 @@ DESTINATION_CONTRACT: Mapping[AuthState, Mapping[str, _DestinationRule]] = {
             frozenset({"GET"}), ("/cezpnd2/external/dashboard/view/data",)
         ),
     },
+    AuthState.DATA_PROBE_METERS: {
+        "pnd.cezdistribuce.cz": _DestinationRule(
+            frozenset({"GET"}), ("/cezpnd2/api/v1/consumption/meters",)
+        ),
+    },
     AuthState.DATA_PROBE_EXPORT: {
         "pnd.cezdistribuce.cz": _DestinationRule(
             frozenset({"GET"}), ("/cezpnd2/external/data/export",)
@@ -483,6 +504,7 @@ def _validate_destination_contract(
     rule = rules.get(hostname)
     exact_path_required = state in {
         AuthState.DATA_PROBE_METADATA,
+        AuthState.DATA_PROBE_METERS,
         AuthState.DATA_PROBE_EXPORT,
     }
     path_allowed = (
@@ -927,6 +949,7 @@ class CezHttpAuthClient:
 
         if state not in {
             AuthState.DATA_PROBE_METADATA,
+            AuthState.DATA_PROBE_METERS,
             AuthState.DATA_PROBE_EXPORT,
         }:
             raise _AuthFailure("auth_destination_rejected")

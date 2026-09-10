@@ -24,6 +24,7 @@ REQUESTS_PREAUTH_SOURCE = (
 DATA_PROBE_SOURCE = (ROOT / "collector_service" / "cez_data_probe.py").read_text(
     encoding="utf-8"
 )
+ENTRYPOINT_SOURCE = (ROOT / "collector_entrypoint.py").read_text(encoding="utf-8")
 REQUESTS_COMPATIBILITY_REQUIREMENTS = (
     ROOT / "requirements-requests-compatibility.txt"
 ).read_text(encoding="utf-8")
@@ -87,11 +88,30 @@ assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
     "/opt/collector-service/collector_service"
 ) in DOCKERFILE
+assert (
+    "COPY --chown=0:0 --chmod=0555 collector_entrypoint.py "
+    "/opt/collector-service/collector_entrypoint.py"
+) in DOCKERFILE
 assert DOCKERFILE.count("USER root") == 1
 assert DOCKERFILE.count("RUN ") == 1
 assert "pip install --disable-pip-version-check --no-cache-dir --no-deps --only-binary=:all:" in DOCKERFILE
-assert "USER 2000:2000" in DOCKERFILE
-assert 'CMD ["/opt/collector-venv/bin/python", "-m", "collector_service.server"]' in DOCKERFILE
+assert "USER 2000:2000" not in DOCKERFILE
+assert (
+    'ENTRYPOINT ["/opt/collector-venv/bin/python", '
+    '"/opt/collector-service/collector_entrypoint.py"]'
+) in DOCKERFILE
+assert 'PROBE_DIRECTORY_NAME = "cez-pnd-probe"' in ENTRYPOINT_SOURCE
+assert 'DATA_DIRECTORY = Path("/data")' in ENTRYPOINT_SOURCE
+assert "probe_directory.mkdir(mode=0o700, exist_ok=True)" in ENTRYPOINT_SOURCE
+assert "RUNTIME_UID = 2000" in ENTRYPOINT_SOURCE
+assert "RUNTIME_GID = 2000" in ENTRYPOINT_SOURCE
+assert "os.setgroups([])" in ENTRYPOINT_SOURCE
+assert "os.setgid(RUNTIME_GID)" in ENTRYPOINT_SOURCE
+assert "os.setuid(RUNTIME_UID)" in ENTRYPOINT_SOURCE
+assert "os.execv(SERVER_ARGV[0], list(SERVER_ARGV))" in ENTRYPOINT_SOURCE
+assert "recursive" not in ENTRYPOINT_SOURCE.lower()
+assert "chmod 777" not in ENTRYPOINT_SOURCE
+assert "0o777" not in ENTRYPOINT_SOURCE
 for installer in ("apt-get", "apt ", "apk add", "curl ", "wget "):
     assert installer not in DOCKERFILE
 assert REQUESTS_COMPATIBILITY_REQUIREMENTS.splitlines() == [
@@ -310,11 +330,11 @@ assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
 assert '"dashboard_metadata_response_observed"' in HTTP_AUTH_SOURCE
+assert '"dashboard_metadata_unusable"' in HTTP_AUTH_SOURCE
 for metadata_diagnostic_code in (
     "data_probe_metadata_content_type_invalid",
     "data_probe_metadata_utf8_invalid",
     "data_probe_metadata_json_invalid",
-    "data_probe_metadata_root_invalid",
     "data_probe_metadata_id_device_set_invalid",
     "data_probe_metadata_meter_collection_invalid",
     "data_probe_metadata_configured_elm_not_found",
@@ -326,6 +346,11 @@ assert 'key != "[redacted-key]"' in HTTP_AUTH_SOURCE
 assert "len(self.top_level_keys) > 50" in HTTP_AUTH_SOURCE
 assert "metadata_observation=observation" in DATA_PROBE_SOURCE
 assert "_store_metadata_summary(observation)" in DATA_PROBE_SOURCE
+assert 'CEZ_PND_METERS_URL = (' in DATA_PROBE_SOURCE
+assert '"https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"' in DATA_PROBE_SOURCE
+assert "AuthState.DATA_PROBE_METERS" in HTTP_AUTH_SOURCE
+assert "AuthState.DATA_PROBE_METERS" in DATA_PROBE_SOURCE
+assert "return _Metadata(None, False, False, False), observation" in DATA_PROBE_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW

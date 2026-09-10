@@ -84,8 +84,11 @@ The probe writes only these files under `/data/cez-pnd-probe`:
 - `range-consumption.csv`
 - `range-production.csv`
 
-The directory is mode `0700` and the atomically replaced files are mode
-`0600`. The CSV files are raw private CEZ exports and may contain account or
+At container startup, a root-owned immutable bootstrap creates or repairs only
+this probe directory as UID/GID `2000:2000`, mode `0700`, then drops all
+supplementary groups and permanently executes the service as UID/GID
+`2000:2000`. It does not recursively modify `/data`. The atomically replaced
+files are mode `0600`. The CSV files are raw private CEZ exports and may contain account or
 meter identifiers and measurements. Do not publish them, attach them to issue
 reports, add them to Git, or expose them in logs. The JSON summary contains
 only validation booleans and byte counts, never metadata values.

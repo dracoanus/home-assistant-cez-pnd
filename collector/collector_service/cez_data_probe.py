@@ -35,6 +35,9 @@ from .runtime_config import DataProbeConfiguration
 CEZ_PND_EXPORT_URL = (
     "https://pnd.cezdistribuce.cz/cezpnd2/external/data/export"
 )
+CEZ_PND_METERS_URL = (
+    "https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"
+)
 PROBE_DIRECTORY = Path("/data/cez-pnd-probe")
 METADATA_SUMMARY_NAME = "metadata-summary.json"
 CONSUMPTION_NAME = "range-consumption.csv"
@@ -55,6 +58,8 @@ CSV_CONTENT_TYPES = frozenset(
 class _Metadata:
     id_device_set: str | None
     meter_collection_present: bool
+    usable: bool
+    configured_elm_verified: bool
 
 
 class CezDataProbe:
@@ -84,7 +89,13 @@ class CezDataProbe:
             headers={"Accept": "*/*"},
         )
         metadata, observation = self._validate_metadata(metadata_response)
-        self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
+        if metadata.usable:
+            self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
+        if (
+            self._configuration.electrometer_id is not None
+            and not metadata.configured_elm_verified
+        ):
+            self._verify_configured_elm(client, deadline)
 
         day = self._configuration.probe_date
         interval_from = f"{day.strftime('%d.%m.%Y')} 00:00"
@@ -107,7 +118,7 @@ class CezDataProbe:
         summary_fields.update(
             {
                 "schema_version": "1",
-                "dashboard_json_object": True,
+                "dashboard_json_object": metadata.usable,
                 "meter_collection_present": metadata.meter_collection_present,
                 "consumption_bytes": len(consumption),
                 "production_bytes": len(production),
@@ -190,7 +201,12 @@ class CezDataProbe:
         if not json_parseable:
             raise _AuthFailure("data_probe_metadata_json_invalid")
         if not isinstance(payload, dict):
-            raise _AuthFailure("data_probe_metadata_root_invalid")
+            self._emit(
+                SafeHttpAuthEvent(
+                    "dashboard_metadata_unusable", json_root_type=root_type
+                )
+            )
+            return _Metadata(None, False, False, False), observation
 
         raw_id = payload.get("idDeviceSet")
         id_device_set = None
@@ -213,6 +229,7 @@ class CezDataProbe:
             collections.append(value)
         meter_collection_present = bool(collections)
         configured_elm = self._configuration.electrometer_id
+        configured_elm_verified = configured_elm is None
         if configured_elm is not None:
             values = {
                 str(item.get(key))
@@ -222,9 +239,34 @@ class CezDataProbe:
                 for key in ("elm", "electrometerId", "id")
                 if item.get(key) not in (None, "")
             }
-            if configured_elm not in values:
-                raise _AuthFailure("data_probe_metadata_configured_elm_not_found")
-        return _Metadata(id_device_set, meter_collection_present), observation
+            configured_elm_verified = configured_elm in values
+        return _Metadata(
+            id_device_set,
+            meter_collection_present,
+            True,
+            configured_elm_verified,
+        ), observation
+
+    def _verify_configured_elm(
+        self, client: CezHttpAuthClient, deadline: float
+    ) -> None:
+        response = self._request(
+            client,
+            CEZ_PND_METERS_URL,
+            AuthState.DATA_PROBE_METERS,
+            deadline,
+            "data_probe_metadata_failed",
+            headers={"Accept": "application/json"},
+        )
+        if response.status != 200 or _content_type(response) != "application/json":
+            raise _AuthFailure("data_probe_metadata_failed")
+        try:
+            payload = json.loads(response.body.decode("utf-8", errors="strict"))
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+            raise _AuthFailure("data_probe_metadata_invalid") from error
+        configured_elm = self._configuration.electrometer_id
+        if configured_elm is None or configured_elm not in _meter_identifiers(payload):
+            raise _AuthFailure("data_probe_metadata_configured_elm_not_found")
 
     def _export(
         self,
@@ -356,6 +398,36 @@ def _json_type(value: object) -> str:
     if isinstance(value, (int, float)):
         return "number"
     return "unknown"
+
+
+def _meter_identifiers(payload: object) -> frozenset[str]:
+    """Extract only explicit upstream-style meter identifiers from bounded JSON."""
+
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        collections = [
+            payload[key]
+            for key in ("meters", "devices", "electrometers")
+            if key in payload
+        ]
+        if collections:
+            if any(not isinstance(collection, list) for collection in collections):
+                raise _AuthFailure("data_probe_metadata_invalid")
+            entries = [item for collection in collections for item in collection]
+        else:
+            entries = [payload]
+    else:
+        raise _AuthFailure("data_probe_metadata_invalid")
+    identifiers: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("elm", "electrometerId", "id"):
+            value = entry.get(key)
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                identifiers.add(str(value))
+    return frozenset(identifiers)
 
 
 def _metadata_observation(
