@@ -67,6 +67,7 @@ DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
         "discovery_config_conflicting_modes",
         "data_probe_config_missing_date",
         "data_probe_config_invalid_date",
+        "data_probe_config_invalid_ean",
         "data_probe_config_invalid_elm",
     }
 )
@@ -119,6 +120,7 @@ class DataProbeConfiguration:
     password: str = field(repr=False)
     probe_date: date
     electrometer_id: str | None = field(default=None, repr=False)
+    ean: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -386,7 +388,24 @@ def _load_data_probe_configuration(
         )
         if electrometer_id != electrometer_id.strip():
             raise DiscoveryConfigurationError("data_probe_config_invalid_elm")
-    return DataProbeConfiguration(username, password, probe_date, electrometer_id)
+    raw_ean = options.get("cez_ean")
+    ean = None
+    if raw_ean not in (None, ""):
+        if (
+            not isinstance(raw_ean, str)
+            or len(raw_ean) != 18
+            or not raw_ean.isascii()
+            or not raw_ean.isdigit()
+        ):
+            raise DiscoveryConfigurationError("data_probe_config_invalid_ean")
+        ean = raw_ean
+    return DataProbeConfiguration(
+        username=username,
+        password=password,
+        probe_date=probe_date,
+        electrometer_id=electrometer_id,
+        ean=ean,
+    )
 
 
 def _required_discovery_text(

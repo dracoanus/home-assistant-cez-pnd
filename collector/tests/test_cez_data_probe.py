@@ -32,6 +32,8 @@ FORM = b'''<html><form method="post" action="/cas/login">
 FINAL_APP = b"<html><main id='app'></main></html>"
 CONSUMPTION = b"private-consumption-csv\n"
 PRODUCTION = b"private-production-csv\n"
+EAN = "859182400000000001"
+MATCHED_METADATA = b'{"meters":[{"elm":"secret-elm"}]}'
 
 
 class _Headers(dict[str, str]):
@@ -98,9 +100,11 @@ class _ProbeClient:
         return self.responses.pop(0)
 
 
-def _configuration(elm: str | None = "secret-elm") -> runtime_config.DataProbeConfiguration:
+def _configuration(
+    elm: str | None = "secret-elm", ean: str | None = None
+) -> runtime_config.DataProbeConfiguration:
     return runtime_config.DataProbeConfiguration(
-        "private-user", "private-password", date(2026, 9, 8), elm
+        "private-user", "private-password", date(2026, 9, 8), elm, ean
     )
 
 
@@ -187,6 +191,35 @@ class CezDataProbeTests(unittest.TestCase):
             ) as raised:
                 runtime_config._validate_discovery_modes({**base, other: True})
             self.assertEqual(raised.exception.code, "discovery_config_conflicting_modes")
+
+    def test_ean_and_elm_configuration_validation(self) -> None:
+        base = {
+            "cez_data_probe_mode": True,
+            "cez_data_probe_date": "2026-09-08",
+            "cez_username": "private-user",
+            "cez_password": "private-password",
+        }
+        loaded = runtime_config._load_data_probe_configuration(
+            {**base, "cez_ean": EAN, "cez_elm": "private-elm"}
+        )
+        self.assertEqual(loaded.ean, EAN)
+        self.assertEqual(loaded.electrometer_id, "private-elm")
+        for invalid in ("1" * 17, "1" * 19, "1" * 17 + "x", "１" * 18):
+            with self.subTest(ean=invalid), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._load_data_probe_configuration(
+                    {**base, "cez_ean": invalid}
+                )
+            self.assertEqual(raised.exception.code, "data_probe_config_invalid_ean")
+        for invalid in (" private", "private ", "x" * 129, "private\nvalue"):
+            with self.subTest(elm=invalid), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._load_data_probe_configuration(
+                    {**base, "cez_elm": invalid}
+                )
+            self.assertEqual(raised.exception.code, "data_probe_config_invalid_elm")
 
     def test_invalid_or_missing_probe_date_fails_closed(self) -> None:
         base = {
@@ -301,22 +334,19 @@ class CezDataProbeTests(unittest.TestCase):
         )
         self.assertIn("production_export_received", names)
 
-    def test_optional_identifiers_are_omitted(self) -> None:
+    def test_meter_identity_is_required(self) -> None:
         client = _ProbeClient(
             [
                 _http_response(200, b"{}"),
-                _http_response(200, b"csv\n", "text/plain"),
-                _http_response(200, b"csv\n", "text/plain"),
             ]
         )
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
+            cez_http_auth._AuthFailure
+        ) as raised:
             cez_data_probe.CezDataProbe(
                 _configuration(None), output_directory=Path(temporary) / "probe"
             ).collect(client)  # type: ignore[arg-type]
-        for url, _, _ in client.calls[1:]:
-            query = parse_qs(urlsplit(url).query)
-            self.assertNotIn("idDeviceSet", query)
-            self.assertNotIn("electrometerId", query)
+        self.assertEqual(raised.exception.code, "data_probe_meter_identity_required")
 
     def test_non_200_metadata_remains_request_failure(self) -> None:
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
@@ -378,7 +408,7 @@ class CezDataProbeTests(unittest.TestCase):
                 _configuration(), output_directory=Path(temporary) / "probe"
             ).collect(client)  # type: ignore[arg-type]
         self.assertEqual(
-            raised.exception.code, "data_probe_metadata_configured_elm_not_found"
+            raised.exception.code, "data_probe_meter_not_found"
         )
 
     def test_live_array_metadata_is_best_effort_and_exports_continue(self) -> None:
@@ -386,6 +416,7 @@ class CezDataProbeTests(unittest.TestCase):
         client = _ProbeClient(
             [
                 _http_response(200, b'[{"private":"value"}]'),
+                _http_response(200, b'[{"elm":"secret-elm"}]'),
                 _http_response(200, b"consumption\n", "text/csv"),
                 _http_response(200, b"production\n", "text/csv"),
             ]
@@ -393,7 +424,7 @@ class CezDataProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "probe"
             cez_data_probe.CezDataProbe(
-                _configuration(None), output_directory=output, emit=events.append
+                _configuration(), output_directory=output, emit=events.append
             ).collect(client)  # type: ignore[arg-type]
             summary = json.loads(
                 (output / cez_data_probe.METADATA_SUMMARY_NAME).read_text()
@@ -411,14 +442,14 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertNotIn(
             "dashboard_metadata_verified", [event.event for event in events]
         )
-        self.assertEqual(len(client.calls), 3)
-        for url, state, _ in client.calls[1:]:
+        self.assertEqual(len(client.calls), 4)
+        for url, state, _ in client.calls[2:]:
             self.assertEqual(state, cez_http_auth.AuthState.DATA_PROBE_EXPORT)
             query = parse_qs(urlsplit(url).query)
             self.assertNotIn("idDeviceSet", query)
-            self.assertNotIn("electrometerId", query)
+            self.assertEqual(query["electrometerId"], ["secret-elm"])
         self.assertEqual(
-            [parse_qs(urlsplit(call[0]).query)["idAssembly"] for call in client.calls[1:]],
+            [parse_qs(urlsplit(call[0]).query)["idAssembly"] for call in client.calls[2:]],
             [["-1001"], ["-1002"]],
         )
 
@@ -450,6 +481,150 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertNotIn(
             private_elm, json.dumps([event.as_dict() for event in events])
         )
+
+    def _run_meter_selection(
+        self,
+        configuration: runtime_config.DataProbeConfiguration,
+        meters: list[object],
+    ) -> tuple[
+        _ProbeClient,
+        list[cez_http_auth.SafeHttpAuthEvent],
+        str | None,
+    ]:
+        client = _ProbeClient(
+            [
+                _http_response(200, b"[]"),
+                _http_response(200, json.dumps(meters).encode()),
+                _http_response(200, b"consumption\n", "text/csv"),
+                _http_response(200, b"production\n", "text/csv"),
+            ]
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        error_code = None
+        with tempfile.TemporaryDirectory() as temporary:
+            try:
+                cez_data_probe.CezDataProbe(
+                    configuration,
+                    output_directory=Path(temporary) / "probe",
+                    emit=events.append,
+                ).collect(client)  # type: ignore[arg-type]
+            except cez_http_auth._AuthFailure as error:
+                error_code = error.code
+        return client, events, error_code
+
+    def test_both_ean_and_elm_require_same_exact_meter(self) -> None:
+        client, events, error = self._run_meter_selection(
+            _configuration("private-elm", EAN),
+            [{"ean": EAN, "elm": "private-elm", "ignored": "private"}],
+        )
+        self.assertIsNone(error)
+        observed = next(
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_meter_selection_observed"
+        )
+        self.assertEqual(observed["selection_mode"], "both")
+        self.assertEqual(observed["matches_by_ean"], 1)
+        self.assertEqual(observed["matches_by_elm"], 1)
+        for url, _, _ in client.calls[2:]:
+            query = parse_qs(urlsplit(url).query)
+            self.assertEqual(query["electrometerId"], ["private-elm"])
+            self.assertNotIn("ean", {key.lower() for key in query})
+
+    def test_ean_only_extracts_verified_elm_in_memory(self) -> None:
+        client, events, error = self._run_meter_selection(
+            _configuration(None, EAN), [{"ean": EAN, "elm": "derived-private-elm"}]
+        )
+        self.assertIsNone(error)
+        for url, _, _ in client.calls[2:]:
+            query = parse_qs(urlsplit(url).query)
+            self.assertEqual(query["electrometerId"], ["derived-private-elm"])
+            self.assertNotIn("ean", {key.lower() for key in query})
+        rendered = json.dumps([event.as_dict() for event in events])
+        self.assertNotIn(EAN, rendered)
+        self.assertNotIn("derived-private-elm", rendered)
+
+    def test_elm_only_selects_exactly_one_meter(self) -> None:
+        client, events, error = self._run_meter_selection(
+            _configuration("private-elm"),
+            [{"ean": EAN, "elm": "private-elm"}],
+        )
+        self.assertIsNone(error)
+        self.assertEqual(
+            next(
+                event.as_dict()["selection_mode"]
+                for event in events
+                if event.event == "data_probe_meter_selection_observed"
+            ),
+            "elm_only",
+        )
+        self.assertTrue(
+            all(
+                parse_qs(urlsplit(url).query)["electrometerId"] == ["private-elm"]
+                for url, _, _ in client.calls[2:]
+            )
+        )
+
+    def test_meter_identity_mismatch_is_rejected_without_secret_diagnostics(self) -> None:
+        other_ean = "859182400000000002"
+        _, events, error = self._run_meter_selection(
+            _configuration("private-elm", EAN),
+            [
+                {"ean": EAN, "elm": "other-private-elm"},
+                {"ean": other_ean, "elm": "private-elm"},
+            ],
+        )
+        self.assertEqual(error, "data_probe_meter_identity_mismatch")
+        observed = next(
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_meter_selection_observed"
+        )
+        self.assertEqual(observed["selection_mode"], "mismatch")
+        rendered = json.dumps(observed)
+        for private in (EAN, other_ean, "private-elm", "other-private-elm"):
+            self.assertNotIn(private, rendered)
+
+    def test_zero_and_multiple_meter_matches_fail_closed(self) -> None:
+        cases = (
+            ([{"ean": "859182400000000002", "elm": "other"}], "data_probe_meter_not_found", "none"),
+            ([{"ean": EAN, "elm": "first"}, {"ean": EAN, "elm": "second"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
+            ([{"ean": EAN, "elm": "same"}, {"ean": EAN, "elm": "same"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
+        )
+        for meters, expected, mode in cases:
+            with self.subTest(expected=expected):
+                _, events, error = self._run_meter_selection(
+                    _configuration(None, EAN), meters
+                )
+                self.assertEqual(error, expected)
+                observed = next(
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_meter_selection_observed"
+                )
+                self.assertEqual(observed["selection_mode"], mode)
+
+    def test_meter_endpoint_requires_list_root(self) -> None:
+        client = _ProbeClient(
+            [_http_response(200, b"[]"), _http_response(200, b'{"elm":"private-elm"}')]
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
+            cez_http_auth._AuthFailure
+        ) as raised:
+            cez_data_probe.CezDataProbe(
+                _configuration(),
+                output_directory=Path(temporary) / "probe",
+                emit=events.append,
+            ).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+        observed = next(
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_meter_selection_observed"
+        )
+        self.assertEqual(observed["json_root_type"], "object")
+        self.assertEqual(observed["meter_count"], 0)
 
     def test_structural_observation_contains_only_bounded_safe_schema(self) -> None:
         private_values = (
@@ -527,10 +702,10 @@ class CezDataProbeTests(unittest.TestCase):
                 ).collect(client)  # type: ignore[arg-type]
             self.assertEqual(raised.exception.code, "data_probe_metadata_failed")
 
-            client = _ProbeClient([_http_response(200, b"{}"), redirect])
+            client = _ProbeClient([_http_response(200, MATCHED_METADATA), redirect])
             with self.assertRaises(cez_http_auth._AuthFailure) as raised:
                 cez_data_probe.CezDataProbe(
-                    _configuration(None), output_directory=output
+                    _configuration(), output_directory=output
                 ).collect(client)  # type: ignore[arg-type]
             self.assertEqual(
                 raised.exception.code, "data_probe_consumption_export_status_failed"
@@ -538,14 +713,14 @@ class CezDataProbeTests(unittest.TestCase):
 
             client = _ProbeClient(
                 [
-                    _http_response(200, b"{}"),
+                    _http_response(200, MATCHED_METADATA),
                     _http_response(200, b"csv\n", "text/csv"),
                     redirect,
                 ]
             )
             with self.assertRaises(cez_http_auth._AuthFailure) as raised:
                 cez_data_probe.CezDataProbe(
-                    _configuration(None), output_directory=output
+                    _configuration(), output_directory=output
                 ).collect(client)  # type: ignore[arg-type]
             self.assertEqual(
                 raised.exception.code, "data_probe_production_export_status_failed"
@@ -577,12 +752,12 @@ class CezDataProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "probe"
             for response, expected in cases:
-                client = _ProbeClient([_http_response(200, b"{}"), response])
+                client = _ProbeClient([_http_response(200, MATCHED_METADATA), response])
                 with self.subTest(expected=expected), self.assertRaises(
                     cez_http_auth._AuthFailure
                 ) as raised:
                     cez_data_probe.CezDataProbe(
-                        _configuration(None), output_directory=output
+                        _configuration(), output_directory=output
                     ).collect(client)  # type: ignore[arg-type]
                 self.assertEqual(raised.exception.code, expected)
 
@@ -598,12 +773,12 @@ class CezDataProbeTests(unittest.TestCase):
             private_body,
         )
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
-        client = _ProbeClient([_http_response(200, b"{}"), response])
+        client = _ProbeClient([_http_response(200, MATCHED_METADATA), response])
         with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
             cez_http_auth._AuthFailure
         ) as raised:
             cez_data_probe.CezDataProbe(
-                _configuration(None),
+                _configuration(),
                 output_directory=Path(temporary) / "probe",
                 emit=events.append,
             ).collect(client)  # type: ignore[arg-type]

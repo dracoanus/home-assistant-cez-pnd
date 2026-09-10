@@ -74,9 +74,10 @@ TLS, redirect, credential, evidence, and open-verification requirements.
 all discovery modes. When explicitly enabled, it uses the same authenticated,
 memory-only `requests.Session` for login, bounded dashboard metadata retrieval,
 and exactly two raw CSV exports for one configured calendar day. Set
-`cez_data_probe_date` to an ISO date such as `2026-09-08`; `cez_elm` is optional
-and is treated as a masked private option. Normal Collector startup remains
-synthetic-only.
+`cez_data_probe_date` to an ISO date such as `2026-09-08`. Configure at least
+one private meter selector: `cez_ean` (exactly 18 ASCII digits), `cez_elm`, or
+both. Both are masked private options; EAN and ELM remain inside the Collector
+and are never written to logs. Normal Collector startup remains synthetic-only.
 
 The probe writes only these files under `/data/cez-pnd-probe`:
 

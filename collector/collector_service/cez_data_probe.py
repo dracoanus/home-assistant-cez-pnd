@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import tempfile
 from typing import Callable
+import unicodedata
 from urllib.parse import urlencode
 
 from .cez_http_auth import (
@@ -21,6 +22,7 @@ from .cez_http_auth import (
     CezHttpAuthClient,
     DashboardMetadataObservation,
     DataProbeExportObservation,
+    DataProbeMeterSelectionObservation,
     HttpResponse,
     HttpTransport,
     MAX_RESPONSE_BODY_BYTES,
@@ -60,7 +62,7 @@ class _Metadata:
     id_device_set: str | None
     meter_collection_present: bool
     usable: bool
-    configured_elm_verified: bool
+    meter_records: tuple[tuple[str | None, str | None], ...]
 
 
 class CezDataProbe:
@@ -92,11 +94,7 @@ class CezDataProbe:
         metadata, observation = self._validate_metadata(metadata_response)
         if metadata.usable:
             self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
-        if (
-            self._configuration.electrometer_id is not None
-            and not metadata.configured_elm_verified
-        ):
-            self._verify_configured_elm(client, deadline)
+        verified_elm = self._verified_electrometer_id(client, metadata, deadline)
 
         day = self._configuration.probe_date
         interval_from = f"{day.strftime('%d.%m.%Y')} 00:00"
@@ -105,13 +103,27 @@ class CezDataProbe:
         )
 
         consumption = self._export(
-            client, metadata, interval_from, interval_to, "-1001", "consumption", deadline,
+            client,
+            metadata,
+            interval_from,
+            interval_to,
+            "-1001",
+            "consumption",
+            deadline,
             "data_probe_consumption_export_failed",
+            verified_elm,
         )
         self._emit(SafeHttpAuthEvent("consumption_export_received"))
         production = self._export(
-            client, metadata, interval_from, interval_to, "-1002", "production", deadline,
+            client,
+            metadata,
+            interval_from,
+            interval_to,
+            "-1002",
+            "production",
+            deadline,
             "data_probe_production_export_failed",
+            verified_elm,
         )
         self._emit(SafeHttpAuthEvent("production_export_received"))
 
@@ -207,7 +219,7 @@ class CezDataProbe:
                     "dashboard_metadata_unusable", json_root_type=root_type
                 )
             )
-            return _Metadata(None, False, False, False), observation
+            return _Metadata(None, False, False, ()), observation
 
         raw_id = payload.get("idDeviceSet")
         id_device_set = None
@@ -229,28 +241,31 @@ class CezDataProbe:
                 raise _AuthFailure("data_probe_metadata_meter_collection_invalid")
             collections.append(value)
         meter_collection_present = bool(collections)
-        configured_elm = self._configuration.electrometer_id
-        configured_elm_verified = configured_elm is None
-        if configured_elm is not None:
-            values = {
-                str(item.get(key))
-                for collection in collections
-                for item in collection
-                if isinstance(item, dict)
-                for key in ("elm", "electrometerId", "id")
-                if item.get(key) not in (None, "")
-            }
-            configured_elm_verified = configured_elm in values
+        records = _meter_records(
+            [item for collection in collections for item in collection]
+        )
         return _Metadata(
             id_device_set,
             meter_collection_present,
             True,
-            configured_elm_verified,
+            records,
         ), observation
 
-    def _verify_configured_elm(
-        self, client: CezHttpAuthClient, deadline: float
-    ) -> None:
+    def _verified_electrometer_id(
+        self, client: CezHttpAuthClient, metadata: _Metadata, deadline: float
+    ) -> str:
+        if (
+            self._configuration.ean is None
+            and self._configuration.electrometer_id is None
+        ):
+            raise _AuthFailure("data_probe_meter_identity_required")
+
+        selected, _, _, _, error = _select_meter(
+            self._configuration, list(metadata.meter_records)
+        )
+        if selected is not None:
+            return selected
+
         response = self._request(
             client,
             CEZ_PND_METERS_URL,
@@ -259,15 +274,61 @@ class CezDataProbe:
             "data_probe_metadata_failed",
             headers={"Accept": "application/json"},
         )
-        if response.status != 200 or _content_type(response) != "application/json":
+        if response.status != 200:
+            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
+            raise _AuthFailure("data_probe_metadata_failed")
+        if _content_type(response) != "application/json":
+            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
             raise _AuthFailure("data_probe_metadata_failed")
         try:
             payload = json.loads(response.body.decode("utf-8", errors="strict"))
         except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
             raise _AuthFailure("data_probe_metadata_invalid") from error
-        configured_elm = self._configuration.electrometer_id
-        if configured_elm is None or configured_elm not in _meter_identifiers(payload):
-            raise _AuthFailure("data_probe_metadata_configured_elm_not_found")
+        root_type = _json_type(payload)
+        if not isinstance(payload, list):
+            self._emit_meter_selection(response.status, root_type, 0, 0, 0, "none")
+            raise _AuthFailure("data_probe_metadata_invalid")
+        records = _meter_records(payload)
+        selected, ean_matches, elm_matches, mode, error_code = _select_meter(
+            self._configuration, list(records)
+        )
+        self._emit_meter_selection(
+            response.status,
+            root_type,
+            len(payload),
+            ean_matches,
+            elm_matches,
+            mode,
+        )
+        if error_code is not None:
+            raise _AuthFailure(error_code)
+        if selected is None:
+            raise _AuthFailure("data_probe_meter_not_found")
+        return selected
+
+    def _emit_meter_selection(
+        self,
+        status: int,
+        root_type: str,
+        meter_count: int,
+        ean_matches: int,
+        elm_matches: int,
+        mode: str,
+    ) -> None:
+        self._emit(
+            SafeHttpAuthEvent(
+                "data_probe_meter_selection_observed",
+                meter_selection_observation=DataProbeMeterSelectionObservation(
+                    meter_response_status=status,
+                    json_root_type=root_type,
+                    meter_count=meter_count,
+                    matches_by_ean=ean_matches,
+                    matches_by_elm=elm_matches,
+                    selection_mode=mode,
+                ),
+            )
+        )
 
     def _export(
         self,
@@ -279,6 +340,7 @@ class CezDataProbe:
         channel: str,
         deadline: float,
         failure_code: str,
+        verified_elm: str,
     ) -> bytes:
         parameters = [
             ("format", "csv"),
@@ -289,10 +351,7 @@ class CezDataProbe:
         parameters.extend(
             (("intervalFrom", interval_from), ("intervalTo", interval_to))
         )
-        if self._configuration.electrometer_id is not None:
-            parameters.append(
-                ("electrometerId", self._configuration.electrometer_id)
-            )
+        parameters.append(("electrometerId", verified_elm))
         url = f"{CEZ_PND_EXPORT_URL}?{urlencode(parameters)}"
         response = self._request(
             client,
@@ -412,34 +471,83 @@ def _json_type(value: object) -> str:
     return "unknown"
 
 
-def _meter_identifiers(payload: object) -> frozenset[str]:
-    """Extract only explicit upstream-style meter identifiers from bounded JSON."""
+def _meter_records(
+    entries: list[object],
+) -> tuple[tuple[str | None, str | None], ...]:
+    """Extract only validated EAN/ELM pairs without retaining other meter data."""
 
-    if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, dict):
-        collections = [
-            payload[key]
-            for key in ("meters", "devices", "electrometers")
-            if key in payload
-        ]
-        if collections:
-            if any(not isinstance(collection, list) for collection in collections):
-                raise _AuthFailure("data_probe_metadata_invalid")
-            entries = [item for collection in collections for item in collection]
-        else:
-            entries = [payload]
-    else:
-        raise _AuthFailure("data_probe_metadata_invalid")
-    identifiers: set[str] = set()
+    records: list[tuple[str | None, str | None]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        for key in ("elm", "electrometerId", "id"):
-            value = entry.get(key)
-            if isinstance(value, (str, int)) and not isinstance(value, bool):
-                identifiers.add(str(value))
-    return frozenset(identifiers)
+        ean_value = entry.get("ean")
+        elm_value = entry.get("elm")
+        ean = ean_value if _is_valid_ean(ean_value) else None
+        elm = elm_value if _is_valid_elm(elm_value) else None
+        records.append((ean, elm))
+    return tuple(records)
+
+
+def _select_meter(
+    configuration: DataProbeConfiguration,
+    records: list[tuple[str | None, str | None]],
+) -> tuple[str | None, int, int, str, str | None]:
+    configured_ean = configuration.ean
+    configured_elm = configuration.electrometer_id
+    ean_matches = sum(1 for ean, _ in records if configured_ean is not None and ean == configured_ean)
+    elm_matches = sum(1 for _, elm in records if configured_elm is not None and elm == configured_elm)
+
+    if configured_ean is not None and configured_elm is not None:
+        exact = [
+            elm
+            for ean, elm in records
+            if ean == configured_ean and elm == configured_elm
+        ]
+        if len(exact) == 1:
+            return exact[0], ean_matches, elm_matches, "both", None
+        if len(exact) > 1:
+            return None, ean_matches, elm_matches, "ambiguous", "data_probe_meter_selection_ambiguous"
+        if ean_matches and elm_matches:
+            return None, ean_matches, elm_matches, "mismatch", "data_probe_meter_identity_mismatch"
+        return None, ean_matches, elm_matches, "none", "data_probe_meter_not_found"
+
+    if configured_ean is not None:
+        exact = [elm for ean, elm in records if ean == configured_ean and elm is not None]
+        if len(exact) == 1 and ean_matches == 1:
+            return exact[0], ean_matches, 0, "ean_only", None
+        if ean_matches > 1:
+            return None, ean_matches, 0, "ambiguous", "data_probe_meter_selection_ambiguous"
+        return None, ean_matches, 0, "none", "data_probe_meter_not_found"
+
+    if configured_elm is not None:
+        if elm_matches == 1:
+            return configured_elm, 0, elm_matches, "elm_only", None
+        if elm_matches > 1:
+            return None, 0, elm_matches, "ambiguous", "data_probe_meter_selection_ambiguous"
+        return None, 0, elm_matches, "none", "data_probe_meter_not_found"
+
+    return None, 0, 0, "none", "data_probe_meter_identity_required"
+
+
+def _is_valid_ean(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 18
+        and value.isascii()
+        and value.isdigit()
+    )
+
+
+def _is_valid_elm(value: object) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return len(encoded) <= 128 and not any(
+        unicodedata.category(character).startswith("C") for character in value
+    )
 
 
 def _metadata_observation(
