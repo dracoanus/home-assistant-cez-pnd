@@ -19,6 +19,7 @@ from .cez_http_auth import (
     CEZ_PND_DASHBOARD_DATA_URL,
     CEZ_PND_START_URL,
     CezHttpAuthClient,
+    DashboardMetadataObservation,
     HttpResponse,
     HttpTransport,
     MAX_RESPONSE_BODY_BYTES,
@@ -82,7 +83,7 @@ class CezDataProbe:
             "data_probe_metadata_failed",
             headers={"Accept": "*/*"},
         )
-        metadata = self._validate_metadata(metadata_response)
+        metadata, observation = self._validate_metadata(metadata_response)
         self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
 
         day = self._configuration.probe_date
@@ -102,19 +103,17 @@ class CezDataProbe:
         )
         self._emit(SafeHttpAuthEvent("production_export_received"))
 
-        summary = json.dumps(
+        summary_fields = observation.as_dict()
+        summary_fields.update(
             {
                 "schema_version": "1",
                 "dashboard_json_object": True,
-                "id_device_set_present": metadata.id_device_set is not None,
                 "meter_collection_present": metadata.meter_collection_present,
                 "consumption_bytes": len(consumption),
                 "production_bytes": len(production),
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+            }
+        )
+        summary = _encode_summary(summary_fields)
         try:
             self._store(summary, consumption, production)
         except (OSError, ValueError) as error:
@@ -138,29 +137,71 @@ class CezDataProbe:
         except _AuthFailure as error:
             raise _AuthFailure(failure_code) from error
 
-    def _validate_metadata(self, response: HttpResponse) -> _Metadata:
+    def _validate_metadata(
+        self, response: HttpResponse
+    ) -> tuple[_Metadata, DashboardMetadataObservation]:
         if response.status != 200:
             raise _AuthFailure("data_probe_metadata_failed")
-        content_type = _content_type(response)
-        if content_type != "application/json":
-            raise _AuthFailure("data_probe_metadata_invalid")
+
+        content_type = _safe_observed_content_type(response)
+        text: str | None
+        payload: object | None
         try:
-            payload = json.loads(response.body.decode("utf-8", errors="strict"))
-        except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
-            raise _AuthFailure("data_probe_metadata_invalid") from error
+            text = response.body.decode("utf-8", errors="strict")
+        except UnicodeError:
+            text = None
+        if text is None:
+            payload = None
+            json_parseable = False
+            root_type = "unknown"
+        else:
+            try:
+                payload = json.loads(text)
+            except (json.JSONDecodeError, RecursionError):
+                payload = None
+                json_parseable = False
+                root_type = "unknown"
+            else:
+                json_parseable = True
+                root_type = _json_type(payload)
+
+        observation = _metadata_observation(
+            response,
+            content_type,
+            payload,
+            json_parseable=json_parseable,
+            root_type=root_type,
+        )
+        self._emit(
+            SafeHttpAuthEvent(
+                "dashboard_metadata_response_observed",
+                metadata_observation=observation,
+            )
+        )
+        try:
+            self._store_metadata_summary(observation)
+        except (OSError, ValueError) as error:
+            raise _AuthFailure("data_probe_storage_failed") from error
+
+        if content_type != "application/json":
+            raise _AuthFailure("data_probe_metadata_content_type_invalid")
+        if text is None:
+            raise _AuthFailure("data_probe_metadata_utf8_invalid")
+        if not json_parseable:
+            raise _AuthFailure("data_probe_metadata_json_invalid")
         if not isinstance(payload, dict):
-            raise _AuthFailure("data_probe_metadata_invalid")
+            raise _AuthFailure("data_probe_metadata_root_invalid")
 
         raw_id = payload.get("idDeviceSet")
         id_device_set = None
         if raw_id not in (None, ""):
             if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
-                raise _AuthFailure("data_probe_metadata_invalid")
+                raise _AuthFailure("data_probe_metadata_id_device_set_invalid")
             id_device_set = str(raw_id)
             if len(id_device_set.encode("utf-8")) > 128 or any(
                 ord(character) < 32 for character in id_device_set
             ):
-                raise _AuthFailure("data_probe_metadata_invalid")
+                raise _AuthFailure("data_probe_metadata_id_device_set_invalid")
 
         collections: list[list[object]] = []
         for key in ("meters", "devices", "electrometers"):
@@ -168,7 +209,7 @@ class CezDataProbe:
                 continue
             value = payload[key]
             if not isinstance(value, list):
-                raise _AuthFailure("data_probe_metadata_invalid")
+                raise _AuthFailure("data_probe_metadata_meter_collection_invalid")
             collections.append(value)
         meter_collection_present = bool(collections)
         configured_elm = self._configuration.electrometer_id
@@ -182,8 +223,8 @@ class CezDataProbe:
                 if item.get(key) not in (None, "")
             }
             if configured_elm not in values:
-                raise _AuthFailure("data_probe_metadata_invalid")
-        return _Metadata(id_device_set, meter_collection_present)
+                raise _AuthFailure("data_probe_metadata_configured_elm_not_found")
+        return _Metadata(id_device_set, meter_collection_present), observation
 
     def _export(
         self,
@@ -228,6 +269,25 @@ class CezDataProbe:
         return response.body
 
     def _store(self, summary: bytes, consumption: bytes, production: bytes) -> None:
+        directory = self._prepare_output_directory()
+        for name, content in (
+            (METADATA_SUMMARY_NAME, summary),
+            (CONSUMPTION_NAME, consumption),
+            (PRODUCTION_NAME, production),
+        ):
+            _atomic_write(directory / name, content)
+
+    def _store_metadata_summary(
+        self, observation: DashboardMetadataObservation
+    ) -> None:
+        directory = self._prepare_output_directory()
+        fields = {"schema_version": "1", **observation.as_dict()}
+        _atomic_write(
+            directory / METADATA_SUMMARY_NAME,
+            _encode_summary(fields),
+        )
+
+    def _prepare_output_directory(self) -> Path:
         directory = self._output_directory
         if directory.is_symlink():
             raise OSError("unsafe probe directory")
@@ -235,12 +295,7 @@ class CezDataProbe:
         if not directory.is_dir() or directory.is_symlink():
             raise OSError("unsafe probe directory")
         os.chmod(directory, 0o700)
-        for name, content in (
-            (METADATA_SUMMARY_NAME, summary),
-            (CONSUMPTION_NAME, consumption),
-            (PRODUCTION_NAME, production),
-        ):
-            _atomic_write(directory / name, content)
+        return directory
 
 
 def run_data_probe(
@@ -272,6 +327,101 @@ def run_data_probe(
 def _content_type(response: HttpResponse) -> str | None:
     value = _single_header(response.headers, "content-type")
     return None if value is None else value.split(";", 1)[0].strip().lower()
+
+
+def _safe_observed_content_type(response: HttpResponse) -> str:
+    try:
+        value = _content_type(response)
+    except _AuthFailure:
+        return "unknown"
+    if value is None or len(value) > 127:
+        return "unknown"
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789!#$&^_.+-/"
+    if value.count("/") != 1 or any(character not in allowed for character in value):
+        return "unknown"
+    return value
+
+
+def _json_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "unknown"
+
+
+def _metadata_observation(
+    response: HttpResponse,
+    content_type: str,
+    payload: object | None,
+    *,
+    json_parseable: bool,
+    root_type: str,
+) -> DashboardMetadataObservation:
+    keys: tuple[str, ...] = ()
+    key_count: int | None = None
+    collection_types: tuple[tuple[str, str], ...] = ()
+    id_present = False
+    id_type: str | None = None
+    if isinstance(payload, dict):
+        key_count = len(payload)
+        keys = tuple(
+            sorted(
+                {
+                    key if _safe_top_level_key(key) else "[redacted-key]"
+                    for key in list(payload)[:50]
+                }
+            )
+        )
+        collection_types = tuple(
+            sorted(
+                (key, _json_type(payload[key]))
+                for key in ("meters", "devices", "electrometers")
+                if key in payload
+            )
+        )
+        id_present = "idDeviceSet" in payload
+        if id_present:
+            id_type = _json_type(payload["idDeviceSet"])
+    return DashboardMetadataObservation(
+        status=response.status,
+        body_bytes=len(response.body),
+        content_type_base=content_type,
+        json_parseable=json_parseable,
+        json_root_type=root_type,
+        top_level_key_count=key_count,
+        top_level_keys=keys,
+        collection_types=collection_types,
+        id_device_set_present=id_present,
+        id_device_set_type=id_type,
+    )
+
+
+def _safe_top_level_key(key: object) -> bool:
+    if not isinstance(key, str) or not 1 <= len(key) <= 64:
+        return False
+    return all(
+        character.isascii()
+        and (character.isalnum() or character in "_.-")
+        for character in key
+    )
+
+
+def _encode_summary(fields: dict[str, object]) -> bytes:
+    return json.dumps(
+        fields,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _looks_like_html_or_login(body: bytes) -> bool:

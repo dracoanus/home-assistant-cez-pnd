@@ -142,6 +142,31 @@ def _successful_session() -> _Session:
 
 
 class CezDataProbeTests(unittest.TestCase):
+    def _metadata_failure(
+        self,
+        response: cez_http_auth.HttpResponse,
+        configuration: runtime_config.DataProbeConfiguration | None = None,
+    ) -> tuple[str, dict[str, object], dict[str, object]]:
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            probe = cez_data_probe.CezDataProbe(
+                configuration or _configuration(None),
+                output_directory=output,
+                emit=events.append,
+            )
+            with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                probe.collect(_ProbeClient([response]))  # type: ignore[arg-type]
+            summary = json.loads(
+                (output / cez_data_probe.METADATA_SUMMARY_NAME).read_text()
+            )
+        observed = next(
+            event.as_dict()
+            for event in events
+            if event.event == "dashboard_metadata_response_observed"
+        )
+        return raised.exception.code, observed, summary
+
     def test_mode_is_explicit_and_mutually_exclusive(self) -> None:
         self.assertIsNone(runtime_config._load_data_probe_configuration({}))
         base = {
@@ -215,17 +240,16 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertEqual((output / cez_data_probe.CONSUMPTION_NAME).read_bytes(), CONSUMPTION)
             self.assertEqual((output / cez_data_probe.PRODUCTION_NAME).read_bytes(), PRODUCTION)
             summary = json.loads((output / cez_data_probe.METADATA_SUMMARY_NAME).read_text())
-            self.assertEqual(
-                summary,
-                {
-                    "schema_version": "1",
-                    "dashboard_json_object": True,
-                    "id_device_set_present": True,
-                    "meter_collection_present": True,
-                    "consumption_bytes": len(CONSUMPTION),
-                    "production_bytes": len(PRODUCTION),
-                },
-            )
+            self.assertEqual(summary["schema_version"], "1")
+            self.assertTrue(summary["dashboard_json_object"])
+            self.assertTrue(summary["id_device_set_present"])
+            self.assertEqual(summary["id_device_set_type"], "string")
+            self.assertTrue(summary["meter_collection_present"])
+            self.assertEqual(summary["collection_types"], {"meters": "array"})
+            self.assertEqual(summary["top_level_key_count"], 2)
+            self.assertEqual(summary["top_level_keys"], ["idDeviceSet", "meters"])
+            self.assertEqual(summary["consumption_bytes"], len(CONSUMPTION))
+            self.assertEqual(summary["production_bytes"], len(PRODUCTION))
             if os.name == "posix":
                 self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
                 for name in (
@@ -248,17 +272,18 @@ class CezDataProbeTests(unittest.TestCase):
             "private-production-csv",
         ):
             self.assertNotIn(secret, rendered)
-        self.assertEqual(
-            [event.event for event in events[-6:]],
-            [
-                "authenticated",
-                "dashboard_metadata_verified",
-                "consumption_export_received",
-                "production_export_received",
-                "data_probe_complete",
-                "http_auth_cleanup_complete",
-            ],
-        )
+        expected = [
+            "data_probe_started",
+            "authenticated",
+            "dashboard_metadata_response_observed",
+            "dashboard_metadata_verified",
+            "consumption_export_received",
+            "production_export_received",
+            "data_probe_complete",
+            "http_auth_cleanup_complete",
+        ]
+        names = [event.event for event in events]
+        self.assertEqual([name for name in names if name in expected], expected)
 
     def test_optional_identifiers_are_omitted(self) -> None:
         client = _ProbeClient(
@@ -277,20 +302,133 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertNotIn("idDeviceSet", query)
             self.assertNotIn("electrometerId", query)
 
-    def test_invalid_metadata_is_rejected(self) -> None:
-        for body in (b"not-json", b"[]"):
-            client = _ProbeClient([_http_response(200, body)])
-            with self.subTest(body=body), self.assertRaises(
-                cez_http_auth._AuthFailure
-            ) as raised:
-                cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
-            self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+    def test_non_200_metadata_remains_request_failure(self) -> None:
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_data_probe.CezDataProbe(
+                _configuration(None), emit=events.append
+            ).collect(_ProbeClient([_http_response(503, b"{}")] ))  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_metadata_failed")
+        self.assertNotIn(
+            "dashboard_metadata_response_observed",
+            [event.event for event in events],
+        )
+
+    def test_metadata_failure_subcodes_are_distinct(self) -> None:
+        cases = (
+            (
+                _http_response(200, b"{}", "text/html"),
+                _configuration(None),
+                "data_probe_metadata_content_type_invalid",
+            ),
+            (
+                _http_response(200, b"\xff"),
+                _configuration(None),
+                "data_probe_metadata_utf8_invalid",
+            ),
+            (
+                _http_response(200, b"not-json"),
+                _configuration(None),
+                "data_probe_metadata_json_invalid",
+            ),
+            (
+                _http_response(200, b"[]"),
+                _configuration(None),
+                "data_probe_metadata_root_invalid",
+            ),
+            (
+                _http_response(200, b'{"idDeviceSet":true}'),
+                _configuration(None),
+                "data_probe_metadata_id_device_set_invalid",
+            ),
+            (
+                _http_response(200, b'{"meters":{}}'),
+                _configuration(None),
+                "data_probe_metadata_meter_collection_invalid",
+            ),
+            (
+                _http_response(200, b'{"meters":[]}'),
+                _configuration(),
+                "data_probe_metadata_configured_elm_not_found",
+            ),
+        )
+        for response, configuration, expected in cases:
+            with self.subTest(expected=expected):
+                code, observed, summary = self._metadata_failure(
+                    response, configuration
+                )
+                self.assertEqual(code, expected)
+                self.assertEqual(observed["status"], 200)
+                self.assertEqual(summary["status"], 200)
 
     def test_configured_elm_must_be_confirmed_by_metadata(self) -> None:
-        client = _ProbeClient([_http_response(200, b'{"meters":[]}')])
-        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
-            cez_data_probe.CezDataProbe(_configuration()).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+        code, _, _ = self._metadata_failure(
+            _http_response(200, b'{"meters":[]}'), _configuration()
+        )
+        self.assertEqual(code, "data_probe_metadata_configured_elm_not_found")
+
+    def test_structural_observation_contains_only_bounded_safe_schema(self) -> None:
+        private_values = (
+            "private-device-value",
+            "private-ean-value",
+            "private-elm-value",
+            "private-nested-value",
+        )
+        payload: dict[str, object] = {
+            "idDeviceSet": private_values[0],
+            "meters": [{"ean": private_values[1], "elm": private_values[2]}],
+            "nested": {"secret": private_values[3]},
+            "unsafe key": "hidden",
+            "x" * 65: "hidden",
+        }
+        payload.update({f"safeKey{index}": None for index in range(60)})
+        response = _http_response(
+            200,
+            json.dumps(payload).encode(),
+            "Application/JSON; charset=UTF-8",
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = cez_data_probe.CezDataProbe(
+                _configuration(None),
+                output_directory=Path(temporary) / "probe",
+                emit=events.append,
+            )
+            probe._validate_metadata(response)
+            summary = json.loads(
+                (
+                    Path(temporary)
+                    / "probe"
+                    / cez_data_probe.METADATA_SUMMARY_NAME
+                ).read_text()
+            )
+        observed = events[0].as_dict()
+        self.assertEqual(observed["content_type_base"], "application/json")
+        self.assertEqual(observed["json_root_type"], "object")
+        self.assertTrue(observed["json_parseable"])
+        self.assertEqual(observed["top_level_key_count"], len(payload))
+        self.assertLessEqual(len(observed["top_level_keys"]), 50)
+        self.assertIn("[redacted-key]", observed["top_level_keys"])
+        self.assertEqual(observed["collection_types"], {"meters": "array"})
+        self.assertTrue(observed["id_device_set_present"])
+        self.assertEqual(observed["id_device_set_type"], "string")
+        rendered = json.dumps({"event": observed, "summary": summary})
+        for private in private_values:
+            self.assertNotIn(private, rendered)
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("ean", rendered.lower())
+        self.assertNotIn("elm", rendered.lower())
+
+    def test_invalid_json_and_exception_details_never_enter_diagnostics(self) -> None:
+        private_text = "private-parser-detail"
+        code, observed, summary = self._metadata_failure(
+            _http_response(200, private_text.encode())
+        )
+        self.assertEqual(code, "data_probe_metadata_json_invalid")
+        rendered = json.dumps({"event": observed, "summary": summary})
+        self.assertNotIn(private_text, rendered)
+        self.assertEqual(observed["json_root_type"], "unknown")
+        self.assertFalse(observed["json_parseable"])
 
     def test_metadata_and_export_redirects_fail_closed(self) -> None:
         redirect = cez_http_auth.HttpResponse(

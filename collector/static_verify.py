@@ -77,7 +77,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.18"
+assert VERSION == "0.3.19"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -309,6 +309,23 @@ assert "os.replace" in DATA_PROBE_SOURCE
 assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
+assert '"dashboard_metadata_response_observed"' in HTTP_AUTH_SOURCE
+for metadata_diagnostic_code in (
+    "data_probe_metadata_content_type_invalid",
+    "data_probe_metadata_utf8_invalid",
+    "data_probe_metadata_json_invalid",
+    "data_probe_metadata_root_invalid",
+    "data_probe_metadata_id_device_set_invalid",
+    "data_probe_metadata_meter_collection_invalid",
+    "data_probe_metadata_configured_elm_not_found",
+):
+    assert metadata_diagnostic_code in HTTP_AUTH_SOURCE
+    assert metadata_diagnostic_code in DATA_PROBE_SOURCE
+assert "class DashboardMetadataObservation" in HTTP_AUTH_SOURCE
+assert 'key != "[redacted-key]"' in HTTP_AUTH_SOURCE
+assert "len(self.top_level_keys) > 50" in HTTP_AUTH_SOURCE
+assert "metadata_observation=observation" in DATA_PROBE_SOURCE
+assert "_store_metadata_summary(observation)" in DATA_PROBE_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW
@@ -417,7 +434,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.18"',
+    'version: "0.3.19"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
