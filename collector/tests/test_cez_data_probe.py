@@ -434,26 +434,38 @@ class CezDataProbeTests(unittest.TestCase):
         redirect = cez_http_auth.HttpResponse(
             302, (("Location", cez_http_auth.CEZ_PND_START_URL),), b""
         )
-        client = _ProbeClient([redirect])
-        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
-            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(raised.exception.code, "data_probe_metadata_failed")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            client = _ProbeClient([redirect])
+            with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                cez_data_probe.CezDataProbe(
+                    _configuration(None), output_directory=output
+                ).collect(client)  # type: ignore[arg-type]
+            self.assertEqual(raised.exception.code, "data_probe_metadata_failed")
 
-        client = _ProbeClient([_http_response(200, b"{}"), redirect])
-        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
-            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(raised.exception.code, "data_probe_consumption_export_failed")
+            client = _ProbeClient([_http_response(200, b"{}"), redirect])
+            with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                cez_data_probe.CezDataProbe(
+                    _configuration(None), output_directory=output
+                ).collect(client)  # type: ignore[arg-type]
+            self.assertEqual(
+                raised.exception.code, "data_probe_consumption_export_failed"
+            )
 
-        client = _ProbeClient(
-            [
-                _http_response(200, b"{}"),
-                _http_response(200, b"csv\n", "text/csv"),
-                redirect,
-            ]
-        )
-        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
-            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(raised.exception.code, "data_probe_production_export_failed")
+            client = _ProbeClient(
+                [
+                    _http_response(200, b"{}"),
+                    _http_response(200, b"csv\n", "text/csv"),
+                    redirect,
+                ]
+            )
+            with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                cez_data_probe.CezDataProbe(
+                    _configuration(None), output_directory=output
+                ).collect(client)  # type: ignore[arg-type]
+            self.assertEqual(
+                raised.exception.code, "data_probe_production_export_failed"
+            )
 
     def test_html_empty_and_oversized_exports_are_rejected(self) -> None:
         cases = (
@@ -465,15 +477,19 @@ class CezDataProbeTests(unittest.TestCase):
                 "text/csv",
             ),
         )
-        for response in cases:
-            client = _ProbeClient([_http_response(200, b"{}"), response])
-            with self.subTest(size=len(response.body)), self.assertRaises(
-                cez_http_auth._AuthFailure
-            ) as raised:
-                cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
-            self.assertEqual(
-                raised.exception.code, "data_probe_consumption_export_failed"
-            )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            for response in cases:
+                client = _ProbeClient([_http_response(200, b"{}"), response])
+                with self.subTest(size=len(response.body)), self.assertRaises(
+                    cez_http_auth._AuthFailure
+                ) as raised:
+                    cez_data_probe.CezDataProbe(
+                        _configuration(None), output_directory=output
+                    ).collect(client)  # type: ignore[arg-type]
+                self.assertEqual(
+                    raised.exception.code, "data_probe_consumption_export_failed"
+                )
 
     def test_atomic_writes_overwrite_without_accumulating_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
