@@ -82,7 +82,9 @@ class _Session:
 
 
 class _ProbeClient:
-    def __init__(self, responses: list[cez_http_auth.HttpResponse]) -> None:
+    def __init__(
+        self, responses: list[cez_http_auth.HttpResponse | BaseException]
+    ) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[str, cez_http_auth.AuthState, dict[str, str]]] = []
 
@@ -98,7 +100,10 @@ class _ProbeClient:
         extra_headers: dict[str, str] | None = None,
     ) -> cez_http_auth.HttpResponse:
         self.calls.append((url, state, dict(extra_headers or {})))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def _configuration(
@@ -398,18 +403,25 @@ class CezDataProbeTests(unittest.TestCase):
                 self.assertEqual(observed["status"], 200)
                 self.assertEqual(summary["status"], 200)
 
-    def test_configured_elm_must_be_confirmed_by_metadata(self) -> None:
+    def test_empty_meter_lookup_is_best_effort_with_configured_elm(self) -> None:
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
         client = _ProbeClient(
-            [_http_response(200, b'{"meters":[]}'), _http_response(200, b"[]")]
+            [
+                _http_response(200, b'{"meters":[]}'),
+                _http_response(200, b"[]"),
+                _http_response(200, b"consumption\n", "text/csv"),
+                _http_response(200, b"production\n", "text/csv"),
+            ]
         )
-        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
-            cez_http_auth._AuthFailure
-        ) as raised:
+        with tempfile.TemporaryDirectory() as temporary:
             cez_data_probe.CezDataProbe(
-                _configuration(), output_directory=Path(temporary) / "probe"
+                _configuration(),
+                output_directory=Path(temporary) / "probe",
+                emit=events.append,
             ).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(
-            raised.exception.code, "data_probe_meter_not_found"
+        self.assertIn(
+            {"event": "data_probe_meter_lookup_unavailable", "reason": "empty", "status": 200},
+            [event.as_dict() for event in events],
         )
 
     def test_live_array_metadata_is_best_effort_and_exports_continue(self) -> None:
@@ -474,7 +486,7 @@ class CezDataProbeTests(unittest.TestCase):
         meters_url, meters_state, meters_headers = client.calls[1]
         self.assertEqual(meters_url, cez_data_probe.CEZ_PND_METERS_URL)
         self.assertEqual(meters_state, cez_http_auth.AuthState.DATA_PROBE_METERS)
-        self.assertEqual(meters_headers, {"Accept": "application/json"})
+        self.assertEqual(meters_headers, {"Accept": "*/*"})
         for url, _, _ in client.calls[2:]:
             self.assertEqual(
                 parse_qs(urlsplit(url).query)["electrometerId"], [private_elm]
@@ -482,6 +494,122 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertNotIn(
             private_elm, json.dumps([event.as_dict() for event in events])
         )
+
+    def test_unavailable_meter_lookup_is_best_effort_with_configured_elm(self) -> None:
+        cases: tuple[
+            tuple[cez_http_auth.HttpResponse | BaseException, str, int | None], ...
+        ] = (
+            (cez_http_auth._AuthFailure("auth_transport_failed"), "request_failed", None),
+            (cez_http_auth._AuthFailure("auth_operation_timeout"), "request_failed", None),
+            (_http_response(503, b"failure"), "status", 503),
+            (_http_response(200, b"[]", "text/plain"), "content_type", 200),
+            (_http_response(200, b"not-json"), "json", 200),
+            (_http_response(200, b"{}"), "root_type", 200),
+            (_http_response(200, b"[]"), "empty", 200),
+        )
+        for meter_response, reason, status in cases:
+            with self.subTest(reason=reason, response=type(meter_response).__name__):
+                events: list[cez_http_auth.SafeHttpAuthEvent] = []
+                client = _ProbeClient(
+                    [
+                        _http_response(200, b"[]"),
+                        meter_response,
+                        _http_response(200, b"consumption\n", "text/csv"),
+                        _http_response(200, b"production\n", "text/csv"),
+                    ]
+                )
+                with tempfile.TemporaryDirectory() as temporary:
+                    cez_data_probe.CezDataProbe(
+                        _configuration(),
+                        output_directory=Path(temporary) / "probe",
+                        emit=events.append,
+                    ).collect(client)  # type: ignore[arg-type]
+                observed = next(
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_meter_lookup_unavailable"
+                )
+                expected: dict[str, object] = {
+                    "event": "data_probe_meter_lookup_unavailable",
+                    "reason": reason,
+                }
+                if status is not None:
+                    expected["status"] = status
+                self.assertEqual(observed, expected)
+                self.assertIn("consumption_export_received", [event.event for event in events])
+                self.assertIn("production_export_received", [event.event for event in events])
+                for url, _, _ in client.calls[2:]:
+                    query = parse_qs(urlsplit(url).query)
+                    self.assertEqual(query["electrometerId"], ["secret-elm"])
+
+    def test_invalid_utf8_meter_lookup_is_best_effort_with_configured_elm(self) -> None:
+        client, events, error = self._run_unavailable_meter_lookup(
+            _configuration(), _http_response(200, b"\xff")
+        )
+        self.assertIsNone(error)
+        self.assertEqual(
+            next(
+                event.as_dict()["reason"]
+                for event in events
+                if event.event == "data_probe_meter_lookup_unavailable"
+            ),
+            "utf8",
+        )
+        self.assertEqual(
+            parse_qs(urlsplit(client.calls[2][0]).query)["electrometerId"],
+            ["secret-elm"],
+        )
+
+    def test_ean_and_elm_use_best_effort_when_lookup_is_unavailable(self) -> None:
+        client, events, error = self._run_unavailable_meter_lookup(
+            _configuration("private-elm", TEST_EAN),
+            cez_http_auth._AuthFailure("auth_transport_failed"),
+        )
+        self.assertIsNone(error)
+        self.assertEqual(
+            parse_qs(urlsplit(client.calls[2][0]).query)["electrometerId"],
+            ["private-elm"],
+        )
+        rendered = json.dumps([event.as_dict() for event in events])
+        self.assertNotIn(TEST_EAN, rendered)
+        self.assertNotIn("private-elm", rendered)
+
+    def test_ean_only_lookup_failure_is_fatal(self) -> None:
+        _, events, error = self._run_unavailable_meter_lookup(
+            _configuration(None, TEST_EAN),
+            cez_http_auth._AuthFailure("auth_operation_timeout"),
+        )
+        self.assertEqual(error, "data_probe_meter_lookup_failed")
+        self.assertIn(
+            {"event": "data_probe_meter_lookup_unavailable", "reason": "request_failed"},
+            [event.as_dict() for event in events],
+        )
+
+    def _run_unavailable_meter_lookup(
+        self,
+        configuration: runtime_config.DataProbeConfiguration,
+        meter_response: cez_http_auth.HttpResponse | BaseException,
+    ) -> tuple[_ProbeClient, list[cez_http_auth.SafeHttpAuthEvent], str | None]:
+        client = _ProbeClient(
+            [
+                _http_response(200, b"[]"),
+                meter_response,
+                _http_response(200, b"consumption\n", "text/csv"),
+                _http_response(200, b"production\n", "text/csv"),
+            ]
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        error_code = None
+        with tempfile.TemporaryDirectory() as temporary:
+            try:
+                cez_data_probe.CezDataProbe(
+                    configuration,
+                    output_directory=Path(temporary) / "probe",
+                    emit=events.append,
+                ).collect(client)  # type: ignore[arg-type]
+            except cez_http_auth._AuthFailure as error:
+                error_code = error.code
+        return client, events, error_code
 
     def _run_meter_selection(
         self,
@@ -619,18 +747,18 @@ class CezDataProbeTests(unittest.TestCase):
             cez_http_auth._AuthFailure
         ) as raised:
             cez_data_probe.CezDataProbe(
-                _configuration(),
+                _configuration(None, TEST_EAN),
                 output_directory=Path(temporary) / "probe",
                 emit=events.append,
             ).collect(client)  # type: ignore[arg-type]
-        self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+        self.assertEqual(raised.exception.code, "data_probe_meter_lookup_failed")
         observed = next(
             event.as_dict()
             for event in events
-            if event.event == "data_probe_meter_selection_observed"
+            if event.event == "data_probe_meter_lookup_unavailable"
         )
-        self.assertEqual(observed["json_root_type"], "object")
-        self.assertEqual(observed["meter_count"], 0)
+        self.assertEqual(observed["reason"], "root_type")
+        self.assertEqual(observed["status"], 200)
 
     def test_structural_observation_contains_only_bounded_safe_schema(self) -> None:
         private_values = (

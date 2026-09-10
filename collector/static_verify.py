@@ -354,11 +354,14 @@ assert "return _Metadata(None, False, False, ()), observation" in DATA_PROBE_SOU
 assert '"data_probe_metadata_root_invalid"' in HTTP_AUTH_SOURCE
 assert '"data_probe_meter_selection_observed"' in HTTP_AUTH_SOURCE
 assert "class DataProbeMeterSelectionObservation" in HTTP_AUTH_SOURCE
+assert '"data_probe_meter_lookup_unavailable"' in HTTP_AUTH_SOURCE
+assert "class DataProbeMeterLookupUnavailableObservation" in HTTP_AUTH_SOURCE
 for meter_failure_code in (
     "data_probe_meter_identity_required",
     "data_probe_meter_not_found",
     "data_probe_meter_selection_ambiguous",
     "data_probe_meter_identity_mismatch",
+    "data_probe_meter_lookup_failed",
 ):
     assert meter_failure_code in HTTP_AUTH_SOURCE
     assert meter_failure_code in DATA_PROBE_SOURCE
@@ -366,6 +369,19 @@ assert 'entry.get("ean")' in DATA_PROBE_SOURCE
 assert 'entry.get("elm")' in DATA_PROBE_SOURCE
 assert 'parameters.append(("electrometerId", verified_elm))' in DATA_PROBE_SOURCE
 assert 'parameters.append(("ean"' not in DATA_PROBE_SOURCE
+assert 'extra_headers={"Accept": "*/*"}' in DATA_PROBE_SOURCE
+assert 'extra_headers={"Accept": "application/json"}' not in DATA_PROBE_SOURCE
+for lookup_reason in (
+    "request_failed",
+    "status",
+    "content_type",
+    "utf8",
+    "json",
+    "root_type",
+    "empty",
+):
+    assert f'"{lookup_reason}"' in HTTP_AUTH_SOURCE
+    assert f'"{lookup_reason}"' in DATA_PROBE_SOURCE
 assert "ean: str | None = field(default=None, repr=False)" in RUNTIME_CONFIG_SOURCE
 assert "len(raw_ean) != 18" in RUNTIME_CONFIG_SOURCE
 assert "not raw_ean.isascii()" in RUNTIME_CONFIG_SOURCE
