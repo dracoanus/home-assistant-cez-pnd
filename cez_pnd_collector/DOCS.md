@@ -79,6 +79,12 @@ one private meter selector: `cez_ean` (exactly 18 ASCII digits), `cez_elm`, or
 both. Both are masked private options; EAN and ELM remain inside the Collector
 and are never written to logs. Normal Collector startup remains synthetic-only.
 
+The authenticated meter lookup is best-effort when a validated `cez_elm` is
+already configured: an unavailable lookup is recorded structurally and export
+continues with that ELM. Usable CEZ meter data that contradicts or ambiguously
+matches the configured identity still fails closed. EAN-only selection requires
+the lookup because an ELM must be derived before export.
+
 The probe writes only these files under `/data/cez-pnd-probe`:
 
 - `metadata-summary.json`

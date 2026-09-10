@@ -83,6 +83,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "production_export_received",
         "data_probe_export_response_observed",
         "data_probe_meter_selection_observed",
+        "data_probe_meter_lookup_unavailable",
         "data_probe_complete",
         "data_probe_failed",
         "auth_state_needs_live_verification",
@@ -272,6 +273,38 @@ class DataProbeMeterSelectionObservation:
 
 
 @dataclass(frozen=True)
+class DataProbeMeterLookupUnavailableObservation:
+    """Fixed non-secret reason why optional meter verification was unavailable."""
+
+    reason: str
+    status: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.reason not in {
+            "request_failed",
+            "status",
+            "content_type",
+            "utf8",
+            "json",
+            "root_type",
+            "empty",
+        }:
+            raise ValueError("unsafe meter lookup reason")
+        if self.status is not None and not 100 <= self.status <= 599:
+            raise ValueError("unsafe meter lookup status")
+        if self.reason == "request_failed" and self.status is not None:
+            raise ValueError("unexpected meter lookup status")
+        if self.reason != "request_failed" and self.status is None:
+            raise ValueError("missing meter lookup status")
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"reason": self.reason}
+        if self.status is not None:
+            result["status"] = self.status
+        return result
+
+
+@dataclass(frozen=True)
 class SafeHttpAuthEvent:
     event: str
     hostname: str | None = None
@@ -287,13 +320,30 @@ class SafeHttpAuthEvent:
     meter_selection_observation: DataProbeMeterSelectionObservation | None = field(
         default=None, repr=False
     )
+    meter_lookup_unavailable_observation: (
+        DataProbeMeterLookupUnavailableObservation | None
+    ) = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "data_probe_meter_selection_observed":
+        if self.event == "data_probe_meter_lookup_unavailable":
+            if (
+                self.hostname is not None
+                or self.status is not None
+                or self.code is not None
+                or self.metadata_observation is not None
+                or self.json_root_type is not None
+                or self.export_observation is not None
+                or self.meter_selection_observation is not None
+                or self.meter_lookup_unavailable_observation is None
+            ):
+                raise ValueError("invalid meter lookup unavailable event")
+        elif self.meter_lookup_unavailable_observation is not None:
+            raise ValueError("unexpected meter lookup unavailable observation")
+        elif self.event == "data_probe_meter_selection_observed":
             if (
                 self.hostname is not None
                 or self.status is not None
@@ -365,6 +415,8 @@ class SafeHttpAuthEvent:
             result.update(self.export_observation.as_dict())
         if self.meter_selection_observation is not None:
             result.update(self.meter_selection_observation.as_dict())
+        if self.meter_lookup_unavailable_observation is not None:
+            result.update(self.meter_lookup_unavailable_observation.as_dict())
         return result
 
 
@@ -417,6 +469,7 @@ SAFE_ERROR_CODES = frozenset(
         "data_probe_meter_not_found",
         "data_probe_meter_selection_ambiguous",
         "data_probe_meter_identity_mismatch",
+        "data_probe_meter_lookup_failed",
         "data_probe_consumption_export_failed",
         "data_probe_production_export_failed",
         "data_probe_consumption_export_status_failed",

@@ -22,6 +22,7 @@ from .cez_http_auth import (
     CezHttpAuthClient,
     DashboardMetadataObservation,
     DataProbeExportObservation,
+    DataProbeMeterLookupUnavailableObservation,
     DataProbeMeterSelectionObservation,
     HttpResponse,
     HttpTransport,
@@ -266,30 +267,37 @@ class CezDataProbe:
         if selected is not None:
             return selected
 
-        response = self._request(
-            client,
-            CEZ_PND_METERS_URL,
-            AuthState.DATA_PROBE_METERS,
-            deadline,
-            "data_probe_metadata_failed",
-            headers={"Accept": "application/json"},
-        )
-        if response.status != 200:
-            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
-            raise _AuthFailure("data_probe_metadata_failed")
-        if _content_type(response) != "application/json":
-            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
-            raise _AuthFailure("data_probe_metadata_failed")
         try:
-            payload = json.loads(response.body.decode("utf-8", errors="strict"))
-        except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
-            self._emit_meter_selection(response.status, "unknown", 0, 0, 0, "none")
-            raise _AuthFailure("data_probe_metadata_invalid") from error
+            response = client.request_data_probe(
+                CEZ_PND_METERS_URL,
+                AuthState.DATA_PROBE_METERS,
+                deadline,
+                extra_headers={"Accept": "*/*"},
+            )
+        except _AuthFailure:
+            return self._meter_lookup_unavailable("request_failed")
+        if response.status != 200:
+            return self._meter_lookup_unavailable("status", response.status)
+        try:
+            content_type = _content_type(response)
+        except _AuthFailure:
+            return self._meter_lookup_unavailable("content_type", response.status)
+        if content_type != "application/json":
+            return self._meter_lookup_unavailable("content_type", response.status)
+        try:
+            text = response.body.decode("utf-8", errors="strict")
+        except UnicodeError:
+            return self._meter_lookup_unavailable("utf8", response.status)
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, RecursionError):
+            return self._meter_lookup_unavailable("json", response.status)
         root_type = _json_type(payload)
         if not isinstance(payload, list):
-            self._emit_meter_selection(response.status, root_type, 0, 0, 0, "none")
-            raise _AuthFailure("data_probe_metadata_invalid")
+            return self._meter_lookup_unavailable("root_type", response.status)
         records = _meter_records(payload)
+        if not payload or not records:
+            return self._meter_lookup_unavailable("empty", response.status)
         selected, ean_matches, elm_matches, mode, error_code = _select_meter(
             self._configuration, list(records)
         )
@@ -306,6 +314,22 @@ class CezDataProbe:
         if selected is None:
             raise _AuthFailure("data_probe_meter_not_found")
         return selected
+
+    def _meter_lookup_unavailable(
+        self, reason: str, status: int | None = None
+    ) -> str:
+        self._emit(
+            SafeHttpAuthEvent(
+                "data_probe_meter_lookup_unavailable",
+                meter_lookup_unavailable_observation=(
+                    DataProbeMeterLookupUnavailableObservation(reason, status)
+                ),
+            )
+        )
+        configured_elm = self._configuration.electrometer_id
+        if configured_elm is None:
+            raise _AuthFailure("data_probe_meter_lookup_failed")
+        return configured_elm
 
     def _emit_meter_selection(
         self,
@@ -484,7 +508,8 @@ def _meter_records(
         elm_value = entry.get("elm")
         ean = ean_value if _is_valid_ean(ean_value) else None
         elm = elm_value if _is_valid_elm(elm_value) else None
-        records.append((ean, elm))
+        if ean is not None or elm is not None:
+            records.append((ean, elm))
     return tuple(records)
 
 
