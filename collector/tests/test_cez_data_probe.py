@@ -32,7 +32,8 @@ FORM = b'''<html><form method="post" action="/cas/login">
 FINAL_APP = b"<html><main id='app'></main></html>"
 CONSUMPTION = b"private-consumption-csv\n"
 PRODUCTION = b"private-production-csv\n"
-EAN = "859182400000000001"
+TEST_EAN = "8" * 18
+OTHER_TEST_EAN = "7" * 18
 MATCHED_METADATA = b'{"meters":[{"elm":"secret-elm"}]}'
 
 
@@ -200,9 +201,9 @@ class CezDataProbeTests(unittest.TestCase):
             "cez_password": "private-password",
         }
         loaded = runtime_config._load_data_probe_configuration(
-            {**base, "cez_ean": EAN, "cez_elm": "private-elm"}
+            {**base, "cez_ean": TEST_EAN, "cez_elm": "private-elm"}
         )
-        self.assertEqual(loaded.ean, EAN)
+        self.assertEqual(loaded.ean, TEST_EAN)
         self.assertEqual(loaded.electrometer_id, "private-elm")
         for invalid in ("1" * 17, "1" * 19, "1" * 17 + "x", "１" * 18):
             with self.subTest(ean=invalid), self.assertRaises(
@@ -514,8 +515,8 @@ class CezDataProbeTests(unittest.TestCase):
 
     def test_both_ean_and_elm_require_same_exact_meter(self) -> None:
         client, events, error = self._run_meter_selection(
-            _configuration("private-elm", EAN),
-            [{"ean": EAN, "elm": "private-elm", "ignored": "private"}],
+            _configuration("private-elm", TEST_EAN),
+            [{"ean": TEST_EAN, "elm": "private-elm", "ignored": "private"}],
         )
         self.assertIsNone(error)
         observed = next(
@@ -533,7 +534,8 @@ class CezDataProbeTests(unittest.TestCase):
 
     def test_ean_only_extracts_verified_elm_in_memory(self) -> None:
         client, events, error = self._run_meter_selection(
-            _configuration(None, EAN), [{"ean": EAN, "elm": "derived-private-elm"}]
+            _configuration(None, TEST_EAN),
+            [{"ean": TEST_EAN, "elm": "derived-private-elm"}],
         )
         self.assertIsNone(error)
         for url, _, _ in client.calls[2:]:
@@ -541,13 +543,13 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertEqual(query["electrometerId"], ["derived-private-elm"])
             self.assertNotIn("ean", {key.lower() for key in query})
         rendered = json.dumps([event.as_dict() for event in events])
-        self.assertNotIn(EAN, rendered)
+        self.assertNotIn(TEST_EAN, rendered)
         self.assertNotIn("derived-private-elm", rendered)
 
     def test_elm_only_selects_exactly_one_meter(self) -> None:
         client, events, error = self._run_meter_selection(
             _configuration("private-elm"),
-            [{"ean": EAN, "elm": "private-elm"}],
+            [{"ean": TEST_EAN, "elm": "private-elm"}],
         )
         self.assertIsNone(error)
         self.assertEqual(
@@ -566,12 +568,11 @@ class CezDataProbeTests(unittest.TestCase):
         )
 
     def test_meter_identity_mismatch_is_rejected_without_secret_diagnostics(self) -> None:
-        other_ean = "859182400000000002"
         _, events, error = self._run_meter_selection(
-            _configuration("private-elm", EAN),
+            _configuration("private-elm", TEST_EAN),
             [
-                {"ean": EAN, "elm": "other-private-elm"},
-                {"ean": other_ean, "elm": "private-elm"},
+                {"ean": TEST_EAN, "elm": "other-private-elm"},
+                {"ean": OTHER_TEST_EAN, "elm": "private-elm"},
             ],
         )
         self.assertEqual(error, "data_probe_meter_identity_mismatch")
@@ -582,19 +583,24 @@ class CezDataProbeTests(unittest.TestCase):
         )
         self.assertEqual(observed["selection_mode"], "mismatch")
         rendered = json.dumps(observed)
-        for private in (EAN, other_ean, "private-elm", "other-private-elm"):
+        for private in (
+            TEST_EAN,
+            OTHER_TEST_EAN,
+            "private-elm",
+            "other-private-elm",
+        ):
             self.assertNotIn(private, rendered)
 
     def test_zero_and_multiple_meter_matches_fail_closed(self) -> None:
         cases = (
-            ([{"ean": "859182400000000002", "elm": "other"}], "data_probe_meter_not_found", "none"),
-            ([{"ean": EAN, "elm": "first"}, {"ean": EAN, "elm": "second"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
-            ([{"ean": EAN, "elm": "same"}, {"ean": EAN, "elm": "same"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
+            ([{"ean": OTHER_TEST_EAN, "elm": "other"}], "data_probe_meter_not_found", "none"),
+            ([{"ean": TEST_EAN, "elm": "first"}, {"ean": TEST_EAN, "elm": "second"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
+            ([{"ean": TEST_EAN, "elm": "same"}, {"ean": TEST_EAN, "elm": "same"}], "data_probe_meter_selection_ambiguous", "ambiguous"),
         )
         for meters, expected, mode in cases:
             with self.subTest(expected=expected):
                 _, events, error = self._run_meter_selection(
-                    _configuration(None, EAN), meters
+                    _configuration(None, TEST_EAN), meters
                 )
                 self.assertEqual(error, expected)
                 observed = next(
