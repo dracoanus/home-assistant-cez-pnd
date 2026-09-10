@@ -21,6 +21,9 @@ STRICT_TRANSPORT_SOURCE = (
 REQUESTS_PREAUTH_SOURCE = (
     ROOT / "collector_service" / "requests_preauth.py"
 ).read_text(encoding="utf-8")
+DATA_PROBE_SOURCE = (ROOT / "collector_service" / "cez_data_probe.py").read_text(
+    encoding="utf-8"
+)
 REQUESTS_COMPATIBILITY_REQUIREMENTS = (
     ROOT / "requirements-requests-compatibility.txt"
 ).read_text(encoding="utf-8")
@@ -30,7 +33,11 @@ STRUCTURED_LOGGING_SOURCE = (
 NON_HTTP_AUTH_SOURCE = "\n".join(
     path.read_text(encoding="utf-8")
     for path in SOURCE_FILES
-    if path.name not in {"cez_http_auth.py", "requests_preauth.py"}
+    if path.name not in {
+        "cez_http_auth.py",
+        "requests_preauth.py",
+        "cez_data_probe.py",
+    }
 )
 RUNTIME_CONFIG_SOURCE = (ROOT / "collector_service" / "runtime_config.py").read_text(
     encoding="utf-8"
@@ -70,7 +77,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.17"
+assert VERSION == "0.3.18"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -287,7 +294,21 @@ assert "HTTPSConnection" not in STRICT_TRANSPORT_SOURCE
 assert "MAX_ADDRESS_ATTEMPTS = 4" in STRICT_TRANSPORT_SOURCE
 assert 'options.get("cez_http_auth_discovery_mode", False)' in RUNTIME_CONFIG_SOURCE
 assert 'options.get("cez_requests_preauth_compatibility_mode", False)' in RUNTIME_CONFIG_SOURCE
+assert 'options.get("cez_data_probe_mode", False)' in RUNTIME_CONFIG_SOURCE
 assert "discovery_config_conflicting_modes" in RUNTIME_CONFIG_SOURCE
+assert 'CEZ_PND_EXPORT_URL = (' in DATA_PROBE_SOURCE
+assert '"https://pnd.cezdistribuce.cz/cezpnd2/external/data/export"' in DATA_PROBE_SOURCE
+assert 'PROBE_DIRECTORY = Path("/data/cez-pnd-probe")' in DATA_PROBE_SOURCE
+assert 'METADATA_SUMMARY_NAME = "metadata-summary.json"' in DATA_PROBE_SOURCE
+assert 'CONSUMPTION_NAME = "range-consumption.csv"' in DATA_PROBE_SOURCE
+assert 'PRODUCTION_NAME = "range-production.csv"' in DATA_PROBE_SOURCE
+assert 'os.chmod(directory, 0o700)' in DATA_PROBE_SOURCE
+assert 'os.chmod(path, 0o600)' in DATA_PROBE_SOURCE
+assert "tempfile.mkstemp" in DATA_PROBE_SOURCE
+assert "os.replace" in DATA_PROBE_SOURCE
+assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
+assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
+assert "run_data_probe(" in SERVER_SOURCE
 assert 'tags:\n      - "collector-service-v*"' in WORKFLOW
 assert "ghcr.io/dracoanus/home-assistant-cez-pnd-collector" in WORKFLOW
 assert "platforms: linux/amd64" in WORKFLOW
@@ -396,7 +417,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.17"',
+    'version: "0.3.18"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -438,6 +459,11 @@ assert "  cez_http_auth_discovery_mode: false" in APP_MANIFEST
 assert "  cez_http_auth_discovery_mode: bool" in APP_MANIFEST
 assert "  cez_requests_preauth_compatibility_mode: false" in APP_MANIFEST
 assert "  cez_requests_preauth_compatibility_mode: bool" in APP_MANIFEST
+assert "  cez_data_probe_mode: false" in APP_MANIFEST
+assert "  cez_data_probe_mode: bool" in APP_MANIFEST
+assert "  cez_data_probe_date: null" in APP_MANIFEST
+assert "  cez_data_probe_date: str?" in APP_MANIFEST
+assert "  cez_elm: password?" in APP_MANIFEST
 assert "  cez_allowed_origins: []" in APP_MANIFEST
 assert "  cez_start_url: url?" in APP_MANIFEST
 assert "  cez_auth_origin: url?" in APP_MANIFEST
@@ -469,7 +495,7 @@ print("PASS: root-owned mode-0555 source is set atomically by COPY")
 print("PASS: explicit non-root UID/GID 2000:2000")
 print("PASS: exactly three versioned read-only API routes")
 print("PASS: TLS and constant-time bearer verifier required")
-print("PASS: CEZ hosts exist only in the reviewed Phase 3B destination contract")
+print("PASS: CEZ hosts exist only in reviewed authentication/data-probe code")
 print("PASS: missing measurement is null, never synthesized zero")
 print("PASS: immutable GHCR workflow retains SBOM and provenance")
 print("PASS: isolated non-root offline container smoke profile")
@@ -480,3 +506,4 @@ print("PASS: one-shot CEZ discovery is explicit, allowlisted, and non-secret")
 print("PASS: browserless CEZ auth is offline-only, redirect-explicit, and fail-closed")
 print("PASS: retained strict transport still pins validated IPs")
 print("PASS: active requests auth validates every hop before its documented second DNS resolution")
+print("PASS: one-shot authenticated data probe is bounded, exact-destination, and private")

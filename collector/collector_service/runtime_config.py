@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date
 import base64
 import binascii
 import json
@@ -64,6 +65,9 @@ DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
         "discovery_config_invalid_password",
         "discovery_config_invalid_http_mode",
         "discovery_config_conflicting_modes",
+        "data_probe_config_missing_date",
+        "data_probe_config_invalid_date",
+        "data_probe_config_invalid_elm",
     }
 )
 
@@ -108,6 +112,16 @@ class HttpAuthDiscoveryConfiguration:
 
 
 @dataclass(frozen=True)
+class DataProbeConfiguration:
+    """Ephemeral inputs for one bounded authenticated CEZ data probe."""
+
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+    probe_date: date
+    electrometer_id: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
 class RuntimeConfiguration:
     """Validated API verifier and an initialized TLS server context."""
 
@@ -117,6 +131,7 @@ class RuntimeConfiguration:
     discovery: DiscoveryConfiguration | None = None
     http_auth_discovery: HttpAuthDiscoveryConfiguration | None = None
     requests_preauth_compatibility: bool = False
+    data_probe: DataProbeConfiguration | None = None
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -149,6 +164,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
         discovery = _load_discovery_configuration(options)
         http_auth_discovery = _load_http_auth_discovery_configuration(options)
         requests_preauth_compatibility = _load_requests_preauth_compatibility_mode(options)
+        data_probe = _load_data_probe_configuration(options)
         options.pop("cez_username", None)
         options.pop("cez_password", None)
         certificate = _decode_tls_option(options, "tls_certificate_b64")
@@ -160,6 +176,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
             discovery=discovery,
             http_auth_discovery=http_auth_discovery,
             requests_preauth_compatibility=requests_preauth_compatibility,
+            data_probe=data_probe,
         )
 
     try:
@@ -273,13 +290,16 @@ def _validate_discovery_modes(options: dict[str, object]) -> None:
     selenium_mode = options.get("cez_discovery_mode", False)
     http_mode = options.get("cez_http_auth_discovery_mode", False)
     requests_mode = options.get("cez_requests_preauth_compatibility_mode", False)
+    data_probe_mode = options.get("cez_data_probe_mode", False)
     if not isinstance(selenium_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_mode")
     if not isinstance(http_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
     if not isinstance(requests_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
-    if sum((selenium_mode, http_mode, requests_mode)) > 1:
+    if not isinstance(data_probe_mode, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if sum((selenium_mode, http_mode, requests_mode, data_probe_mode)) > 1:
         raise DiscoveryConfigurationError("discovery_config_conflicting_modes")
 
 
@@ -315,6 +335,58 @@ def _load_http_auth_discovery_configuration(
         maximum_bytes=1024,
     )
     return HttpAuthDiscoveryConfiguration(username=username, password=password)
+
+
+def _load_data_probe_configuration(
+    options: dict[str, object],
+) -> DataProbeConfiguration | None:
+    """Load one-shot data probe inputs without copying identifiers to logs."""
+
+    enabled = options.get("cez_data_probe_mode", False)
+    if not isinstance(enabled, bool):
+        raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if not enabled:
+        return None
+    username = _required_discovery_text(
+        options,
+        "cez_username",
+        "discovery_config_missing_username",
+        "discovery_config_invalid_username",
+        maximum_bytes=320,
+    )
+    password = _required_discovery_text(
+        options,
+        "cez_password",
+        "discovery_config_missing_password",
+        "discovery_config_invalid_password",
+        maximum_bytes=1024,
+    )
+    raw_date = _required_discovery_text(
+        options,
+        "cez_data_probe_date",
+        "data_probe_config_missing_date",
+        "data_probe_config_invalid_date",
+        maximum_bytes=10,
+    )
+    try:
+        probe_date = date.fromisoformat(raw_date)
+    except ValueError as error:
+        raise DiscoveryConfigurationError("data_probe_config_invalid_date") from error
+    if probe_date.isoformat() != raw_date:
+        raise DiscoveryConfigurationError("data_probe_config_invalid_date")
+    raw_elm = options.get("cez_elm")
+    electrometer_id = None
+    if raw_elm not in (None, ""):
+        electrometer_id = _required_discovery_text(
+            options,
+            "cez_elm",
+            "data_probe_config_invalid_elm",
+            "data_probe_config_invalid_elm",
+            maximum_bytes=128,
+        )
+        if electrometer_id != electrometer_id.strip():
+            raise DiscoveryConfigurationError("data_probe_config_invalid_elm")
+    return DataProbeConfiguration(username, password, probe_date, electrometer_id)
 
 
 def _required_discovery_text(

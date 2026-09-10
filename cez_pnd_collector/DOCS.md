@@ -68,6 +68,42 @@ This mode is for a separately authorized HA OS live test only. See the
 [Phase 3 document](../docs/phase3a-cez-auth-discovery.md) for its pinned DNS,
 TLS, redirect, credential, evidence, and open-verification requirements.
 
+## One-shot authenticated data probe
+
+`cez_data_probe_mode` is disabled by default and is mutually exclusive with
+all discovery modes. When explicitly enabled, it uses the same authenticated,
+memory-only `requests.Session` for login, bounded dashboard metadata retrieval,
+and exactly two raw CSV exports for one configured calendar day. Set
+`cez_data_probe_date` to an ISO date such as `2026-09-08`; `cez_elm` is optional
+and is treated as a masked private option. Normal Collector startup remains
+synthetic-only.
+
+The probe writes only these files under `/data/cez-pnd-probe`:
+
+- `metadata-summary.json`
+- `range-consumption.csv`
+- `range-production.csv`
+
+The directory is mode `0700` and the atomically replaced files are mode
+`0600`. The CSV files are raw private CEZ exports and may contain account or
+meter identifiers and measurements. Do not publish them, attach them to issue
+reports, add them to Git, or expose them in logs. The JSON summary contains
+only validation booleans and byte counts, never metadata values.
+
+For an owner-authorized manual HA OS probe, keep the App stopped, enable only
+`cez_data_probe_mode`, retain the existing private CEZ credentials, set exactly
+one probe date, optionally set the masked ELM value, save, and start the App
+once. Require the fixed `data_probe_started`, metadata/export receipt,
+`data_probe_complete`, cleanup, and authenticated result events. The App exits
+after the one-shot attempt. Then disable the mode and remove the probe-only
+date/ELM options before returning to normal service operation. A failed or
+incomplete event sequence is not a successful data acquisition result.
+
+The CSV payload remains unparsed in this phase. Initial historical backfill,
+persisted synchronization checkpoints, incremental fetches, and a bounded
+overlap with idempotent correction upserts belong to a later data-acquisition
+phase.
+
 ## Temporary requests PREAUTH compatibility mode
 
 `cez_requests_preauth_compatibility_mode` is disabled by default and is

@@ -90,3 +90,11 @@ shutdown. It is not a production configuration or pairing design.
 The App manifest references the immutable released `0.2.3` GHCR image and
 exposes no host port. Phase 3A remains unreleased source pending review and
 offline validation.
+
+The unreleased Phase 4A source also contains an explicit, mutually exclusive
+one-shot authenticated data probe. It reuses the active browserless
+authentication session, validates bounded dashboard metadata, requests one
+day of consumption and production CSV exports, and atomically replaces three
+private files under `/data/cez-pnd-probe`. It does not parse or publish those
+measurements through the Collector API. See the App documentation for the
+manual gate and handling restrictions.
