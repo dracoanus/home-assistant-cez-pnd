@@ -332,11 +332,6 @@ class CezDataProbeTests(unittest.TestCase):
                 "data_probe_metadata_json_invalid",
             ),
             (
-                _http_response(200, b"[]"),
-                _configuration(None),
-                "data_probe_metadata_root_invalid",
-            ),
-            (
                 _http_response(200, b'{"idDeviceSet":true}'),
                 _configuration(None),
                 "data_probe_metadata_id_device_set_invalid",
@@ -345,11 +340,6 @@ class CezDataProbeTests(unittest.TestCase):
                 _http_response(200, b'{"meters":{}}'),
                 _configuration(None),
                 "data_probe_metadata_meter_collection_invalid",
-            ),
-            (
-                _http_response(200, b'{"meters":[]}'),
-                _configuration(),
-                "data_probe_metadata_configured_elm_not_found",
             ),
         )
         for response, configuration, expected in cases:
@@ -362,10 +352,88 @@ class CezDataProbeTests(unittest.TestCase):
                 self.assertEqual(summary["status"], 200)
 
     def test_configured_elm_must_be_confirmed_by_metadata(self) -> None:
-        code, _, _ = self._metadata_failure(
-            _http_response(200, b'{"meters":[]}'), _configuration()
+        client = _ProbeClient(
+            [_http_response(200, b'{"meters":[]}'), _http_response(200, b"[]")]
         )
-        self.assertEqual(code, "data_probe_metadata_configured_elm_not_found")
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(
+            cez_http_auth._AuthFailure
+        ) as raised:
+            cez_data_probe.CezDataProbe(
+                _configuration(), output_directory=Path(temporary) / "probe"
+            ).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(
+            raised.exception.code, "data_probe_metadata_configured_elm_not_found"
+        )
+
+    def test_live_array_metadata_is_best_effort_and_exports_continue(self) -> None:
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        client = _ProbeClient(
+            [
+                _http_response(200, b'[{"private":"value"}]'),
+                _http_response(200, b"consumption\n", "text/csv"),
+                _http_response(200, b"production\n", "text/csv"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            cez_data_probe.CezDataProbe(
+                _configuration(None), output_directory=output, emit=events.append
+            ).collect(client)  # type: ignore[arg-type]
+            summary = json.loads(
+                (output / cez_data_probe.METADATA_SUMMARY_NAME).read_text()
+            )
+        self.assertFalse(summary["dashboard_json_object"])
+        self.assertFalse(summary["id_device_set_present"])
+        self.assertEqual(summary["json_root_type"], "array")
+        self.assertIn(
+            {
+                "event": "dashboard_metadata_unusable",
+                "json_root_type": "array",
+            },
+            [event.as_dict() for event in events],
+        )
+        self.assertNotIn(
+            "dashboard_metadata_verified", [event.event for event in events]
+        )
+        self.assertEqual(len(client.calls), 3)
+        for url, state, _ in client.calls[1:]:
+            self.assertEqual(state, cez_http_auth.AuthState.DATA_PROBE_EXPORT)
+            query = parse_qs(urlsplit(url).query)
+            self.assertNotIn("idDeviceSet", query)
+            self.assertNotIn("electrometerId", query)
+        self.assertEqual(
+            [parse_qs(urlsplit(call[0]).query)["idAssembly"] for call in client.calls[1:]],
+            [["-1001"], ["-1002"]],
+        )
+
+    def test_configured_elm_uses_exact_meters_fallback_without_logging_values(self) -> None:
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        private_elm = "secret-elm"
+        client = _ProbeClient(
+            [
+                _http_response(200, b"[]"),
+                _http_response(200, b'[{"elm":"secret-elm"}]'),
+                _http_response(200, b"consumption\n", "text/csv"),
+                _http_response(200, b"production\n", "text/csv"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            cez_data_probe.CezDataProbe(
+                _configuration(private_elm),
+                output_directory=Path(temporary) / "probe",
+                emit=events.append,
+            ).collect(client)  # type: ignore[arg-type]
+        meters_url, meters_state, meters_headers = client.calls[1]
+        self.assertEqual(meters_url, cez_data_probe.CEZ_PND_METERS_URL)
+        self.assertEqual(meters_state, cez_http_auth.AuthState.DATA_PROBE_METERS)
+        self.assertEqual(meters_headers, {"Accept": "application/json"})
+        for url, _, _ in client.calls[2:]:
+            self.assertEqual(
+                parse_qs(urlsplit(url).query)["electrometerId"], [private_elm]
+            )
+        self.assertNotIn(
+            private_elm, json.dumps([event.as_dict() for event in events])
+        )
 
     def test_structural_observation_contains_only_bounded_safe_schema(self) -> None:
         private_values = (
@@ -523,6 +591,10 @@ class CezDataProbeTests(unittest.TestCase):
             (
                 cez_http_auth.AuthState.DATA_PROBE_EXPORT,
                 cez_data_probe.CEZ_PND_EXPORT_URL + "/extra",
+            ),
+            (
+                cez_http_auth.AuthState.DATA_PROBE_METERS,
+                cez_data_probe.CEZ_PND_METERS_URL + "/extra",
             ),
         ):
             with self.subTest(state=state), self.assertRaises(

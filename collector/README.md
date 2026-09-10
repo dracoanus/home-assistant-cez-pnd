@@ -18,7 +18,10 @@ Selenium.
 
 ## Runtime boundary
 
-- The container remains UID/GID `2000:2000`.
+- A minimal root-owned entrypoint initializes only
+  `/data/cez-pnd-probe` as UID/GID `2000:2000`, mode `0700`. It never
+  recursively changes `/data`. It then drops supplementary groups, GID and
+  UID and permanently execs the Collector service as `2000:2000`.
 - HTTPS is mandatory. Outside HA OS, startup fails unless
   `/data/tls/server.crt` and the UID-2000-owned mode-0600
   `/data/tls/server.key` are valid. The HA App path is described below.
