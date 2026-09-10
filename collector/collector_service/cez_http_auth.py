@@ -17,7 +17,11 @@ import time
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
-from .runtime_config import DiscoveryConfiguration, HttpAuthDiscoveryConfiguration
+from .runtime_config import (
+    DataProbeConfiguration,
+    DiscoveryConfiguration,
+    HttpAuthDiscoveryConfiguration,
+)
 from .structured_logging import structured_event_json
 
 
@@ -50,6 +54,8 @@ class AuthState(str, Enum):
     CREDENTIAL_SUBMISSION = "credential_submission"
     AUTH_REDIRECTS = "auth_redirects"
     AUTHENTICATED = "authenticated"
+    DATA_PROBE_METADATA = "data_probe_metadata"
+    DATA_PROBE_EXPORT = "data_probe_export"
 
 
 class AuthStatus(str, Enum):
@@ -67,6 +73,12 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "credentials_submitted",
         "auth_redirect_observed",
         "authenticated",
+        "data_probe_started",
+        "dashboard_metadata_verified",
+        "consumption_export_received",
+        "production_export_received",
+        "data_probe_complete",
+        "data_probe_failed",
         "auth_state_needs_live_verification",
         "destination_rejected",
         "dns_resolution_failed",
@@ -152,6 +164,12 @@ SAFE_ERROR_CODES = frozenset(
         "auth_response_body_limit",
         "auth_cleanup_failed",
         "auth_state_unverified",
+        "data_probe_auth_failed",
+        "data_probe_metadata_failed",
+        "data_probe_metadata_invalid",
+        "data_probe_consumption_export_failed",
+        "data_probe_production_export_failed",
+        "data_probe_storage_failed",
     }
 )
 
@@ -282,6 +300,16 @@ DESTINATION_CONTRACT: Mapping[AuthState, Mapping[str, _DestinationRule]] = {
             frozenset({"GET"}), ("/cezpnd2",)
         ),
     },
+    AuthState.DATA_PROBE_METADATA: {
+        "pnd.cezdistribuce.cz": _DestinationRule(
+            frozenset({"GET"}), ("/cezpnd2/external/dashboard/view/data",)
+        ),
+    },
+    AuthState.DATA_PROBE_EXPORT: {
+        "pnd.cezdistribuce.cz": _DestinationRule(
+            frozenset({"GET"}), ("/cezpnd2/external/data/export",)
+        ),
+    },
 }
 
 
@@ -352,6 +380,15 @@ def _validate_destination_contract(
     method = method.upper()
     rules = DESTINATION_CONTRACT.get(state, {})
     rule = rules.get(hostname)
+    exact_path_required = state in {
+        AuthState.DATA_PROBE_METADATA,
+        AuthState.DATA_PROBE_EXPORT,
+    }
+    path_allowed = (
+        (parsed.path or "/") in rule.path_prefixes
+        if rule is not None and exact_path_required
+        else rule is not None and _path_matches(parsed.path or "/", rule.path_prefixes)
+    )
     if (
         parsed.scheme != "https"
         or not hostname
@@ -361,7 +398,7 @@ def _validate_destination_contract(
         or parsed.fragment
         or rule is None
         or method not in rule.methods
-        or not _path_matches(parsed.path or "/", rule.path_prefixes)
+        or not path_allowed
         or (state is AuthState.CREDENTIAL_SUBMISSION and parsed.query)
     ):
         raise _AuthFailure("auth_destination_rejected")
@@ -647,7 +684,11 @@ class CezHttpAuthClient:
 
     def __init__(
         self,
-        configuration: DiscoveryConfiguration | HttpAuthDiscoveryConfiguration,
+        configuration: (
+            DataProbeConfiguration
+            | DiscoveryConfiguration
+            | HttpAuthDiscoveryConfiguration
+        ),
         transport: HttpTransport,
         *,
         resolver: Resolver = _default_resolver,
@@ -666,7 +707,10 @@ class CezHttpAuthClient:
     def __repr__(self) -> str:
         return "CezHttpAuthClient(transport_policy=explicit)"
 
-    def authenticate(self) -> AuthResult:
+    def authenticate(
+        self,
+        on_authenticated: Callable[[CezHttpAuthClient], None] | None = None,
+    ) -> AuthResult:
         """Run the candidate protocol and always close all session state."""
 
         result = AuthResult(AuthStatus.FAILED, "auth_transport_failed")
@@ -746,6 +790,8 @@ class CezHttpAuthClient:
                 "auth_authenticated_endpoint_verified",
             )
             self._emit(SafeHttpAuthEvent("authenticated"))
+            if on_authenticated is not None:
+                on_authenticated(self)
         except _AuthFailure as error:
             result = AuthResult(AuthStatus.FAILED, error.code)
             self._emit(SafeHttpAuthEvent(_failure_event(error.code)))
@@ -762,6 +808,30 @@ class CezHttpAuthClient:
             else:
                 self._emit(SafeHttpAuthEvent("http_auth_cleanup_complete"))
         return result
+
+    def new_operation_deadline(self) -> float:
+        """Start one separately bounded post-authentication operation window."""
+
+        return self._monotonic() + TOTAL_TIMEOUT_SECONDS
+
+    def request_data_probe(
+        self,
+        url: str,
+        state: AuthState,
+        deadline: float,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> HttpResponse:
+        """Issue one GET constrained to an exact data-probe destination state."""
+
+        if state not in {
+            AuthState.DATA_PROBE_METADATA,
+            AuthState.DATA_PROBE_EXPORT,
+        }:
+            raise _AuthFailure("auth_destination_rejected")
+        return self._request(
+            "GET", url, state, deadline, extra_headers=extra_headers
+        )
 
     def _follow_get_redirects(
         self, url: str, state: AuthState, deadline: float
@@ -923,6 +993,8 @@ def _verify_authenticated_application_page(response: HttpResponse) -> None:
 
 
 def _failure_event(code: str) -> str:
+    if code.startswith("data_probe_"):
+        return "data_probe_failed"
     if code == "auth_destination_rejected":
         return "destination_rejected"
     if code == "auth_dns_resolution_failed":

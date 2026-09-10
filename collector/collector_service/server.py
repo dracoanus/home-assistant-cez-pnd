@@ -132,6 +132,25 @@ def main() -> int:
         emit_http_auth_json_event(SafeHttpAuthEvent.from_result(result))
         return 0 if result.status is AuthStatus.NEEDS_LIVE_VERIFICATION else 1
 
+    data_probe_configuration = getattr(configuration, "data_probe", None)
+    if data_probe_configuration is not None:
+        from .cez_data_probe import run_data_probe
+        from .requests_preauth import RequestsSessionTransport
+
+        try:
+            transport = RequestsSessionTransport()
+            result = run_data_probe(
+                data_probe_configuration,
+                transport,
+                resolver=transport.resolve,
+                emit=emit_http_auth_json_event,
+            )
+        except Exception:
+            emit_http_auth_json_event(SafeHttpAuthEvent("data_probe_failed"))
+            return 1
+        emit_http_auth_json_event(SafeHttpAuthEvent.from_result(result))
+        return 0 if result.status is AuthStatus.AUTHENTICATED else 1
+
     http_auth_configuration = getattr(configuration, "http_auth_discovery", None)
     if http_auth_configuration is not None:
         from .requests_preauth import RequestsSessionTransport

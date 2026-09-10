@@ -1,0 +1,435 @@
+"""Focused offline tests for the one-shot authenticated CEZ data probe."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+import io
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+from urllib.parse import parse_qs, urlsplit
+
+from collector_service import (
+    cez_data_probe,
+    cez_http_auth,
+    requests_preauth,
+    runtime_config,
+    server,
+)
+
+
+GLOBAL_IP = "93.184.216.34"
+LOGIN_URL = "https://mepas.cez.cz/cas/login?service=opaque"
+FORM = b'''<html><form method="post" action="/cas/login">
+<input name="username"><input name="password" type="password">
+</form></html>'''
+FINAL_APP = b"<html><main id='app'></main></html>"
+CONSUMPTION = b"private-consumption-csv\n"
+PRODUCTION = b"private-production-csv\n"
+
+
+class _Headers(dict[str, str]):
+    pass
+
+
+class _Cookies(list[object]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleared = False
+
+    def clear(self) -> None:
+        self.cleared = True
+        super().clear()
+
+
+@dataclass
+class _Response:
+    status_code: int
+    headers: _Headers
+    chunks: tuple[bytes, ...] = (b"bounded",)
+
+    def iter_content(self, chunk_size: int):
+        return iter(self.chunks)
+
+    def close(self) -> None:
+        pass
+
+
+class _Session:
+    def __init__(self, responses: list[_Response]) -> None:
+        self.trust_env = False
+        self.proxies: dict[str, str] = {}
+        self.cookies = _Cookies()
+        self.responses = list(responses)
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.closed = False
+
+    def request(self, method: str, url: str, **kwargs: object) -> _Response:
+        self.calls.append((method, url, kwargs))
+        return self.responses.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ProbeClient:
+    def __init__(self, responses: list[cez_http_auth.HttpResponse]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, cez_http_auth.AuthState, dict[str, str]]] = []
+
+    def new_operation_deadline(self) -> float:
+        return 60.0
+
+    def request_data_probe(
+        self,
+        url: str,
+        state: cez_http_auth.AuthState,
+        deadline: float,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> cez_http_auth.HttpResponse:
+        self.calls.append((url, state, dict(extra_headers or {})))
+        return self.responses.pop(0)
+
+
+def _configuration(elm: str | None = "secret-elm") -> runtime_config.DataProbeConfiguration:
+    return runtime_config.DataProbeConfiguration(
+        "private-user", "private-password", date(2026, 9, 8), elm
+    )
+
+
+def _http_response(
+    status: int, body: bytes, content_type: str = "application/json"
+) -> cez_http_auth.HttpResponse:
+    return cez_http_auth.HttpResponse(
+        status, (("Content-Type", content_type),), body
+    )
+
+
+def _resolver(hostname: str, port: int) -> tuple[str, ...]:
+    assert hostname in cez_http_auth.REVIEWED_HOSTNAMES
+    assert port == 443
+    return (GLOBAL_IP,)
+
+
+def _successful_session() -> _Session:
+    metadata = b'{"idDeviceSet":"secret-device","meters":[{"elm":"secret-elm"}]}'
+    return _Session(
+        [
+            _Response(302, _Headers(Location=LOGIN_URL), (b"",)),
+            _Response(200, _Headers(), (FORM,)),
+            _Response(
+                302,
+                _Headers(Location=cez_http_auth.CEZ_PND_START_URL),
+                (b"",),
+            ),
+            _Response(200, _Headers({"Content-Type": "text/html"}), (FINAL_APP,)),
+            _Response(200, _Headers({"Content-Type": "application/json"}), (metadata,)),
+            _Response(200, _Headers({"Content-Type": "text/csv"}), (CONSUMPTION,)),
+            _Response(
+                200,
+                _Headers({"Content-Type": "application/octet-stream"}),
+                (PRODUCTION,),
+            ),
+        ]
+    )
+
+
+class CezDataProbeTests(unittest.TestCase):
+    def test_mode_is_explicit_and_mutually_exclusive(self) -> None:
+        self.assertIsNone(runtime_config._load_data_probe_configuration({}))
+        base = {
+            "cez_data_probe_mode": True,
+            "cez_data_probe_date": "2026-09-08",
+            "cez_username": "private-user",
+            "cez_password": "private-password",
+        }
+        loaded = runtime_config._load_data_probe_configuration(base)
+        self.assertEqual(loaded.probe_date, date(2026, 9, 8))
+        for other in (
+            "cez_discovery_mode",
+            "cez_http_auth_discovery_mode",
+            "cez_requests_preauth_compatibility_mode",
+        ):
+            with self.subTest(other=other), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._validate_discovery_modes({**base, other: True})
+            self.assertEqual(raised.exception.code, "discovery_config_conflicting_modes")
+
+    def test_invalid_or_missing_probe_date_fails_closed(self) -> None:
+        base = {
+            "cez_data_probe_mode": True,
+            "cez_username": "private-user",
+            "cez_password": "private-password",
+        }
+        for value, code in (
+            (None, "data_probe_config_missing_date"),
+            ("08.09.2026", "data_probe_config_invalid_date"),
+            ("2026-09-08 ", "data_probe_config_invalid_date"),
+            ("2026-02-30", "data_probe_config_invalid_date"),
+        ):
+            options = dict(base)
+            if value is not None:
+                options["cez_data_probe_date"] = value
+            with self.subTest(value=value), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._load_data_probe_configuration(options)
+            self.assertEqual(raised.exception.code, code)
+
+    def test_same_authenticated_session_fetches_metadata_and_both_exports(self) -> None:
+        session = _successful_session()
+        transport = requests_preauth.RequestsSessionTransport(
+            resolver=_resolver, session_factory=lambda: session
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            result = cez_data_probe.run_data_probe(
+                _configuration(),
+                transport,
+                resolver=transport.resolve,
+                output_directory=output,
+                emit=events.append,
+            )
+            self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
+            self.assertEqual(len(session.calls), 7)
+            self.assertEqual(session.calls[4][1], cez_http_auth.CEZ_PND_DASHBOARD_DATA_URL)
+            export_calls = session.calls[5:]
+            self.assertTrue(all(urlsplit(call[1]).path == "/cezpnd2/external/data/export" for call in export_calls))
+            queries = [parse_qs(urlsplit(call[1]).query) for call in export_calls]
+            self.assertEqual([query["idAssembly"] for query in queries], [["-1001"], ["-1002"]])
+            for query in queries:
+                self.assertEqual(query["format"], ["csv"])
+                self.assertEqual(query["intervalFrom"], ["08.09.2026 00:00"])
+                self.assertEqual(query["intervalTo"], ["09.09.2026 00:00"])
+                self.assertEqual(query["idDeviceSet"], ["secret-device"])
+                self.assertEqual(query["electrometerId"], ["secret-elm"])
+            self.assertEqual((output / cez_data_probe.CONSUMPTION_NAME).read_bytes(), CONSUMPTION)
+            self.assertEqual((output / cez_data_probe.PRODUCTION_NAME).read_bytes(), PRODUCTION)
+            summary = json.loads((output / cez_data_probe.METADATA_SUMMARY_NAME).read_text())
+            self.assertEqual(
+                summary,
+                {
+                    "schema_version": "1",
+                    "dashboard_json_object": True,
+                    "id_device_set_present": True,
+                    "meter_collection_present": True,
+                    "consumption_bytes": len(CONSUMPTION),
+                    "production_bytes": len(PRODUCTION),
+                },
+            )
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
+                for name in (
+                    cez_data_probe.METADATA_SUMMARY_NAME,
+                    cez_data_probe.CONSUMPTION_NAME,
+                    cez_data_probe.PRODUCTION_NAME,
+                ):
+                    self.assertEqual(
+                        stat.S_IMODE((output / name).stat().st_mode), 0o600
+                    )
+        self.assertTrue(session.closed)
+        self.assertTrue(session.cookies.cleared)
+        rendered = repr([event.as_dict() for event in events])
+        for secret in (
+            "private-user",
+            "private-password",
+            "secret-device",
+            "secret-elm",
+            "private-consumption-csv",
+            "private-production-csv",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertEqual(
+            [event.event for event in events[-6:]],
+            [
+                "authenticated",
+                "dashboard_metadata_verified",
+                "consumption_export_received",
+                "production_export_received",
+                "data_probe_complete",
+                "http_auth_cleanup_complete",
+            ],
+        )
+
+    def test_optional_identifiers_are_omitted(self) -> None:
+        client = _ProbeClient(
+            [
+                _http_response(200, b"{}"),
+                _http_response(200, b"csv\n", "text/plain"),
+                _http_response(200, b"csv\n", "text/plain"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            cez_data_probe.CezDataProbe(
+                _configuration(None), output_directory=Path(temporary) / "probe"
+            ).collect(client)  # type: ignore[arg-type]
+        for url, _, _ in client.calls[1:]:
+            query = parse_qs(urlsplit(url).query)
+            self.assertNotIn("idDeviceSet", query)
+            self.assertNotIn("electrometerId", query)
+
+    def test_invalid_metadata_is_rejected(self) -> None:
+        for body in (b"not-json", b"[]"):
+            client = _ProbeClient([_http_response(200, body)])
+            with self.subTest(body=body), self.assertRaises(
+                cez_http_auth._AuthFailure
+            ) as raised:
+                cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
+            self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+
+    def test_configured_elm_must_be_confirmed_by_metadata(self) -> None:
+        client = _ProbeClient([_http_response(200, b'{"meters":[]}')])
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_data_probe.CezDataProbe(_configuration()).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_metadata_invalid")
+
+    def test_metadata_and_export_redirects_fail_closed(self) -> None:
+        redirect = cez_http_auth.HttpResponse(
+            302, (("Location", cez_http_auth.CEZ_PND_START_URL),), b""
+        )
+        client = _ProbeClient([redirect])
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_metadata_failed")
+
+        client = _ProbeClient([_http_response(200, b"{}"), redirect])
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_consumption_export_failed")
+
+        client = _ProbeClient(
+            [
+                _http_response(200, b"{}"),
+                _http_response(200, b"csv\n", "text/csv"),
+                redirect,
+            ]
+        )
+        with self.assertRaises(cez_http_auth._AuthFailure) as raised:
+            cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.code, "data_probe_production_export_failed")
+
+    def test_html_empty_and_oversized_exports_are_rejected(self) -> None:
+        cases = (
+            _http_response(200, b"", "text/csv"),
+            _http_response(200, b"<html><form></form></html>", "text/html"),
+            _http_response(
+                200,
+                b"x" * (cez_http_auth.MAX_RESPONSE_BODY_BYTES + 1),
+                "text/csv",
+            ),
+        )
+        for response in cases:
+            client = _ProbeClient([_http_response(200, b"{}"), response])
+            with self.subTest(size=len(response.body)), self.assertRaises(
+                cez_http_auth._AuthFailure
+            ) as raised:
+                cez_data_probe.CezDataProbe(_configuration(None)).collect(client)  # type: ignore[arg-type]
+            self.assertEqual(
+                raised.exception.code, "data_probe_consumption_export_failed"
+            )
+
+    def test_atomic_writes_overwrite_without_accumulating_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "probe"
+            output.mkdir()
+            (output / cez_data_probe.CONSUMPTION_NAME).write_bytes(b"old")
+            probe = cez_data_probe.CezDataProbe(
+                _configuration(None), output_directory=output
+            )
+            probe._store(b"{}", b"new-consumption", b"new-production")
+            probe._store(b"{}", b"newer-consumption", b"newer-production")
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {
+                    cez_data_probe.METADATA_SUMMARY_NAME,
+                    cez_data_probe.CONSUMPTION_NAME,
+                    cez_data_probe.PRODUCTION_NAME,
+                },
+            )
+            self.assertEqual(
+                (output / cez_data_probe.CONSUMPTION_NAME).read_bytes(),
+                b"newer-consumption",
+            )
+
+    def test_exact_probe_destination_contract_rejects_subpaths(self) -> None:
+        for state, url in (
+            (
+                cez_http_auth.AuthState.DATA_PROBE_METADATA,
+                cez_http_auth.CEZ_PND_DASHBOARD_DATA_URL + "/extra",
+            ),
+            (
+                cez_http_auth.AuthState.DATA_PROBE_EXPORT,
+                cez_data_probe.CEZ_PND_EXPORT_URL + "/extra",
+            ),
+        ):
+            with self.subTest(state=state), self.assertRaises(
+                cez_http_auth._AuthFailure
+            ) as raised:
+                cez_http_auth.validate_destination(url, state, "GET", _resolver)
+            self.assertEqual(raised.exception.code, "auth_destination_rejected")
+
+    def test_storage_failure_is_fail_closed_and_session_is_cleaned(self) -> None:
+        session = _successful_session()
+        transport = requests_preauth.RequestsSessionTransport(
+            resolver=_resolver, session_factory=lambda: session
+        )
+        with mock.patch.object(
+            cez_data_probe.CezDataProbe, "_store", side_effect=OSError("private")
+        ):
+            result = cez_data_probe.run_data_probe(
+                _configuration(), transport, resolver=transport.resolve
+            )
+        self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
+        self.assertEqual(result.code, "data_probe_storage_failed")
+        self.assertTrue(session.closed)
+        self.assertTrue(session.cookies.cleared)
+
+    def test_server_selects_explicit_data_probe_mode(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            requests_preauth_compatibility=False,
+            data_probe=_configuration(),
+            http_auth_discovery=None,
+        )
+        result = cez_http_auth.AuthResult(
+            cez_http_auth.AuthStatus.AUTHENTICATED,
+            "auth_authenticated_endpoint_verified",
+        )
+        fake_transport = mock.Mock()
+        fake_transport.resolve = mock.Mock()
+        output = io.StringIO()
+        with mock.patch.object(
+            server.os, "geteuid", return_value=2000, create=True
+        ), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch(
+            "collector_service.requests_preauth.RequestsSessionTransport",
+            return_value=fake_transport,
+        ), mock.patch(
+            "collector_service.cez_data_probe.run_data_probe", return_value=result
+        ) as run, mock.patch(
+            "sys.stdout", output
+        ):
+            self.assertEqual(server.main(), 0)
+        run.assert_called_once_with(
+            configuration.data_probe,
+            fake_transport,
+            resolver=fake_transport.resolve,
+            emit=cez_http_auth.emit_json_event,
+        )
+        self.assertEqual(json.loads(output.getvalue())["event"], "http_auth_result")
+
+
+if __name__ == "__main__":
+    unittest.main()
