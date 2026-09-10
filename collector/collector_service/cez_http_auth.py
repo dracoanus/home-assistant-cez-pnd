@@ -82,6 +82,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "consumption_export_received",
         "production_export_received",
         "data_probe_export_response_observed",
+        "data_probe_meter_selection_observed",
         "data_probe_complete",
         "data_probe_failed",
         "auth_state_needs_live_verification",
@@ -229,6 +230,48 @@ class DataProbeExportObservation:
 
 
 @dataclass(frozen=True)
+class DataProbeMeterSelectionObservation:
+    """Non-secret structural evidence for deterministic meter selection."""
+
+    meter_response_status: int
+    json_root_type: str
+    meter_count: int
+    matches_by_ean: int
+    matches_by_elm: int
+    selection_mode: str
+
+    def __post_init__(self) -> None:
+        if not 100 <= self.meter_response_status <= 599:
+            raise ValueError("unsafe meter response status")
+        if self.json_root_type not in _JSON_TYPE_NAMES:
+            raise ValueError("unsafe meter response root type")
+        if any(
+            not 0 <= value <= MAX_RESPONSE_BODY_BYTES
+            for value in (self.meter_count, self.matches_by_ean, self.matches_by_elm)
+        ):
+            raise ValueError("unsafe meter selection count")
+        if self.selection_mode not in {
+            "both",
+            "ean_only",
+            "elm_only",
+            "mismatch",
+            "ambiguous",
+            "none",
+        }:
+            raise ValueError("unsafe meter selection mode")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "meter_response_status": self.meter_response_status,
+            "json_root_type": self.json_root_type,
+            "meter_count": self.meter_count,
+            "matches_by_ean": self.matches_by_ean,
+            "matches_by_elm": self.matches_by_elm,
+            "selection_mode": self.selection_mode,
+        }
+
+
+@dataclass(frozen=True)
 class SafeHttpAuthEvent:
     event: str
     hostname: str | None = None
@@ -241,13 +284,29 @@ class SafeHttpAuthEvent:
     export_observation: DataProbeExportObservation | None = field(
         default=None, repr=False
     )
+    meter_selection_observation: DataProbeMeterSelectionObservation | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "data_probe_export_response_observed":
+        if self.event == "data_probe_meter_selection_observed":
+            if (
+                self.hostname is not None
+                or self.status is not None
+                or self.code is not None
+                or self.metadata_observation is not None
+                or self.json_root_type is not None
+                or self.export_observation is not None
+                or self.meter_selection_observation is None
+            ):
+                raise ValueError("invalid meter selection observation event")
+        elif self.meter_selection_observation is not None:
+            raise ValueError("unexpected meter selection observation")
+        elif self.event == "data_probe_export_response_observed":
             if (
                 self.hostname is not None
                 or self.status is not None
@@ -304,6 +363,8 @@ class SafeHttpAuthEvent:
             result["json_root_type"] = self.json_root_type
         if self.export_observation is not None:
             result.update(self.export_observation.as_dict())
+        if self.meter_selection_observation is not None:
+            result.update(self.meter_selection_observation.as_dict())
         return result
 
 
@@ -352,6 +413,10 @@ SAFE_ERROR_CODES = frozenset(
         "data_probe_metadata_id_device_set_invalid",
         "data_probe_metadata_meter_collection_invalid",
         "data_probe_metadata_configured_elm_not_found",
+        "data_probe_meter_identity_required",
+        "data_probe_meter_not_found",
+        "data_probe_meter_selection_ambiguous",
+        "data_probe_meter_identity_mismatch",
         "data_probe_consumption_export_failed",
         "data_probe_production_export_failed",
         "data_probe_consumption_export_status_failed",

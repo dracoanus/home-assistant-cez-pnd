@@ -337,10 +337,10 @@ for metadata_diagnostic_code in (
     "data_probe_metadata_json_invalid",
     "data_probe_metadata_id_device_set_invalid",
     "data_probe_metadata_meter_collection_invalid",
-    "data_probe_metadata_configured_elm_not_found",
 ):
     assert metadata_diagnostic_code in HTTP_AUTH_SOURCE
     assert metadata_diagnostic_code in DATA_PROBE_SOURCE
+assert '"data_probe_metadata_configured_elm_not_found"' in HTTP_AUTH_SOURCE
 assert "class DashboardMetadataObservation" in HTTP_AUTH_SOURCE
 assert 'key != "[redacted-key]"' in HTTP_AUTH_SOURCE
 assert "len(self.top_level_keys) > 50" in HTTP_AUTH_SOURCE
@@ -350,8 +350,35 @@ assert 'CEZ_PND_METERS_URL = (' in DATA_PROBE_SOURCE
 assert '"https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"' in DATA_PROBE_SOURCE
 assert "AuthState.DATA_PROBE_METERS" in HTTP_AUTH_SOURCE
 assert "AuthState.DATA_PROBE_METERS" in DATA_PROBE_SOURCE
-assert "return _Metadata(None, False, False, False), observation" in DATA_PROBE_SOURCE
+assert "return _Metadata(None, False, False, ()), observation" in DATA_PROBE_SOURCE
 assert '"data_probe_metadata_root_invalid"' in HTTP_AUTH_SOURCE
+assert '"data_probe_meter_selection_observed"' in HTTP_AUTH_SOURCE
+assert "class DataProbeMeterSelectionObservation" in HTTP_AUTH_SOURCE
+for meter_failure_code in (
+    "data_probe_meter_identity_required",
+    "data_probe_meter_not_found",
+    "data_probe_meter_selection_ambiguous",
+    "data_probe_meter_identity_mismatch",
+):
+    assert meter_failure_code in HTTP_AUTH_SOURCE
+    assert meter_failure_code in DATA_PROBE_SOURCE
+assert 'entry.get("ean")' in DATA_PROBE_SOURCE
+assert 'entry.get("elm")' in DATA_PROBE_SOURCE
+assert 'parameters.append(("electrometerId", verified_elm))' in DATA_PROBE_SOURCE
+assert 'parameters.append(("ean"' not in DATA_PROBE_SOURCE
+assert "ean: str | None = field(default=None, repr=False)" in RUNTIME_CONFIG_SOURCE
+assert "len(raw_ean) != 18" in RUNTIME_CONFIG_SOURCE
+assert "not raw_ean.isascii()" in RUNTIME_CONFIG_SOURCE
+assert "not raw_ean.isdigit()" in RUNTIME_CONFIG_SOURCE
+for safe_meter_field in (
+    "meter_response_status",
+    "json_root_type",
+    "meter_count",
+    "matches_by_ean",
+    "matches_by_elm",
+    "selection_mode",
+):
+    assert safe_meter_field in HTTP_AUTH_SOURCE
 assert '"data_probe_export_response_observed"' in HTTP_AUTH_SOURCE
 assert "class DataProbeExportObservation" in HTTP_AUTH_SOURCE
 assert 'headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL}' in DATA_PROBE_SOURCE
@@ -528,6 +555,8 @@ assert "  cez_data_probe_mode: false" in APP_MANIFEST
 assert "  cez_data_probe_mode: bool" in APP_MANIFEST
 assert "  cez_data_probe_date: null" in APP_MANIFEST
 assert "  cez_data_probe_date: str?" in APP_MANIFEST
+assert "  cez_ean: null" in APP_MANIFEST
+assert "  cez_ean: password?" in APP_MANIFEST
 assert "  cez_elm: password?" in APP_MANIFEST
 assert "  cez_allowed_origins: []" in APP_MANIFEST
 assert "  cez_start_url: url?" in APP_MANIFEST

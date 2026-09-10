@@ -44,6 +44,8 @@ options:
   cez_requests_preauth_compatibility_mode: false
   cez_data_probe_mode: false
   cez_data_probe_date: null
+  cez_ean: null
+  cez_elm: null
   cez_allowed_origins: []
 schema:
   meter_id: "match(^mtr_[a-f0-9]{32}$)"
@@ -61,4 +63,5 @@ schema:
     - url
   cez_username: password?
   cez_password: password?
+  cez_ean: password?
   cez_elm: password?
