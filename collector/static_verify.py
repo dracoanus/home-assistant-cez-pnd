@@ -335,7 +335,6 @@ for metadata_diagnostic_code in (
     "data_probe_metadata_content_type_invalid",
     "data_probe_metadata_utf8_invalid",
     "data_probe_metadata_json_invalid",
-    "data_probe_metadata_root_invalid",
     "data_probe_metadata_id_device_set_invalid",
     "data_probe_metadata_meter_collection_invalid",
     "data_probe_metadata_configured_elm_not_found",
