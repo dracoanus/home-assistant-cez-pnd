@@ -59,6 +59,14 @@ class IntegrationStructureTests(unittest.TestCase):
         )
         self.assertNotIn("username", source.lower())
 
+    def test_polling_options_reload_without_collector_permissions(self) -> None:
+        flow = (INTEGRATION / "config_flow.py").read_text(encoding="utf-8")
+        setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("class CezPndOptionsFlow", flow)
+        self.assertIn("CONF_POLL_INTERVAL_SECONDS", flow)
+        self.assertIn("entry.add_update_listener(_async_update_listener)", setup)
+        self.assertIn("async_reload(entry.entry_id)", setup)
+
     def test_required_entities_and_missing_semantics(self) -> None:
         source = (INTEGRATION / "sensor.py").read_text(encoding="utf-8")
         for key in (
