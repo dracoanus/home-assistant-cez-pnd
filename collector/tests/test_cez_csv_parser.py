@@ -199,6 +199,53 @@ class CezCsvParserTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "csv_status_invalid")
 
+    def test_current_day_unknown_zero_is_missing_but_measured_zero_is_valid(self) -> None:
+        rows = list(csv.reader(
+            io.StringIO(
+                _complete_day(date(2026, 9, 11), PndChannel.CONSUMPTION).decode(
+                    "utf-8"
+                )
+            ),
+            delimiter=";",
+        ))
+        rows[1][2] = "0"
+        rows[1][-1] = "naměřená data OK"
+        for row in rows[67:]:
+            row[2] = "0"
+            row[-1] = "neznámá hodnota"
+        parsed = parse_pnd_csv(
+            _csv_bytes(rows),
+            channel=PndChannel.CONSUMPTION,
+        )
+        measured = parsed.intervals[0]
+        unpublished = parsed.intervals[66]
+        self.assertEqual(measured.quality, IntervalQuality.VALID)
+        self.assertEqual(measured.value_kwh, Decimal(0))
+        self.assertEqual(unpublished.quality, IntervalQuality.MISSING)
+        self.assertIsNone(unpublished.value_kwh)
+        self.assertEqual(len(parsed.intervals), 96)
+        self.assertEqual(parsed.valid_count, 66)
+        self.assertEqual(parsed.missing_count, 30)
+        self.assertFalse(parsed.complete)
+
+    def test_partial_current_day_retains_dst_grid_validation(self) -> None:
+        for day, expected in (
+            (date(2026, 3, 29), 92),
+            (date(2026, 1, 1), 96),
+            (date(2026, 10, 25), 100),
+        ):
+            statuses = (*("OK" for _ in range(expected - 1)), "neznámá hodnota")
+            with self.subTest(day=day):
+                parsed = parse_pnd_csv(
+                    _complete_day_with_statuses(
+                        day, PndChannel.CONSUMPTION, statuses
+                    ),
+                    channel=PndChannel.CONSUMPTION,
+                )
+                self.assertEqual(len(parsed.intervals), expected)
+                self.assertEqual(parsed.valid_count, expected - 1)
+                self.assertEqual(parsed.missing_count, 1)
+
     def test_complete_day_accepts_mixed_official_cez_statuses(self) -> None:
         statuses = (
             *("naměřená data OK" for _ in range(76)),

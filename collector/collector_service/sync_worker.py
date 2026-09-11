@@ -1,10 +1,11 @@
-"""Bounded background synchronization for the latest completed CEZ day."""
+"""Bounded background synchronization for completed and current CEZ days."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 import threading
+import time
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -23,7 +24,8 @@ from .structured_logging import structured_event_json
 
 
 PRAGUE_TIMEZONE = ZoneInfo("Europe/Prague")
-SYNC_INTERVAL_SECONDS = 6 * 60 * 60
+CURRENT_DAY_SYNC_INTERVAL_SECONDS = 60 * 60
+HISTORICAL_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 BACKFILL_CHUNK_DAYS = 31
 BACKFILL_MAX_CHUNKS_PER_CYCLE = 2
 CORRECTION_OVERLAP_DAYS = 3
@@ -41,6 +43,9 @@ SYNC_EVENTS = frozenset(
         "backfill_chunk_succeeded",
         "backfill_chunk_failed",
         "backfill_complete",
+        "current_day_sync_started",
+        "current_day_sync_succeeded",
+        "current_day_sync_failed",
     }
 )
 SYNC_FAILURE_CODES = SAFE_ERROR_CODES | frozenset(
@@ -77,6 +82,7 @@ class SafeSyncEvent:
     committed: DataProbeDatasetCommittedObservation | None = None
     start_day: date | None = None
     end_day: date | None = None
+    local_day: date | None = None
 
     def __post_init__(self) -> None:
         if self.event not in SYNC_EVENTS:
@@ -86,12 +92,43 @@ class SafeSyncEvent:
             for value in (self.start_day, self.end_day)
         ):
             raise ValueError("unsafe sync event date")
+        if self.local_day is not None and type(self.local_day) is not date:
+            raise ValueError("unsafe current-day event date")
         if self.start_day is not None and self.end_day is not None and (
             self.start_day >= self.end_day
             or self.end_day - self.start_day > timedelta(days=BACKFILL_CHUNK_DAYS)
         ):
             raise ValueError("unsafe sync event range")
-        if self.event == "sync_cycle_failed":
+        if self.event == "current_day_sync_started":
+            if (
+                self.local_day is None
+                or self.code is not None
+                or self.committed is not None
+                or self.start_day is not None
+                or self.end_day is not None
+            ):
+                raise ValueError("invalid current-day started event")
+        elif self.event == "current_day_sync_succeeded":
+            if (
+                self.local_day is None
+                or self.code is not None
+                or self.committed is None
+                or self.start_day is not None
+                or self.end_day is not None
+            ):
+                raise ValueError("invalid current-day succeeded event")
+        elif self.event == "current_day_sync_failed":
+            if (
+                self.local_day is None
+                or self.code not in SYNC_FAILURE_CODES
+                or self.committed is not None
+                or self.start_day is not None
+                or self.end_day is not None
+            ):
+                raise ValueError("invalid current-day failed event")
+        elif self.local_day is not None:
+            raise ValueError("unexpected current-day event date")
+        elif self.event == "sync_cycle_failed":
             if (
                 self.code not in SYNC_FAILURE_CODES
                 or self.committed is not None
@@ -143,6 +180,7 @@ class SafeSyncEvent:
             or self.committed is not None
             or self.start_day is not None
             or self.end_day is not None
+            or self.local_day is not None
         ):
             raise ValueError("unexpected sync event fields")
 
@@ -154,14 +192,19 @@ class SafeSyncEvent:
             fields["start_day"] = self.start_day.isoformat()
         if self.end_day is not None:
             fields["end_day"] = self.end_day.isoformat()
+        if self.local_day is not None:
+            fields["local_day"] = self.local_day.isoformat()
         if self.committed is not None:
-            fields.update(
-                {
-                    "consumption_intervals": self.committed.consumption_intervals,
-                    "production_intervals": self.committed.production_intervals,
-                    "dataset_state": self.committed.dataset_state,
-                }
-            )
+            if self.event == "current_day_sync_succeeded":
+                fields.update(self.committed.as_dict())
+            else:
+                fields.update(
+                    {
+                        "consumption_intervals": self.committed.consumption_intervals,
+                        "production_intervals": self.committed.production_intervals,
+                        "dataset_state": self.committed.dataset_state,
+                    }
+                )
         return fields
 
 
@@ -217,18 +260,29 @@ class SyncWorker:
         *,
         store: NormalizedDatasetStore,
         cycle: Callable[[SyncConfiguration, date, date], SyncCycleOutcome] | None = None,
+        current_day_cycle: Callable[
+            [SyncConfiguration, date, date], SyncCycleOutcome
+        ]
+        | None = None,
         emit: Callable[[SafeSyncEvent], None] = emit_sync_event,
         now_local: Callable[[], datetime] = lambda: datetime.now(PRAGUE_TIMEZONE),
-        interval_seconds: float = SYNC_INTERVAL_SECONDS,
+        interval_seconds: float = CURRENT_DAY_SYNC_INTERVAL_SECONDS,
+        historical_interval_seconds: float = HISTORICAL_SYNC_INTERVAL_SECONDS,
         initial_delay_seconds: float = INITIAL_SYNC_DELAY_SECONDS,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._configuration = configuration
         self._store = store
         self._cycle = cycle or self._default_cycle
+        self._current_day_cycle = (
+            current_day_cycle or cycle or self._default_current_day_cycle
+        )
         self._emit = emit
         self._now_local = now_local
         self._interval_seconds = interval_seconds
+        self._historical_interval_seconds = historical_interval_seconds
         self._initial_delay_seconds = initial_delay_seconds
+        self._monotonic_clock = monotonic_clock
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -256,6 +310,43 @@ class SyncWorker:
         return run_sync_cycle(
             configuration, start_day, end_day, store=self._store
         )
+
+    def _default_current_day_cycle(
+        self, configuration: SyncConfiguration, start_day: date, end_day: date
+    ) -> SyncCycleOutcome:
+        return run_sync_cycle(
+            configuration, start_day, end_day, store=self._store
+        )
+
+    def _scheduled_current_day(self, current_day: date) -> SyncCycleOutcome:
+        self._emit(
+            SafeSyncEvent("current_day_sync_started", local_day=current_day)
+        )
+        try:
+            outcome = self._current_day_cycle(
+                self._configuration,
+                current_day,
+                current_day + timedelta(days=1),
+            )
+        except Exception:
+            outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        if outcome.succeeded:
+            self._emit(
+                SafeSyncEvent(
+                    "current_day_sync_succeeded",
+                    committed=outcome.committed,
+                    local_day=current_day,
+                )
+            )
+        else:
+            self._emit(
+                SafeSyncEvent(
+                    "current_day_sync_failed",
+                    code=outcome.code,
+                    local_day=current_day,
+                )
+            )
+        return outcome
 
     def _scheduled_cycle(self, latest_completed_day: date) -> SyncCycleOutcome:
         history_start = self._configuration.history_start
@@ -346,21 +437,34 @@ class SyncWorker:
 
     def _run(self) -> None:
         self._emit(SafeSyncEvent("sync_worker_started"))
+        next_historical_at: float | None = None
         try:
             if self._stop_event.wait(self._initial_delay_seconds):
                 return
             while not self._stop_event.is_set():
-                latest_completed_day = (
-                    self._now_local().astimezone(PRAGUE_TIMEZONE).date()
-                    - timedelta(days=1)
-                )
+                current_day = self._now_local().astimezone(PRAGUE_TIMEZONE).date()
+                latest_completed_day = current_day - timedelta(days=1)
                 self._emit(SafeSyncEvent("sync_cycle_started"))
-                try:
-                    outcome = self._scheduled_cycle(latest_completed_day)
-                except Exception:
-                    outcome = SyncCycleOutcome(
-                        False, code="sync_cycle_internal_failed"
+                wake_started = self._monotonic_clock()
+                historical_outcome: SyncCycleOutcome | None = None
+                if next_historical_at is None or wake_started >= next_historical_at:
+                    next_historical_at = (
+                        wake_started + self._historical_interval_seconds
                     )
+                    try:
+                        historical_outcome = self._scheduled_cycle(
+                            latest_completed_day
+                        )
+                    except Exception:
+                        historical_outcome = SyncCycleOutcome(
+                            False, code="sync_cycle_internal_failed"
+                        )
+                current_outcome = self._scheduled_current_day(current_day)
+                outcome = (
+                    current_outcome
+                    if historical_outcome is None or historical_outcome.succeeded
+                    else historical_outcome
+                )
                 if outcome.succeeded:
                     self._emit(
                         SafeSyncEvent(

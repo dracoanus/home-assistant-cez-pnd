@@ -247,6 +247,51 @@ class StatisticsTests(unittest.IsolatedAsyncioTestCase):
         first_end = datetime.fromisoformat(client.ranges[0][1].replace("Z", "+00:00"))
         self.assertEqual(first_end - first_start, timedelta(days=60))
 
+    async def test_full_history_includes_current_day_future_missing_rows(self) -> None:
+        status = _status(expected=8)
+        status.data_timestamp = datetime(2026, 9, 11, 12, tzinfo=UTC)
+        status.last_success = datetime(2026, 9, 11, 13, tzinfo=UTC)
+        valid_hour = _hour(datetime(2026, 9, 11, 11, tzinfo=UTC))
+        future_missing = tuple(
+            _measurement(
+                datetime(2026, 9, 11, 20, tzinfo=UTC)
+                + timedelta(minutes=15 * index),
+                value=None,
+                quality="missing",
+            )
+            for index in range(4)
+        )
+        client = _Client(
+            status, [_page(status, 8, (*valid_hour, *future_missing))]
+        )
+        manager = statistics.CezPndStatisticsManager(object(), _Entry(), client)
+        hourly = await manager._async_full_history(status)
+        self.assertEqual(client.ranges[0][1], "2026-09-11T22:00:00Z")
+        self.assertEqual(
+            hourly["grid_import"],
+            {datetime(2026, 9, 11, 11, tzinfo=UTC): Decimal(4)},
+        )
+
+    def test_full_history_upper_bound_uses_prague_dst_midnight(self) -> None:
+        cases = (
+            (
+                datetime(2026, 3, 29, 12, tzinfo=UTC),
+                datetime(2026, 3, 29, 22, tzinfo=UTC),
+            ),
+            (
+                datetime(2026, 10, 25, 12, tzinfo=UTC),
+                datetime(2026, 10, 25, 23, tzinfo=UTC),
+            ),
+        )
+        for last_success, expected in cases:
+            with self.subTest(last_success=last_success):
+                status = _status()
+                status.data_timestamp = last_success
+                status.last_success = last_success
+                self.assertEqual(
+                    statistics._full_history_upper_bound(status), expected
+                )
+
     async def test_history_stops_exactly_at_global_count_and_rejects_overcount(
         self,
     ) -> None:

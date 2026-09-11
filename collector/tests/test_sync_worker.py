@@ -44,6 +44,12 @@ def _committed() -> DataProbeDatasetCommittedObservation:
     )
 
 
+def _partial_committed() -> DataProbeDatasetCommittedObservation:
+    return DataProbeDatasetCommittedObservation(
+        96, 64, 32, 0, 96, 64, 32, 0, "partial"
+    )
+
+
 def _parsed(channel: PndChannel, value: str = "1") -> ParsedPndData:
     start = datetime(2026, 9, 10, tzinfo=UTC)
     return ParsedPndData(
@@ -139,12 +145,105 @@ class SyncWorkerTests(unittest.TestCase):
         release.set()
         time.sleep(0.04)
         self.assertTrue(worker.stop(1.0))
-        self.assertGreaterEqual(len(days), 1)
-        self.assertTrue(all(day == date(2026, 3, 28) for day in days))
+        self.assertGreaterEqual(len(days), 2)
+        self.assertEqual(set(days), {date(2026, 3, 28), date(2026, 3, 29)})
         self.assertEqual(maximum_active, 1)
-        self.assertEqual(sync_worker.SYNC_INTERVAL_SECONDS, 6 * 60 * 60)
+        self.assertEqual(
+            sync_worker.CURRENT_DAY_SYNC_INTERVAL_SECONDS, 60 * 60
+        )
+        self.assertEqual(
+            sync_worker.HISTORICAL_SYNC_INTERVAL_SECONDS, 6 * 60 * 60
+        )
         self.assertEqual(events[0].event, "sync_worker_started")
         self.assertEqual(events[-1].event, "sync_worker_stopped")
+
+    def test_hourly_wakes_run_current_day_and_historical_only_every_six_hours(
+        self,
+    ) -> None:
+        historical_days: list[date] = []
+        current_days: list[date] = []
+        clock = iter(float(hour * 60 * 60) for hour in range(7))
+
+        def historical(_configuration, start_day, _end_day):
+            historical_days.append(start_day)
+            return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+        def current(_configuration, start_day, _end_day):
+            current_days.append(start_day)
+            if len(current_days) == 7:
+                worker._stop_event.set()
+            return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+        fixed = datetime(2026, 9, 11, 12, tzinfo=sync_worker.PRAGUE_TIMEZONE)
+        worker = sync_worker.SyncWorker(
+            _configuration(),
+            store=mock.Mock(),
+            cycle=historical,
+            current_day_cycle=current,
+            emit=lambda _event: None,
+            now_local=lambda: fixed,
+            interval_seconds=0.001,
+            historical_interval_seconds=6 * 60 * 60,
+            monotonic_clock=clock.__next__,
+        )
+        worker._run()
+        self.assertEqual(current_days, [date(2026, 9, 11)] * 7)
+        self.assertEqual(historical_days, [date(2026, 9, 10)] * 2)
+
+    def test_current_day_cycle_retains_complete_grid_validation(self) -> None:
+        store = mock.Mock()
+        with mock.patch.object(
+            sync_worker,
+            "run_sync_cycle",
+            return_value=sync_worker.SyncCycleOutcome(
+                True, committed=_committed()
+            ),
+        ) as cycle:
+            worker = sync_worker.SyncWorker(
+                _configuration(),
+                store=store,
+            )
+            outcome = worker._default_current_day_cycle(
+                _configuration(), date(2026, 9, 11), date(2026, 9, 12)
+            )
+        self.assertTrue(outcome.succeeded)
+        self.assertNotIn("require_complete_days", cycle.call_args.kwargs)
+
+    def test_current_day_events_are_bounded_and_secret_free(self) -> None:
+        event = sync_worker.SafeSyncEvent(
+            "current_day_sync_succeeded",
+            committed=_committed(),
+            local_day=date(2026, 9, 11),
+        )
+        payload = event.as_dict()
+        self.assertEqual(payload["local_day"], "2026-09-11")
+        self.assertEqual(payload["consumption_valid"], 96)
+        self.assertEqual(payload["production_missing"], 0)
+        self.assertNotIn("code", payload)
+        with self.assertRaises(ValueError):
+            sync_worker.SafeSyncEvent(
+                "current_day_sync_failed",
+                code="arbitrary",
+                local_day=date(2026, 9, 11),
+            )
+
+    def test_partial_current_day_is_a_successful_sync(self) -> None:
+        events: list[sync_worker.SafeSyncEvent] = []
+        worker = sync_worker.SyncWorker(
+            _configuration(),
+            store=mock.Mock(),
+            current_day_cycle=lambda *_args: sync_worker.SyncCycleOutcome(
+                True, committed=_partial_committed()
+            ),
+            emit=events.append,
+        )
+        outcome = worker._scheduled_current_day(date(2026, 9, 11))
+        self.assertTrue(outcome.succeeded)
+        succeeded = events[-1].as_dict()
+        self.assertEqual(succeeded["event"], "current_day_sync_succeeded")
+        self.assertEqual(succeeded["dataset_state"], "partial")
+        self.assertEqual(succeeded["consumption_missing"], 32)
+        self.assertEqual(succeeded["production_missing"], 32)
 
     def test_cycle_failure_is_contained_and_event_is_secret_free(self) -> None:
         private_values = (
@@ -350,6 +449,75 @@ class SyncWorkerTests(unittest.TestCase):
             event for event in events if event.event == "backfill_chunk_failed"
         )
         self.assertEqual(failure.code, "data_probe_auth_failed")
+
+    def test_current_day_failure_preserves_successful_backfill_checkpoint(self) -> None:
+        events: list[sync_worker.SafeSyncEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def historical(_configuration, _start_day, _end_day):
+                return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+            def current(_configuration, _start_day, _end_day):
+                return sync_worker.SyncCycleOutcome(
+                    False, code="data_probe_auth_failed"
+                )
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2025, 1, 1)),
+                store=store,
+                cycle=historical,
+                current_day_cycle=current,
+                emit=events.append,
+            )
+            historical_outcome = worker._scheduled_cycle(date(2025, 3, 10))
+            checkpoint = store.read_sync_state()
+            current_outcome = worker._scheduled_current_day(date(2025, 3, 11))
+        self.assertTrue(historical_outcome.succeeded)
+        self.assertFalse(current_outcome.succeeded)
+        self.assertEqual(checkpoint.backfill_next_day, date(2025, 3, 4))
+        self.assertEqual(
+            [event.event for event in events][-2:],
+            ["current_day_sync_started", "current_day_sync_failed"],
+        )
+
+    def test_historical_failure_does_not_corrupt_current_day_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def historical(_configuration, _start_day, _end_day):
+                return sync_worker.SyncCycleOutcome(
+                    False, code="data_probe_auth_failed"
+                )
+
+            def current(_configuration, _start_day, _end_day):
+                committed_at = datetime(2026, 9, 11, 12, tzinfo=UTC)
+                store.commit_dataset(
+                    _parsed(PndChannel.CONSUMPTION, "2"),
+                    _parsed(PndChannel.PRODUCTION, "0"),
+                    collected_at=committed_at,
+                )
+                return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2025, 1, 1)),
+                store=store,
+                cycle=historical,
+                current_day_cycle=current,
+                emit=lambda _event: None,
+            )
+            historical_outcome = worker._scheduled_cycle(date(2026, 9, 10))
+            current_outcome = worker._scheduled_current_day(date(2026, 9, 11))
+            rows = store.read_measurements(
+                "2026-09-10T00:00:00Z", "2026-09-10T01:00:00Z", limit=10
+            ).rows
+        self.assertFalse(historical_outcome.succeeded)
+        self.assertTrue(current_outcome.succeeded)
+        self.assertEqual(len(rows), 2)
 
     def test_backfill_exception_fails_safely_without_advancing_checkpoint(self) -> None:
         events: list[sync_worker.SafeSyncEvent] = []

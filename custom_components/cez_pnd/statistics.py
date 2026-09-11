@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import (
@@ -43,6 +44,7 @@ MAX_HISTORY_EXPECTED_COUNT = MAX_HISTORY_WINDOWS * MAX_COMBINED_ITEMS
 CLEAR_TIMEOUT_SECONDS = 30
 INTERVAL_DURATION = timedelta(minutes=15)
 HOUR_DURATION = timedelta(hours=1)
+PRAGUE_TIMEZONE = ZoneInfo("Europe/Prague")
 
 
 class StatisticsSyncError(RuntimeError):
@@ -233,7 +235,7 @@ class CezPndStatisticsManager:
         global_expected = status.completeness.expected_count
         if not 0 <= global_expected <= MAX_HISTORY_EXPECTED_COUNT:
             raise StatisticsSyncError("statistics_history_too_large")
-        end = _ceil_hour(status.data_timestamp)
+        end = _full_history_upper_bound(status)
         accumulated = 0
         hourly: HourlyEnergy = {channel: {} for channel in CHANNELS}
         for _window in range(MAX_HISTORY_WINDOWS):
@@ -354,6 +356,18 @@ def _ceil_hour(value: datetime) -> datetime:
     utc = value.astimezone(UTC)
     floor = utc.replace(minute=0, second=0, microsecond=0)
     return floor if utc == floor else floor + HOUR_DURATION
+
+
+def _full_history_upper_bound(status: CollectorStatus) -> datetime:
+    """Cover the full Prague day that may contain persisted placeholders."""
+
+    if status.data_timestamp is None or status.last_success is None:
+        raise StatisticsSyncError("statistics_dataset_unavailable")
+    last_success_day = status.last_success.astimezone(PRAGUE_TIMEZONE).date()
+    next_local_midnight = datetime.combine(
+        last_success_day + timedelta(days=1), time(), tzinfo=PRAGUE_TIMEZONE
+    ).astimezone(UTC)
+    return max(_ceil_hour(status.data_timestamp), next_local_midnight)
 
 
 def _format_utc(value: datetime) -> str:

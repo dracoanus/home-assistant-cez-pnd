@@ -353,12 +353,20 @@ assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
 assert "SyncWorker(sync_configuration, store=dataset_store)" in SERVER_SOURCE
-assert "SYNC_INTERVAL_SECONDS = 6 * 60 * 60" in SYNC_WORKER_SOURCE
+assert "CURRENT_DAY_SYNC_INTERVAL_SECONDS = 60 * 60" in SYNC_WORKER_SOURCE
+assert "HISTORICAL_SYNC_INTERVAL_SECONDS = 6 * 60 * 60" in SYNC_WORKER_SOURCE
 assert "BACKFILL_CHUNK_DAYS = 31" in SYNC_WORKER_SOURCE
 assert "BACKFILL_MAX_CHUNKS_PER_CYCLE = 2" in SYNC_WORKER_SOURCE
 assert "CORRECTION_OVERLAP_DAYS = 3" in SYNC_WORKER_SOURCE
 assert 'ZoneInfo("Europe/Prague")' in SYNC_WORKER_SOURCE
 assert "persist_raw_outputs=False" in SYNC_WORKER_SOURCE
+assert "require_complete_days=False" not in SYNC_WORKER_SOURCE
+for current_day_event in (
+    "current_day_sync_started",
+    "current_day_sync_succeeded",
+    "current_day_sync_failed",
+):
+    assert current_day_event in SYNC_WORKER_SOURCE
 assert '"sync_cycle_internal_failed"' in SYNC_WORKER_SOURCE
 assert "except Exception:" in SYNC_WORKER_SOURCE
 assert '"dashboard_metadata_response_observed"' in HTTP_AUTH_SOURCE
