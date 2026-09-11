@@ -15,7 +15,7 @@ import stat
 from .cez_csv_models import IntervalQuality, ParsedPndData, PndChannel
 
 
-DATASET_PATH = Path("/data/cez-pnd.sqlite3")
+DATASET_PATH = Path("/data/cez-pnd-dataset/cez-pnd.sqlite3")
 SOURCE_TIMEZONE = "Europe/Prague"
 BUSY_TIMEOUT_SECONDS = 5.0
 CHANNEL_MAP = {
@@ -282,6 +282,12 @@ class NormalizedDatasetStore:
             or (os.name == "posix" and parent_metadata.st_mode & stat.S_IWOTH)
         ):
             raise OSError("unsafe dataset directory")
+        if (
+            self._required_uid is not None
+            and hasattr(parent_metadata, "st_uid")
+            and parent_metadata.st_uid != self._required_uid
+        ):
+            raise OSError("unsafe dataset directory owner")
         if not self.path.exists():
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             flags |= getattr(os, "O_NOFOLLOW", 0)

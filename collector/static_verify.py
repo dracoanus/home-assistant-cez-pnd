@@ -171,8 +171,11 @@ assert 'context.set_alpn_protocols(["http/1.1"])' in STRICT_TRANSPORT_SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
+assert 'DATASET_DIRECTORY_NAME = "cez-pnd-dataset"' in ENTRYPOINT_SOURCE
 assert 'DATASET_FILE_NAME = "cez-pnd.sqlite3"' in ENTRYPOINT_SOURCE
-assert "prepare_dataset_file()" in ENTRYPOINT_SOURCE
+assert "prepare_dataset_storage()" in ENTRYPOINT_SOURCE
+assert "mode_setter(dataset_directory, 0o700" in ENTRYPOINT_SOURCE
+assert "owner_setter(dataset_directory, RUNTIME_UID, RUNTIME_GID" in ENTRYPOINT_SOURCE
 assert "mode_setter(dataset, 0o600" in ENTRYPOINT_SOURCE
 assert "owner_setter(dataset, RUNTIME_UID, RUNTIME_GID" in ENTRYPOINT_SOURCE
 assert '"event": "service_stopped"' in SERVER_SOURCE
@@ -425,7 +428,8 @@ assert "class IntervalRecord" in CSV_MODELS_SOURCE
 assert "class ParsedPndData" in CSV_MODELS_SOURCE
 assert "value_kwh: Decimal | None" in CSV_MODELS_SOURCE
 assert 'INVALID = "invalid"' in CSV_MODELS_SOURCE
-assert 'DATASET_PATH = Path("/data/cez-pnd.sqlite3")' in DATASET_STORE_SOURCE
+assert 'DATASET_PATH = Path("/data/cez-pnd-dataset/cez-pnd.sqlite3")' in DATASET_STORE_SOURCE
+assert 'raise OSError("unsafe dataset directory owner")' in DATASET_STORE_SOURCE
 assert "sqlite3.connect" in DATASET_STORE_SOURCE
 assert "BEGIN IMMEDIATE" in DATASET_STORE_SOURCE
 assert "ON CONFLICT(channel,interval_start) DO UPDATE" in DATASET_STORE_SOURCE

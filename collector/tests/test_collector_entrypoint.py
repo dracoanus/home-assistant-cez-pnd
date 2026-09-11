@@ -51,28 +51,49 @@ class CollectorEntrypointTests(unittest.TestCase):
             data.mkdir()
             marker = data / "existing-private-file"
             marker.write_text("unchanged")
-            dataset = collector_entrypoint.prepare_dataset_file(
+            dataset = collector_entrypoint.prepare_dataset_storage(
                 data,
                 chown=lambda path, uid, gid, *, follow_symlinks: ownership.append((path, uid, gid, follow_symlinks)),
                 chmod=lambda path, mode, *, follow_symlinks: modes.append((path, mode, follow_symlinks)),
             )
             self.assertEqual(dataset.name, "cez-pnd.sqlite3")
+            self.assertEqual(dataset.parent.name, "cez-pnd-dataset")
             self.assertEqual(marker.read_text(), "unchanged")
-            self.assertEqual(ownership, [(dataset, 2000, 2000, False)])
-            self.assertEqual(modes, [(dataset, 0o600, False)])
+            self.assertEqual(ownership, [
+                (dataset.parent, 2000, 2000, False),
+                (dataset, 2000, 2000, False),
+            ])
+            self.assertEqual(modes, [
+                (dataset.parent, 0o700, False),
+                (dataset, 0o600, False),
+            ])
 
     def test_bootstrap_rejects_symlinked_dataset_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"
             target = Path(temporary) / "target"
             data.mkdir()
+            (data / "cez-pnd-dataset").mkdir()
             target.write_bytes(b"")
             try:
-                (data / "cez-pnd.sqlite3").symlink_to(target)
+                (data / "cez-pnd-dataset" / "cez-pnd.sqlite3").symlink_to(target)
             except OSError:
                 self.skipTest("file symlinks are unavailable")
             with self.assertRaisesRegex(RuntimeError, "unsafe dataset file"):
-                collector_entrypoint.prepare_dataset_file(data, chown=mock.Mock(), chmod=mock.Mock())
+                collector_entrypoint.prepare_dataset_storage(data, chown=mock.Mock(), chmod=mock.Mock())
+
+    def test_bootstrap_rejects_symlinked_dataset_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            target = Path(temporary) / "target"
+            data.mkdir()
+            target.mkdir()
+            try:
+                (data / "cez-pnd-dataset").symlink_to(target, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            with self.assertRaisesRegex(RuntimeError, "unsafe dataset directory"):
+                collector_entrypoint.prepare_dataset_storage(data, chown=mock.Mock(), chmod=mock.Mock())
 
     def test_bootstrap_rejects_symlinked_probe_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -149,7 +170,7 @@ class CollectorEntrypointTests(unittest.TestCase):
             side_effect=lambda: calls.append("prepare"),
         ), mock.patch.object(
             collector_entrypoint,
-            "prepare_dataset_file",
+            "prepare_dataset_storage",
             side_effect=lambda: calls.append("dataset"),
         ), mock.patch.object(
             collector_entrypoint,

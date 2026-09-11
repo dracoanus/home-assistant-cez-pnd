@@ -13,6 +13,7 @@ RUNTIME_UID = 2000
 RUNTIME_GID = 2000
 DATA_DIRECTORY = Path("/data")
 PROBE_DIRECTORY_NAME = "cez-pnd-probe"
+DATASET_DIRECTORY_NAME = "cez-pnd-dataset"
 DATASET_FILE_NAME = "cez-pnd.sqlite3"
 SERVER_ARGV = (
     "/opt/collector-venv/bin/python",
@@ -50,17 +51,29 @@ def prepare_probe_directory(
     return probe_directory
 
 
-def prepare_dataset_file(
+def prepare_dataset_storage(
     data_directory: Path = DATA_DIRECTORY,
     *,
     chown: Callable[..., None] | None = None,
     chmod: Callable[..., None] | None = None,
 ) -> Path:
-    """Create or validate only the fixed normalized dataset file."""
+    """Create the one private directory and file required by SQLite."""
 
     if data_directory.is_symlink() or not data_directory.is_dir():
         raise RuntimeError("unsafe data directory")
-    dataset = data_directory / DATASET_FILE_NAME
+    dataset_directory = data_directory / DATASET_DIRECTORY_NAME
+    if dataset_directory.is_symlink():
+        raise RuntimeError("unsafe dataset directory")
+    dataset_directory.mkdir(mode=0o700, exist_ok=True)
+    directory_metadata = dataset_directory.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(directory_metadata.st_mode) or dataset_directory.is_symlink():
+        raise RuntimeError("unsafe dataset directory")
+    owner_setter = chown or os.chown
+    mode_setter = chmod or os.chmod
+    owner_setter(dataset_directory, RUNTIME_UID, RUNTIME_GID, follow_symlinks=False)
+    mode_setter(dataset_directory, 0o700, follow_symlinks=False)
+
+    dataset = dataset_directory / DATASET_FILE_NAME
     if dataset.is_symlink():
         raise RuntimeError("unsafe dataset file")
     if not dataset.exists():
@@ -70,8 +83,6 @@ def prepare_dataset_file(
     metadata = dataset.stat(follow_symlinks=False)
     if not stat.S_ISREG(metadata.st_mode) or dataset.is_symlink():
         raise RuntimeError("unsafe dataset file")
-    owner_setter = chown or os.chown
-    mode_setter = chmod or os.chmod
     owner_setter(dataset, RUNTIME_UID, RUNTIME_GID, follow_symlinks=False)
     mode_setter(dataset, 0o600, follow_symlinks=False)
     return dataset
@@ -100,7 +111,7 @@ def main() -> int:
         return 1
     try:
         prepare_probe_directory()
-        prepare_dataset_file()
+        prepare_dataset_storage()
         drop_privileges()
         os.execv(SERVER_ARGV[0], list(SERVER_ARGV))
     except (OSError, RuntimeError):
