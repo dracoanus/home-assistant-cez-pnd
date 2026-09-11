@@ -1,7 +1,9 @@
 # CEZ PND Collector App
 
 The Collector service provides the authenticated API from the normalized
-dataset in `/data/cez-pnd.sqlite3`. The Phase 3A source adds an explicit
+dataset in `/data/cez-pnd-dataset/cez-pnd.sqlite3`. The dedicated dataset
+directory is owned by UID/GID 2000 with mode `0700`; `/data` itself is not
+recursively modified. The Phase 3A source adds an explicit
 one-shot CEZ authentication-discovery mode. Normal startup performs no CEZ
 request and serves only the last successfully committed dataset.
 

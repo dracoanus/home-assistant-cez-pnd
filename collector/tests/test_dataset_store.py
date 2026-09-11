@@ -28,7 +28,9 @@ def _parsed(channel: PndChannel, values: tuple[tuple[Decimal | None, IntervalQua
 class DatasetStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.path = Path(self.temporary.name) / "dataset.sqlite3"
+        self.directory = Path(self.temporary.name) / "cez-pnd-dataset"
+        self.directory.mkdir(mode=0o700)
+        self.path = self.directory / "cez-pnd.sqlite3"
         self.revision_number = 0
         def revision() -> str:
             self.revision_number += 1
@@ -48,6 +50,7 @@ class DatasetStoreTests(unittest.TestCase):
         reopened = NormalizedDatasetStore(self.path, required_uid=None)
         self.assertEqual(reopened.read_status(), status)
         if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         raw = self.path.read_bytes()
         for forbidden in (b"username", b"password", b"cookie", b"ean", b"elm"):
@@ -91,6 +94,34 @@ class DatasetStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.commit_dataset(self.consumption, self.consumption, collected_at=START)
         self.assertEqual(self.store.read_status().revision, previous.revision)
+
+    def test_owner_equivalent_process_can_create_sqlite_transaction_sidecar(self) -> None:
+        self.store.record_attempt(START)
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE collector_state SET last_attempt=? WHERE id=1", ("2026-09-01T01:00:00Z",))
+            journal = self.directory / "cez-pnd.sqlite3-journal"
+            self.assertTrue(journal.is_file())
+            connection.rollback()
+        finally:
+            connection.close()
+        self.assertFalse(journal.exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership/mode semantics required")
+    def test_store_rejects_wrong_owner_and_world_writable_directory(self) -> None:
+        owner = os.getuid()
+        accepted = NormalizedDatasetStore(self.path, required_uid=owner)
+        accepted.record_attempt(START)
+        with self.assertRaisesRegex(OSError, "directory owner"):
+            NormalizedDatasetStore(self.path, required_uid=owner + 1).read_status()
+        os.chmod(self.directory, 0o707)
+        try:
+            with self.assertRaisesRegex(OSError, "unsafe dataset directory"):
+                accepted.read_status()
+        finally:
+            os.chmod(self.directory, 0o700)
 
 
 if __name__ == "__main__":

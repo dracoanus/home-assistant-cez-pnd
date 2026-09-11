@@ -93,7 +93,10 @@ The status and measurement responses keep these concepts independent:
 | `values` | Interval records carrying explicit quality and a decimal-string value only when valid. |
 | `missing` | Explicit missing interval/rationale records. |
 
-The database is `/data/cez-pnd.sqlite3`, mode `0600`, owned by runtime UID 2000.
+The database is `/data/cez-pnd-dataset/cez-pnd.sqlite3`, mode `0600`, inside
+the Collector-owned `0700` directory `/data/cez-pnd-dataset`. Both are owned
+by runtime UID/GID 2000, allowing SQLite to create bounded transaction sidecar
+files without changing ownership or permissions on `/data` itself.
 It stores no EAN, ELM, username, password, token, or cookie. Consumption maps
 to `grid_import`; production maps to `grid_export`. Valid energy is serialized
 as an exact decimal string. Missing intervals are returned with
