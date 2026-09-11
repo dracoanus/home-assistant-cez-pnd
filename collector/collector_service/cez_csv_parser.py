@@ -37,6 +37,7 @@ _VALID_STATUSES = frozenset(
     {
         "", "1", "a", "ok", "true", "v", "valid", "validni",
         "platna", "platne", "platny", "platna data", "namerena data ok",
+        "namerena data, vypadek napeti",
     }
 )
 _MISSING_STATUSES = frozenset(

@@ -67,6 +67,17 @@ def _complete_day(day: date, channel: PndChannel) -> bytes:
     return _csv_bytes(rows)
 
 
+def _complete_day_with_statuses(
+    day: date, channel: PndChannel, statuses: tuple[str, ...]
+) -> bytes:
+    rows = list(csv.reader(io.StringIO(_complete_day(day, channel).decode("utf-8")), delimiter=";"))
+    if len(rows) - 1 != len(statuses):
+        raise ValueError("status fixture length mismatch")
+    for row, status in zip(rows[1:], statuses, strict=True):
+        row[-1] = status
+    return _csv_bytes(rows)
+
+
 class CezCsvParserTests(unittest.TestCase):
     def test_real_cez_datum_timestamp_and_profile_headers(self) -> None:
         for channel, header in (
@@ -150,6 +161,62 @@ class CezCsvParserTests(unittest.TestCase):
                 require_complete_days=False,
             )
         self.assertEqual(raised.exception.code, "csv_status_invalid")
+
+    def test_voltage_outage_status_is_valid_and_preserves_numeric_value(self) -> None:
+        for status, value, expected in (
+            ("naměřená data, výpadek napětí", "1,25", Decimal("1.25")),
+            ("namerena data, vypadek napeti", "0", Decimal("0")),
+        ):
+            with self.subTest(status=status, value=value):
+                parsed = parse_pnd_csv(
+                    _csv_bytes(
+                        [["Datum", "+A [kWh]", "Status"], ["07.10.2025 07:45", value, status]]
+                    ),
+                    channel=PndChannel.CONSUMPTION,
+                    require_complete_days=False,
+                )
+                record = parsed.intervals[0]
+                self.assertEqual(record.quality, IntervalQuality.VALID)
+                self.assertEqual(record.value_kwh, expected)
+
+        invalid = parse_pnd_csv(
+            _csv_bytes(
+                [["Datum", "+A [kWh]", "Status"], ["07.10.2025 08:00", "9", "neplatná data"]]
+            ),
+            channel=PndChannel.CONSUMPTION,
+            require_complete_days=False,
+        ).intervals[0]
+        self.assertEqual(invalid.quality, IntervalQuality.INVALID)
+        self.assertIsNone(invalid.value_kwh)
+
+        with self.assertRaises(PndCsvParseError) as raised:
+            parse_pnd_csv(
+                _csv_bytes(
+                    [["Datum", "+A [kWh]", "Status"], ["07.10.2025 08:15", "1", "libovolný stav"]]
+                ),
+                channel=PndChannel.CONSUMPTION,
+                require_complete_days=False,
+            )
+        self.assertEqual(raised.exception.code, "csv_status_invalid")
+
+    def test_complete_day_accepts_mixed_official_cez_statuses(self) -> None:
+        statuses = (
+            *("naměřená data OK" for _ in range(76)),
+            *("neplatná data" for _ in range(18)),
+            "naměřená data, výpadek napětí",
+            "naměřená data, výpadek napětí",
+        )
+        parsed = parse_pnd_csv(
+            _complete_day_with_statuses(
+                date(2025, 10, 7), PndChannel.CONSUMPTION, statuses
+            ),
+            channel=PndChannel.CONSUMPTION,
+        )
+        self.assertEqual(len(parsed.intervals), 96)
+        self.assertEqual(parsed.valid_count, 78)
+        self.assertEqual(parsed.invalid_count, 18)
+        self.assertEqual(parsed.missing_count, 0)
+        self.assertFalse(parsed.complete)
 
     def test_encoding_and_delimiter_detection(self) -> None:
         rows = [
