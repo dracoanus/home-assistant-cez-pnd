@@ -233,6 +233,48 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_status_accepts_large_bounded_dataset_counts(self) -> None:
+        payload = _status_payload()
+        payload["completeness"].update(
+            {
+                "expected_count": 17_864,
+                "valid_count": 17_828,
+                "missing_count": 0,
+                "invalid_count": 36,
+            }
+        )
+        client, _ = self._client([_Response(200, payload)])
+        status = await client.async_status()
+        self.assertEqual(status.completeness.expected_count, 17_864)
+        self.assertEqual(status.completeness.valid_count, 17_828)
+        self.assertEqual(status.completeness.invalid_count, 36)
+
+        payload = _status_payload()
+        payload["completeness"].update(
+            {
+                "expected_count": client_module.MAX_METADATA_COUNT,
+                "valid_count": client_module.MAX_METADATA_COUNT,
+                "missing_count": 0,
+                "invalid_count": 0,
+            }
+        )
+        client, _ = self._client([_Response(200, payload)])
+        status = await client.async_status()
+        self.assertEqual(
+            status.completeness.expected_count, client_module.MAX_METADATA_COUNT
+        )
+
+    async def test_status_rejects_invalid_metadata_counts(self) -> None:
+        for invalid in (-1, True, client_module.MAX_METADATA_COUNT + 1):
+            with self.subTest(invalid=invalid):
+                payload = _status_payload()
+                payload["completeness"]["expected_count"] = invalid
+                client, _ = self._client([_Response(200, payload)])
+                with self.assertRaisesRegex(
+                    client_module.CollectorProtocolError, "invalid_completeness"
+                ):
+                    await client.async_status()
+
     async def test_timeout_is_explicit_and_does_not_expose_token(self) -> None:
         class TimeoutSession:
             def get(self, *_args, **_kwargs):
@@ -339,6 +381,23 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
         client, _ = self._client(responses)
         with self.assertRaisesRegex(client_module.CollectorProtocolError, "too_many_pages"):
             await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
+
+    async def test_combined_measurement_limit_remains_enforced(self) -> None:
+        complete = _measurements_payload()
+        first_value, second_value = complete["values"]
+        first = _page(
+            [first_value], [], "cursor_one", expected=2, valid=2, missing_count=0
+        )
+        second = _page(
+            [second_value], [], None, expected=2, valid=2, missing_count=0
+        )
+        client, _ = self._client([_Response(200, first), _Response(200, second)])
+        with patch.object(client_module, "MAX_COMBINED_ITEMS", 1), self.assertRaisesRegex(
+            client_module.CollectorProtocolError, "too_many_measurements"
+        ):
+            await client.async_measurements(
+                "2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z"
+            )
 
     async def test_unexpected_fields_fail_closed(self) -> None:
         payload = _status_payload()
