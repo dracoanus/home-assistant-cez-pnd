@@ -23,6 +23,7 @@ from .runtime_config import (
     load_runtime_configuration,
 )
 from .structured_logging import structured_event_json
+from .dataset_store import NormalizedDatasetStore
 
 
 BIND_ADDRESS = "0.0.0.0"
@@ -171,7 +172,10 @@ def main() -> int:
 
     try:
         server = CollectorHttpServer((BIND_ADDRESS, BIND_PORT), CollectorRequestHandler)
-        server.collector_api = CollectorApi(configuration.verifier)  # type: ignore[attr-defined]
+        dataset_store = NormalizedDatasetStore()
+        server.collector_api = CollectorApi(  # type: ignore[attr-defined]
+            configuration.verifier, dataset_store
+        )
         server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
     except (OSError, ValueError, json.JSONDecodeError):
         print(
@@ -182,6 +186,7 @@ def main() -> int:
         )
         return 1
 
+    signal.signal(signal.SIGTERM, _request_stop)
     print(
         structured_event_json(
             {
@@ -194,12 +199,20 @@ def main() -> int:
         ),
         flush=True,
     )
-    signal.signal(signal.SIGTERM, _request_stop)
+    sync_worker = None
+    sync_configuration = getattr(configuration, "sync", None)
+    if sync_configuration is not None:
+        from .sync_worker import SyncWorker
+
+        sync_worker = SyncWorker(sync_configuration, store=dataset_store)
+        sync_worker.start()
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        if sync_worker is not None:
+            sync_worker.stop()
         server.server_close()
         print(structured_event_json({"event": "service_stopped"}), flush=True)
     return 0

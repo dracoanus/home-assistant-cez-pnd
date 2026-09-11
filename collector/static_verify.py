@@ -42,6 +42,9 @@ REQUESTS_COMPATIBILITY_REQUIREMENTS = (
 STRUCTURED_LOGGING_SOURCE = (
     ROOT / "collector_service" / "structured_logging.py"
 ).read_text(encoding="utf-8")
+SYNC_WORKER_SOURCE = (ROOT / "collector_service" / "sync_worker.py").read_text(
+    encoding="utf-8"
+)
 NON_HTTP_AUTH_SOURCE = "\n".join(
     path.read_text(encoding="utf-8")
     for path in SOURCE_FILES
@@ -94,7 +97,7 @@ assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
 assert '{"timestamp": utc_timestamp(now), **fields}' in STRUCTURED_LOGGING_SOURCE
-assert SOURCE.count("from .structured_logging import structured_event_json") == 3
+assert SOURCE.count("from .structured_logging import structured_event_json") == 4
 assert (
     "COPY --chown=0:0 --chmod=0555 collector_service "
     "/opt/collector-service/collector_service"
@@ -333,7 +336,9 @@ assert "MAX_ADDRESS_ATTEMPTS = 4" in STRICT_TRANSPORT_SOURCE
 assert 'options.get("cez_http_auth_discovery_mode", False)' in RUNTIME_CONFIG_SOURCE
 assert 'options.get("cez_requests_preauth_compatibility_mode", False)' in RUNTIME_CONFIG_SOURCE
 assert 'options.get("cez_data_probe_mode", False)' in RUNTIME_CONFIG_SOURCE
+assert 'options.get("cez_sync_enabled", False)' in RUNTIME_CONFIG_SOURCE
 assert "discovery_config_conflicting_modes" in RUNTIME_CONFIG_SOURCE
+assert "sync_config_conflicting_modes" in RUNTIME_CONFIG_SOURCE
 assert 'CEZ_PND_EXPORT_URL = (' in DATA_PROBE_SOURCE
 assert '"https://pnd.cezdistribuce.cz/cezpnd2/external/data/export"' in DATA_PROBE_SOURCE
 assert 'PROBE_DIRECTORY = Path("/data/cez-pnd-probe")' in DATA_PROBE_SOURCE
@@ -347,6 +352,12 @@ assert "os.replace" in DATA_PROBE_SOURCE
 assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
+assert "SyncWorker(sync_configuration, store=dataset_store)" in SERVER_SOURCE
+assert "SYNC_INTERVAL_SECONDS = 6 * 60 * 60" in SYNC_WORKER_SOURCE
+assert 'ZoneInfo("Europe/Prague")' in SYNC_WORKER_SOURCE
+assert "persist_raw_outputs=False" in SYNC_WORKER_SOURCE
+assert '"sync_cycle_internal_failed"' in SYNC_WORKER_SOURCE
+assert "except Exception:" in SYNC_WORKER_SOURCE
 assert '"dashboard_metadata_response_observed"' in HTTP_AUTH_SOURCE
 assert '"dashboard_metadata_unusable"' in HTTP_AUTH_SOURCE
 for metadata_diagnostic_code in (
@@ -628,6 +639,8 @@ assert "  cez_requests_preauth_compatibility_mode: false" in APP_MANIFEST
 assert "  cez_requests_preauth_compatibility_mode: bool" in APP_MANIFEST
 assert "  cez_data_probe_mode: false" in APP_MANIFEST
 assert "  cez_data_probe_mode: bool" in APP_MANIFEST
+assert "  cez_sync_enabled: false" in APP_MANIFEST
+assert "  cez_sync_enabled: bool" in APP_MANIFEST
 assert "  cez_data_probe_date: null" in APP_MANIFEST
 assert "  cez_data_probe_date: str?" in APP_MANIFEST
 assert "  cez_ean: null" in APP_MANIFEST

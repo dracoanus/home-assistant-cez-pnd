@@ -69,6 +69,9 @@ DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
         "data_probe_config_invalid_date",
         "data_probe_config_invalid_ean",
         "data_probe_config_invalid_elm",
+        "sync_config_invalid_mode",
+        "sync_config_conflicting_modes",
+        "sync_config_meter_identity_required",
     }
 )
 
@@ -124,6 +127,25 @@ class DataProbeConfiguration:
 
 
 @dataclass(frozen=True)
+class SyncConfiguration:
+    """Ephemeral credentials and meter identity for scheduled collection."""
+
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+    electrometer_id: str | None = field(default=None, repr=False)
+    ean: str | None = field(default=None, repr=False)
+
+    def for_date(self, probe_date: date) -> DataProbeConfiguration:
+        return DataProbeConfiguration(
+            username=self.username,
+            password=self.password,
+            probe_date=probe_date,
+            electrometer_id=self.electrometer_id,
+            ean=self.ean,
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeConfiguration:
     """Validated API verifier and an initialized TLS server context."""
 
@@ -134,6 +156,7 @@ class RuntimeConfiguration:
     http_auth_discovery: HttpAuthDiscoveryConfiguration | None = None
     requests_preauth_compatibility: bool = False
     data_probe: DataProbeConfiguration | None = None
+    sync: SyncConfiguration | None = None
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -167,6 +190,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
         http_auth_discovery = _load_http_auth_discovery_configuration(options)
         requests_preauth_compatibility = _load_requests_preauth_compatibility_mode(options)
         data_probe = _load_data_probe_configuration(options)
+        sync = _load_sync_configuration(options)
         options.pop("cez_username", None)
         options.pop("cez_password", None)
         certificate = _decode_tls_option(options, "tls_certificate_b64")
@@ -179,6 +203,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
             http_auth_discovery=http_auth_discovery,
             requests_preauth_compatibility=requests_preauth_compatibility,
             data_probe=data_probe,
+            sync=sync,
         )
 
     try:
@@ -293,6 +318,7 @@ def _validate_discovery_modes(options: dict[str, object]) -> None:
     http_mode = options.get("cez_http_auth_discovery_mode", False)
     requests_mode = options.get("cez_requests_preauth_compatibility_mode", False)
     data_probe_mode = options.get("cez_data_probe_mode", False)
+    sync_mode = options.get("cez_sync_enabled", False)
     if not isinstance(selenium_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_mode")
     if not isinstance(http_mode, bool):
@@ -301,8 +327,12 @@ def _validate_discovery_modes(options: dict[str, object]) -> None:
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
     if not isinstance(data_probe_mode, bool):
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
+    if not isinstance(sync_mode, bool):
+        raise DiscoveryConfigurationError("sync_config_invalid_mode")
     if sum((selenium_mode, http_mode, requests_mode, data_probe_mode)) > 1:
         raise DiscoveryConfigurationError("discovery_config_conflicting_modes")
+    if sync_mode and any((selenium_mode, http_mode, requests_mode, data_probe_mode)):
+        raise DiscoveryConfigurationError("sync_config_conflicting_modes")
 
 
 def _load_requests_preauth_compatibility_mode(options: dict[str, object]) -> bool:
@@ -349,6 +379,48 @@ def _load_data_probe_configuration(
         raise DiscoveryConfigurationError("discovery_config_invalid_http_mode")
     if not enabled:
         return None
+    username, password, electrometer_id, ean = _load_collection_identity(options)
+    raw_date = _required_discovery_text(
+        options,
+        "cez_data_probe_date",
+        "data_probe_config_missing_date",
+        "data_probe_config_invalid_date",
+        maximum_bytes=10,
+    )
+    try:
+        probe_date = date.fromisoformat(raw_date)
+    except ValueError as error:
+        raise DiscoveryConfigurationError("data_probe_config_invalid_date") from error
+    if probe_date.isoformat() != raw_date:
+        raise DiscoveryConfigurationError("data_probe_config_invalid_date")
+    return DataProbeConfiguration(
+        username=username,
+        password=password,
+        probe_date=probe_date,
+        electrometer_id=electrometer_id,
+        ean=ean,
+    )
+
+
+def _load_sync_configuration(
+    options: dict[str, object],
+) -> SyncConfiguration | None:
+    enabled = options.get("cez_sync_enabled", False)
+    if not isinstance(enabled, bool):
+        raise DiscoveryConfigurationError("sync_config_invalid_mode")
+    if not enabled:
+        return None
+    username, password, electrometer_id, ean = _load_collection_identity(options)
+    if electrometer_id is None and ean is None:
+        raise DiscoveryConfigurationError("sync_config_meter_identity_required")
+    return SyncConfiguration(username, password, electrometer_id, ean)
+
+
+def _load_collection_identity(
+    options: dict[str, object],
+) -> tuple[str, str, str | None, str | None]:
+    """Apply the existing bounded credential and meter identity validation."""
+
     username = _required_discovery_text(
         options,
         "cez_username",
@@ -363,19 +435,6 @@ def _load_data_probe_configuration(
         "discovery_config_invalid_password",
         maximum_bytes=1024,
     )
-    raw_date = _required_discovery_text(
-        options,
-        "cez_data_probe_date",
-        "data_probe_config_missing_date",
-        "data_probe_config_invalid_date",
-        maximum_bytes=10,
-    )
-    try:
-        probe_date = date.fromisoformat(raw_date)
-    except ValueError as error:
-        raise DiscoveryConfigurationError("data_probe_config_invalid_date") from error
-    if probe_date.isoformat() != raw_date:
-        raise DiscoveryConfigurationError("data_probe_config_invalid_date")
     raw_elm = options.get("cez_elm")
     electrometer_id = None
     if raw_elm not in (None, ""):
@@ -399,13 +458,7 @@ def _load_data_probe_configuration(
         ):
             raise DiscoveryConfigurationError("data_probe_config_invalid_ean")
         ean = raw_ean
-    return DataProbeConfiguration(
-        username=username,
-        password=password,
-        probe_date=probe_date,
-        electrometer_id=electrometer_id,
-        ean=ean,
-    )
+    return username, password, electrometer_id, ean
 
 
 def _required_discovery_text(
