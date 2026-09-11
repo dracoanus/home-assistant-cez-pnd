@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 import base64
 import binascii
 import json
@@ -16,6 +16,7 @@ from typing import Iterator
 import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zoneinfo import ZoneInfo
 
 from .api import EXPECTED_SCOPES, TokenVerifier
 from .security_files import descriptor_path, open_verified_file
@@ -72,6 +73,7 @@ DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
         "sync_config_invalid_mode",
         "sync_config_conflicting_modes",
         "sync_config_meter_identity_required",
+        "sync_config_invalid_history_start",
     }
 )
 
@@ -134,6 +136,7 @@ class SyncConfiguration:
     password: str = field(repr=False)
     electrometer_id: str | None = field(default=None, repr=False)
     ean: str | None = field(default=None, repr=False)
+    history_start: date | None = None
 
     def for_date(self, probe_date: date) -> DataProbeConfiguration:
         return DataProbeConfiguration(
@@ -403,7 +406,7 @@ def _load_data_probe_configuration(
 
 
 def _load_sync_configuration(
-    options: dict[str, object],
+    options: dict[str, object], *, today: date | None = None
 ) -> SyncConfiguration | None:
     enabled = options.get("cez_sync_enabled", False)
     if not isinstance(enabled, bool):
@@ -413,7 +416,23 @@ def _load_sync_configuration(
     username, password, electrometer_id, ean = _load_collection_identity(options)
     if electrometer_id is None and ean is None:
         raise DiscoveryConfigurationError("sync_config_meter_identity_required")
-    return SyncConfiguration(username, password, electrometer_id, ean)
+    raw_history_start = options.get("cez_history_start")
+    history_start = None
+    if raw_history_start not in (None, ""):
+        if not isinstance(raw_history_start, str):
+            raise DiscoveryConfigurationError("sync_config_invalid_history_start")
+        try:
+            history_start = date.fromisoformat(raw_history_start)
+        except ValueError as error:
+            raise DiscoveryConfigurationError(
+                "sync_config_invalid_history_start"
+            ) from error
+        current_day = today or datetime.now(ZoneInfo("Europe/Prague")).date()
+        if history_start.isoformat() != raw_history_start or history_start > current_day:
+            raise DiscoveryConfigurationError("sync_config_invalid_history_start")
+    return SyncConfiguration(
+        username, password, electrometer_id, ean, history_start
+    )
 
 
 def _load_collection_identity(

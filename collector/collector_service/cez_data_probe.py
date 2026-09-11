@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -63,6 +63,7 @@ CSV_CONTENT_TYPES = frozenset(
         "text/plain",
     }
 )
+MAX_COLLECTION_RANGE_DAYS = 31
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,8 @@ class CezDataProbe:
         output_directory: Path = PROBE_DIRECTORY,
         dataset_store: NormalizedDatasetStore | None = None,
         persist_raw_outputs: bool = True,
+        start_day: date | None = None,
+        end_day: date | None = None,
         collected_at: datetime | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         emit: Callable[[SafeHttpAuthEvent], None] | None = None,
@@ -91,6 +94,14 @@ class CezDataProbe:
         self._output_directory = output_directory
         self._dataset_store = dataset_store
         self._persist_raw_outputs = persist_raw_outputs
+        self._start_day = start_day or configuration.probe_date
+        self._end_day = end_day or (self._start_day + timedelta(days=1))
+        if (
+            self._start_day >= self._end_day
+            or self._end_day - self._start_day
+            > timedelta(days=MAX_COLLECTION_RANGE_DAYS)
+        ):
+            raise ValueError("invalid collection range")
         self._collected_at = collected_at
         self._now = now
         self._emit = emit or (lambda _event: None)
@@ -112,11 +123,8 @@ class CezDataProbe:
             self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
         verified_elm = self._verified_electrometer_id(client, metadata, deadline)
 
-        day = self._configuration.probe_date
-        interval_from = f"{day.strftime('%d.%m.%Y')} 00:00"
-        interval_to = (
-            f"{(day + timedelta(days=1)).strftime('%d.%m.%Y')} 00:00"
-        )
+        interval_from = f"{self._start_day.strftime('%d.%m.%Y')} 00:00"
+        interval_to = f"{self._end_day.strftime('%d.%m.%Y')} 00:00"
 
         consumption = self._export(
             client,
@@ -515,6 +523,8 @@ def run_data_probe(
     output_directory: Path = PROBE_DIRECTORY,
     dataset_store: NormalizedDatasetStore | None = None,
     persist_raw_outputs: bool = True,
+    start_day: date | None = None,
+    end_day: date | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     emit: Callable[[SafeHttpAuthEvent], None] | None = None,
 ) -> AuthResult:
@@ -530,7 +540,8 @@ def run_data_probe(
         return AuthResult(AuthStatus.FAILED, "data_probe_storage_failed")
     probe = CezDataProbe(
         configuration, output_directory=output_directory, dataset_store=store,
-        persist_raw_outputs=persist_raw_outputs, now=now, emit=safe_emit
+        persist_raw_outputs=persist_raw_outputs, start_day=start_day,
+        end_day=end_day, now=now, emit=safe_emit
     )
     result = CezHttpAuthClient(
         configuration,

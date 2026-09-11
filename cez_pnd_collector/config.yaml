@@ -44,6 +44,7 @@ options:
   cez_requests_preauth_compatibility_mode: false
   cez_data_probe_mode: false
   cez_sync_enabled: false
+  cez_history_start: null
   cez_data_probe_date: null
   cez_ean: null
   cez_elm: null
@@ -58,6 +59,7 @@ schema:
   cez_requests_preauth_compatibility_mode: bool
   cez_data_probe_mode: bool
   cez_sync_enabled: bool
+  cez_history_start: str?
   cez_data_probe_date: str?
   cez_start_url: url?
   cez_auth_origin: url?

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import date
 import hashlib
 import json
 import os
@@ -83,6 +84,31 @@ class RuntimeConfigurationTest(unittest.TestCase):
         self.assertNotIn("private-user", rendered)
         self.assertNotIn("private-password", rendered)
         self.assertNotIn("8" * 18, rendered)
+        self.assertIsNone(configuration.history_start)
+
+    def test_sync_history_start_is_strict_and_not_future(self) -> None:
+        base = {
+            "cez_sync_enabled": True,
+            "cez_username": "private-user",
+            "cez_password": "private-password",
+            "cez_elm": "private-elm",
+        }
+        configured = runtime_config._load_sync_configuration(
+            {**base, "cez_history_start": "2025-01-01"},
+            today=date(2026, 9, 11),
+        )
+        self.assertEqual(configured.history_start, date(2025, 1, 1))
+        for value in ("01.01.2025", "2025-1-1", "2026-02-30", "2026-09-12", 1):
+            with self.subTest(value=value), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._load_sync_configuration(
+                    {**base, "cez_history_start": value},
+                    today=date(2026, 9, 11),
+                )
+            self.assertEqual(
+                raised.exception.code, "sync_config_invalid_history_start"
+            )
 
     def test_sync_requires_credentials_and_meter_identity(self) -> None:
         base = {"cez_sync_enabled": True}
