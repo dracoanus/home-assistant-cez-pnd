@@ -1,3 +1,3 @@
 """CEZ PND Collector service skeleton."""
 
-__version__ = "0.3.29"
+__version__ = "0.3.30"
