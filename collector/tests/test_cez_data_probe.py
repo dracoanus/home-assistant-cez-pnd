@@ -379,7 +379,7 @@ class CezDataProbeTests(unittest.TestCase):
                     _parsed(PndChannel.CONSUMPTION),
                     _parsed(PndChannel.PRODUCTION),
                 ],
-            ):
+            ) as parse:
                 result = cez_data_probe.run_data_probe(
                     _configuration(),
                     transport,
@@ -393,6 +393,7 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
             self.assertFalse(output.exists())
             self.assertIsNotNone(store.read_status())
+            self.assertEqual(parse.call_count, 2)
 
     def test_bounded_ranges_use_inclusive_start_and_exclusive_end(self) -> None:
         cases = (

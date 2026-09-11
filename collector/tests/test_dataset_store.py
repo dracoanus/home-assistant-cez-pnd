@@ -71,6 +71,42 @@ class DatasetStoreTests(unittest.TestCase):
         self.assertEqual(row.value_kwh, "1.75")
         self.assertTrue(all(item.revision == third.revision for item in page.rows))
 
+    def test_current_day_missing_does_not_advance_timestamp_and_is_replaced(self) -> None:
+        current_start = START + timedelta(days=1)
+        missing = ((None, IntervalQuality.MISSING),)
+        self.store.commit_dataset(
+            _parsed(PndChannel.CONSUMPTION, ((Decimal("1"), IntervalQuality.VALID),)),
+            _parsed(PndChannel.PRODUCTION, ((Decimal("0"), IntervalQuality.VALID),)),
+            collected_at=START,
+        )
+        partial = self.store.commit_dataset(
+            _parsed(PndChannel.CONSUMPTION, missing, start=current_start),
+            _parsed(PndChannel.PRODUCTION, missing, start=current_start),
+            collected_at=current_start,
+        )
+        self.assertEqual(partial.data_timestamp, "2026-09-01T00:15:00Z")
+        self.assertEqual(partial.missing_count, 2)
+
+        corrected = self.store.commit_dataset(
+            _parsed(
+                PndChannel.CONSUMPTION,
+                ((Decimal("2"), IntervalQuality.VALID),),
+                start=current_start,
+            ),
+            _parsed(
+                PndChannel.PRODUCTION,
+                ((Decimal("0"), IntervalQuality.VALID),),
+                start=current_start,
+            ),
+            collected_at=current_start + timedelta(hours=1),
+        )
+        page = self.store.read_measurements(
+            "2026-09-02T00:00:00Z", "2026-09-02T01:00:00Z", limit=10
+        )
+        self.assertEqual(len(page.rows), 2)
+        self.assertTrue(all(row.quality == "valid" for row in page.rows))
+        self.assertEqual(corrected.data_timestamp, "2026-09-02T00:15:00Z")
+
     def test_transaction_failure_preserves_previous_revision(self) -> None:
         previous = self.store.commit_dataset(self.consumption, self.production, collected_at=START)
         original_connect = self.store._connect
