@@ -17,6 +17,7 @@ class IntegrationStructureTests(unittest.TestCase):
             (INTEGRATION / "manifest.json").read_text(encoding="utf-8")
         )
         self.assertEqual(manifest["domain"], "cez_pnd")
+        self.assertEqual(manifest["dependencies"], ["recorder"])
         self.assertTrue(manifest["config_flow"])
         self.assertEqual(manifest["iot_class"], "local_polling")
         self.assertEqual(manifest["requirements"], [])
@@ -67,6 +68,13 @@ class IntegrationStructureTests(unittest.TestCase):
         self.assertIn("CONF_POLL_INTERVAL_SECONDS", flow)
         self.assertIn("entry.add_update_listener(_async_update_listener)", setup)
         self.assertIn("async_reload(entry.entry_id)", setup)
+
+    def test_statistics_work_is_owned_by_config_entry_lifecycle(self) -> None:
+        setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+        statistics = (INTEGRATION / "statistics.py").read_text(encoding="utf-8")
+        self.assertIn("entry.async_on_unload", setup)
+        self.assertIn("self._entry.async_create_background_task", statistics)
+        self.assertNotIn("self._hass.async_create_task", statistics)
 
     def test_required_entities_and_missing_semantics(self) -> None:
         source = (INTEGRATION / "sensor.py").read_text(encoding="utf-8")

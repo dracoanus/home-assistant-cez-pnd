@@ -218,9 +218,11 @@ class CezPndStatisticsManager:
                 or self._last_expected_count != status.completeness.expected_count
             ):
                 hourly = await self._async_full_history(status)
+                await self._async_full_rebuild(hourly)
             else:
+                previous = self._hourly
                 hourly = await self._async_recent_correction(status)
-            await self._async_rebuild(hourly)
+                await self._async_incremental_update(previous, hourly)
             self._hourly = hourly
             self._last_revision = status.dataset_revision
             self._last_expected_count = status.completeness.expected_count
@@ -279,13 +281,41 @@ class CezPndStatisticsManager:
         if _status_signature(current) != _status_signature(expected):
             raise StatisticsSyncError("statistics_revision_changed")
 
-    async def _async_rebuild(self, hourly: HourlyEnergy) -> None:
+    async def _async_full_rebuild(self, hourly: HourlyEnergy) -> None:
         await self._clear_statistics(self._hass, list(STATISTIC_IDS))
         for channel, statistic_id in zip(CHANNELS, STATISTIC_IDS, strict=True):
             self._add_statistics(
                 self._hass,
                 statistic_metadata(statistic_id),
                 cumulative_statistics(hourly[channel]),
+            )
+
+    async def _async_incremental_update(
+        self, previous: HourlyEnergy, current: HourlyEnergy
+    ) -> None:
+        """Apply only effective per-stream changes for a recent correction."""
+
+        for channel, statistic_id in zip(CHANNELS, STATISTIC_IDS, strict=True):
+            old = previous[channel]
+            new = current[channel]
+            removed = old.keys() - new.keys()
+            changed = {hour for hour, value in new.items() if old.get(hour) != value}
+            if not removed and not changed:
+                continue
+            if removed:
+                await self._clear_statistics(self._hass, [statistic_id])
+                rows = cumulative_statistics(new)
+            else:
+                earliest_changed = min(changed)
+                rows = [
+                    row
+                    for row in cumulative_statistics(new)
+                    if row["start"] >= earliest_changed
+                ]
+            self._add_statistics(
+                self._hass,
+                statistic_metadata(statistic_id),
+                rows,
             )
 
 
