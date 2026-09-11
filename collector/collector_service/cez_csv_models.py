@@ -20,6 +20,7 @@ class PndChannel(str, Enum):
 class IntervalQuality(str, Enum):
     VALID = "valid"
     MISSING = "missing"
+    INVALID = "invalid"
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class IntervalRecord:
             if self.value_kwh is None or not self.value_kwh.is_finite() or self.value_kwh < 0:
                 raise ValueError("valid interval requires non-negative finite energy")
         elif self.value_kwh is not None:
-            raise ValueError("missing interval cannot carry a value")
+            raise ValueError("non-valid interval cannot carry a value")
 
     @property
     def timestamp(self) -> datetime:
@@ -71,8 +72,12 @@ class ParsedPndData:
 
     @property
     def missing_count(self) -> int:
-        return len(self.intervals) - self.valid_count
+        return sum(record.quality is IntervalQuality.MISSING for record in self.intervals)
+
+    @property
+    def invalid_count(self) -> int:
+        return sum(record.quality is IntervalQuality.INVALID for record in self.intervals)
 
     @property
     def complete(self) -> bool:
-        return bool(self.intervals) and self.missing_count == 0
+        return bool(self.intervals) and self.missing_count == 0 and self.invalid_count == 0

@@ -1,9 +1,10 @@
-# Collector API contract — skeleton revision 0.2
+# Collector API contract — normalized dataset revision 0.3
 
-Status: initial Phase 2B foundation with a successful offline Synology container
-and API smoke test. See the [validation evidence](phase2b-collector-service-validation.md).
-This document defines a local Collector contract. It does not define or imply a
-CEZ endpoint, login flow, portal schema, or production pairing workflow.
+Status: Phase 4C connects validated CEZ CSV exports to the existing local API
+through a normalized transactional SQLite dataset. See the
+[validation evidence](phase2b-collector-service-validation.md) for the earlier
+service/runtime gate. This contract does not expose CEZ credentials or portal
+internals to Home Assistant Core.
 
 ## Phase classification
 
@@ -67,33 +68,43 @@ paths.
 | Method and path | Required input | Initial behavior |
 | --- | --- | --- |
 | `GET /api/v1/health` | Bearer token; no query | Reports API-process liveness and schema version only. It does not claim CEZ reachability or fresh data. |
-| `GET /api/v1/status` | Bearer token and exact `meter_id` | Reports the synthetic dataset revision, independent freshness fields, completeness, and source status. |
-| `GET /api/v1/measurements` | Bearer token; `meter_id`; RFC 3339 UTC `start` inclusive and `end` exclusive; optional `limit` and server cursor | Returns a page from one immutable synthetic revision, explicit coverage and explicit missing intervals. |
+| `GET /api/v1/status` | Bearer token and exact `meter_id` | Reports persisted normalized dataset metadata, independent freshness fields, completeness, and source status. |
+| `GET /api/v1/measurements` | Bearer token; `meter_id`; RFC 3339 UTC `start` inclusive and `end` exclusive; optional `limit` and opaque server cursor | Returns a deterministic keyset page ordered by interval start and channel from one dataset revision. |
 
 Unknown routes return `404`. Unsupported methods return `405` only after
 authentication for a known route. Unknown or duplicate query fields, absolute
 request targets, fragments, malformed UTC timestamps, ranges over 60 days,
-limits outside `1..1000`, and unknown cursors fail closed.
+limits outside `1..1000`, and unknown, malformed, stale, wrong-range, or
+nonexistent-position cursors fail closed. A cursor is bounded, canonical,
+contains no EAN/ELM, and is tied to the dataset revision and requested range.
 
-## Synthetic status model
+## Normalized persistent model
 
 The status and measurement responses keep these concepts independent:
 
-| Field | Meaning in the skeleton |
+| Field | Meaning |
 | --- | --- |
 | `data_timestamp` | Latest end instant of a valid measurement interval; never request time. |
-| `last_attempt` | Synthetic collection-attempt start. |
-| `last_success` | `null`, because the synthetic dataset is partial and a partial attempt must not advance global success. |
-| `completeness` | Explicit `partial` state with expected, valid, missing, and invalid counts. |
-| `source_status` | `synthetic_offline_partial`; it never implies CEZ availability. |
-| `dataset_revision` | Immutable revision shared by all pages. |
+| `last_attempt` | Start of the most recent one-shot collection attempt. |
+| `last_success` | Advances only after consumption and production parse and commit together. |
+| `completeness` | Requested-range or dataset totals split into valid, missing, and invalid counts. |
+| `source_status` | Fixed `ok`, `partial`, or `no_data` state; it contains no raw CEZ error. |
+| `dataset_revision` | Bounded opaque revision changed only by a successful atomic dataset commit and shared by every page. |
 | `values` | Interval records carrying explicit quality and a decimal-string value only when valid. |
 | `missing` | Explicit missing interval/rationale records. |
 
-The fixture contains one valid import interval with `value_kwh="0.125"` and
-one missing interval with `value_kwh=null`. Missing or failed data never becomes
-zero. A valid measured zero will be representable only as decimal string
-`"0"` with `quality="valid"` after its source semantics are verified.
+The database is `/data/cez-pnd.sqlite3`, mode `0600`, owned by runtime UID 2000.
+It stores no EAN, ELM, username, password, token, or cookie. Consumption maps
+to `grid_import`; production maps to `grid_export`. Valid energy is serialized
+as an exact decimal string. Missing intervals are returned with
+`value_kwh=null` and also listed in `missing[]`. Invalid intervals increment
+`invalid_count` and are omitted from `values`. Missing, invalid, or failed data
+never becomes zero.
+
+Both channels are UPSERTed in one `BEGIN IMMEDIATE` transaction. A parser,
+storage, interruption, or second-channel failure cannot publish a partial new
+revision; the previous committed dataset remains readable. Re-import is
+idempotent and a corrected interval replaces the prior value.
 
 ## Explicitly absent functionality
 
@@ -109,8 +120,9 @@ behavior:
 
 - O-12 token pairing, lifecycle, TLS identity, and integration-side pinning;
 - O-14 final limits, rate limits, concurrency, retention, and staleness budgets;
-- O-09 actual meter identity/binding, while EAN/ELM remain absent here;
-- O-10 CEZ CSV channels, units, precision, timezone, DST, quality, and range;
+- O-09 long-term meter identity/binding beyond the current single-App opaque ID;
+- remaining live variants of CEZ CSV schema/status semantics outside the
+  validated Phase 4B parser fixtures;
 - the future `POST /api/v1/refresh` contract and worker lifecycle;
 - HA App `/data` permissions and restart/backup behavior;
 - Home Assistant internal DNS identity and end-to-end HTTPS connectivity on the

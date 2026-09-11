@@ -43,6 +43,37 @@ class CollectorEntrypointTests(unittest.TestCase):
             self.assertEqual(ownership, [(probe, 2000, 2000, False)])
             self.assertEqual(modes, [(probe, 0o700, False)])
 
+    def test_bootstrap_creates_private_dataset_file_without_touching_siblings(self) -> None:
+        ownership = []
+        modes = []
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            data.mkdir()
+            marker = data / "existing-private-file"
+            marker.write_text("unchanged")
+            dataset = collector_entrypoint.prepare_dataset_file(
+                data,
+                chown=lambda path, uid, gid, *, follow_symlinks: ownership.append((path, uid, gid, follow_symlinks)),
+                chmod=lambda path, mode, *, follow_symlinks: modes.append((path, mode, follow_symlinks)),
+            )
+            self.assertEqual(dataset.name, "cez-pnd.sqlite3")
+            self.assertEqual(marker.read_text(), "unchanged")
+            self.assertEqual(ownership, [(dataset, 2000, 2000, False)])
+            self.assertEqual(modes, [(dataset, 0o600, False)])
+
+    def test_bootstrap_rejects_symlinked_dataset_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            target = Path(temporary) / "target"
+            data.mkdir()
+            target.write_bytes(b"")
+            try:
+                (data / "cez-pnd.sqlite3").symlink_to(target)
+            except OSError:
+                self.skipTest("file symlinks are unavailable")
+            with self.assertRaisesRegex(RuntimeError, "unsafe dataset file"):
+                collector_entrypoint.prepare_dataset_file(data, chown=mock.Mock(), chmod=mock.Mock())
+
     def test_bootstrap_rejects_symlinked_probe_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"
@@ -118,6 +149,10 @@ class CollectorEntrypointTests(unittest.TestCase):
             side_effect=lambda: calls.append("prepare"),
         ), mock.patch.object(
             collector_entrypoint,
+            "prepare_dataset_file",
+            side_effect=lambda: calls.append("dataset"),
+        ), mock.patch.object(
+            collector_entrypoint,
             "drop_privileges",
             side_effect=lambda: calls.append("drop"),
         ), mock.patch.object(
@@ -126,7 +161,7 @@ class CollectorEntrypointTests(unittest.TestCase):
             side_effect=execute,
         ):
             self.assertEqual(collector_entrypoint.main(), 1)
-        self.assertEqual(calls, ["prepare", "drop", "exec"])
+        self.assertEqual(calls, ["prepare", "dataset", "drop", "exec"])
 
     def test_failed_identity_verification_cannot_continue_as_root(self) -> None:
         with mock.patch.object(

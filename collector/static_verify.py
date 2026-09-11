@@ -30,6 +30,8 @@ CSV_PARSER_SOURCE = (ROOT / "collector_service" / "cez_csv_parser.py").read_text
 CSV_MODELS_SOURCE = (ROOT / "collector_service" / "cez_csv_models.py").read_text(
     encoding="utf-8"
 )
+API_SOURCE = (ROOT / "collector_service" / "api.py").read_text(encoding="utf-8")
+DATASET_STORE_SOURCE = (ROOT / "collector_service" / "dataset_store.py").read_text(encoding="utf-8")
 THIRD_PARTY_NOTICES = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
     encoding="utf-8"
 )
@@ -160,7 +162,7 @@ assert routes == {"/health", "/status", "/measurements"}
 assert "hmac.compare_digest" in SOURCE
 assert "Cache-Control" in SOURCE and "no-store" in SOURCE
 assert "Access-Control-Allow-Origin" not in SOURCE
-assert "value_kwh\": None" in SOURCE
+assert '"value_kwh": row.value_kwh' in API_SOURCE
 assert "value_kwh\": 0" not in SOURCE
 assert "BIND_ADDRESS = \"0.0.0.0\"" in SOURCE
 assert "BIND_PORT = 8443" in SOURCE
@@ -169,6 +171,10 @@ assert 'context.set_alpn_protocols(["http/1.1"])' in STRICT_TRANSPORT_SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
 assert "signal.SIGTERM" in SOURCE
+assert 'DATASET_FILE_NAME = "cez-pnd.sqlite3"' in ENTRYPOINT_SOURCE
+assert "prepare_dataset_file()" in ENTRYPOINT_SOURCE
+assert "mode_setter(dataset, 0o600" in ENTRYPOINT_SOURCE
+assert "owner_setter(dataset, RUNTIME_UID, RUNTIME_GID" in ENTRYPOINT_SOURCE
 assert '"event": "service_stopped"' in SERVER_SOURCE
 assert (
     'SUPERVISOR_SELF_INFO_URL = "http://supervisor/addons/self/info"'
@@ -418,6 +424,19 @@ assert "expected not in {92, 96, 100}" in CSV_PARSER_SOURCE
 assert "class IntervalRecord" in CSV_MODELS_SOURCE
 assert "class ParsedPndData" in CSV_MODELS_SOURCE
 assert "value_kwh: Decimal | None" in CSV_MODELS_SOURCE
+assert 'INVALID = "invalid"' in CSV_MODELS_SOURCE
+assert 'DATASET_PATH = Path("/data/cez-pnd.sqlite3")' in DATASET_STORE_SOURCE
+assert "sqlite3.connect" in DATASET_STORE_SOURCE
+assert "BEGIN IMMEDIATE" in DATASET_STORE_SOURCE
+assert "ON CONFLICT(channel,interval_start) DO UPDATE" in DATASET_STORE_SOURCE
+assert "CHECK(valid_count+missing_count+invalid_count=expected_count)" in DATASET_STORE_SOURCE
+assert 'getattr(os, "O_NOFOLLOW", 0)' in DATASET_STORE_SOURCE
+assert "os.chmod(self.path, 0o600)" in DATASET_STORE_SOURCE
+assert "NormalizedDatasetStore" in API_SOURCE
+assert "SYNTHETIC_START" not in API_SOURCE
+assert "SYNTHETIC_REVISION" not in API_SOURCE
+assert "data_probe_dataset_committed" in HTTP_AUTH_SOURCE
+assert "parse_pnd_csv(" in DATA_PROBE_SOURCE
 assert "Copyright (c) 2026 igracek" in CSV_PARSER_SOURCE
 assert "Copyright (c) 2026 igracek" in THIRD_PARTY_NOTICES
 assert '"data_probe_export_response_observed"' in HTTP_AUTH_SOURCE

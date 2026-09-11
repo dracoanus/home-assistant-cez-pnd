@@ -112,8 +112,10 @@ class CezCsvParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.intervals[0].value_kwh, Decimal("0.600"))
 
-    def test_placeholders_and_invalid_status_remain_missing(self) -> None:
-        for value, status in (("N/A", "OK"), ("9", "Neplatná"), ("", "missing")):
+    def test_placeholders_missing_and_invalid_remain_distinct(self) -> None:
+        for value, status, quality in (("N/A", "OK", IntervalQuality.MISSING),
+            ("9", "Neplatná", IntervalQuality.INVALID),
+            ("", "missing", IntervalQuality.MISSING)):
             with self.subTest(value=value, status=status):
                 parsed = parse_pnd_csv(
                     _single(value=value, status=status),
@@ -122,7 +124,7 @@ class CezCsvParserTests(unittest.TestCase):
                 )
                 record = parsed.intervals[0]
                 self.assertIsNone(record.value_kwh)
-                self.assertEqual(record.quality, IntervalQuality.MISSING)
+                self.assertEqual(record.quality, quality)
         with self.assertRaises(PndCsvParseError) as raised:
             parse_pnd_csv(
                 _single(status="unexpected"),
