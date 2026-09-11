@@ -18,6 +18,8 @@ API_SCHEMA_VERSION = "1.0"
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_COLLECTION_ITEMS = 1000
 MAX_COMBINED_ITEMS = 12_000
+# SQLite/API dataset counters are metadata, not response collection sizes.
+MAX_METADATA_COUNT = (1 << 63) - 1
 MAX_PAGES = 64
 MAX_TEXT_LENGTH = 255
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
@@ -482,7 +484,7 @@ def _parse_completeness(value: Any, include_range: bool) -> CollectorCompletenes
         if (
             isinstance(count, bool)
             or not isinstance(count, int)
-            or not 0 <= count <= MAX_COMBINED_ITEMS
+            or not 0 <= count <= MAX_METADATA_COUNT
         ):
             raise CollectorProtocolError("invalid_completeness")
         counts.append(count)
