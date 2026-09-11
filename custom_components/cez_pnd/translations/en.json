@@ -30,6 +30,20 @@
       "already_configured": "This meter is already configured"
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling interval",
+        "description": "Configure how often Home Assistant checks the local Collector for a new dataset revision.",
+        "data": {
+          "poll_interval_seconds": "Polling interval"
+        }
+      }
+    },
+    "error": {
+      "invalid_poll_interval": "Enter a whole number from 30 through 3600 seconds"
+    }
+  },
   "entity": {
     "sensor": {
       "collector_health": {"name": "Collector health"},

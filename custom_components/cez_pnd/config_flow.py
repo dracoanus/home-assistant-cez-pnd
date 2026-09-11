@@ -27,7 +27,12 @@ from .const import (
     CONF_COLLECTOR_URL,
     CONF_METER_ID,
     DEFAULT_COLLECTOR_URL,
+    CONF_POLL_INTERVAL_SECONDS,
+    DEFAULT_POLL_INTERVAL_SECONDS,
     DOMAIN,
+    MAX_POLL_INTERVAL_SECONDS,
+    MIN_POLL_INTERVAL_SECONDS,
+    validate_poll_interval_seconds,
 )
 
 
@@ -69,6 +74,14 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure a single CEZ PND Collector connection."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(
+        _config_entry: config_entries.ConfigEntry,
+    ) -> CezPndOptionsFlow:
+        """Return the polling interval options flow."""
+
+        return CezPndOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -141,6 +154,49 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_API_TOKEN): selector.TextSelector(
                         selector.TextSelectorConfig(
                             type=selector.TextSelectorType.PASSWORD
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+        )
+
+
+class CezPndOptionsFlow(config_entries.OptionsFlow):
+    """Configure the local revision polling interval."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        current = self.config_entry.options.get(
+            CONF_POLL_INTERVAL_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS
+        )
+        if user_input is not None:
+            try:
+                interval = validate_poll_interval_seconds(
+                    user_input.get(CONF_POLL_INTERVAL_SECONDS)
+                )
+            except ValueError:
+                errors[CONF_POLL_INTERVAL_SECONDS] = "invalid_poll_interval"
+            else:
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_POLL_INTERVAL_SECONDS: interval},
+                )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POLL_INTERVAL_SECONDS, default=current
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=MIN_POLL_INTERVAL_SECONDS,
+                            max=MAX_POLL_INTERVAL_SECONDS,
+                            step=1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="seconds",
                         )
                     )
                 }
