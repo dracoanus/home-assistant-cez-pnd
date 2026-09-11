@@ -35,6 +35,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    from .statistics import CezPndStatisticsManager
+
+    statistics_manager = CezPndStatisticsManager(hass, entry, client)
+    entry.async_on_unload(
+        coordinator.async_add_listener(
+            lambda: statistics_manager.schedule(coordinator.data.status)
+        )
+    )
+    statistics_manager.schedule(coordinator.data.status)
     return True
 
 
