@@ -43,6 +43,7 @@ options:
   cez_http_auth_discovery_mode: false
   cez_requests_preauth_compatibility_mode: false
   cez_data_probe_mode: false
+  cez_sync_enabled: false
   cez_data_probe_date: null
   cez_ean: null
   cez_elm: null
@@ -56,6 +57,7 @@ schema:
   cez_http_auth_discovery_mode: bool
   cez_requests_preauth_compatibility_mode: bool
   cez_data_probe_mode: bool
+  cez_sync_enabled: bool
   cez_data_probe_date: str?
   cez_start_url: url?
   cez_auth_origin: url?

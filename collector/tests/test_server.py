@@ -9,6 +9,7 @@ import io
 import re
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 from collector_service import runtime_config, server
 from collector_service.api import ApiResponse
@@ -76,6 +77,75 @@ class CollectorServerLifecycleTest(unittest.TestCase):
         )
         self.assertTrue(payload["timestamp"].endswith("Z"))
         self.assertTrue(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", payload["timestamp"]))
+
+    def test_sync_disabled_preserves_api_only_startup(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            requests_preauth_compatibility=False,
+            data_probe=None,
+            http_auth_discovery=None,
+            sync=None,
+            verifier=mock.Mock(),
+            tls_context=mock.Mock(),
+            source="test",
+        )
+        fake_server = mock.Mock()
+        fake_server.socket = object()
+        output = io.StringIO()
+        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch.object(
+            server, "CollectorHttpServer", return_value=fake_server
+        ), mock.patch(
+            "collector_service.sync_worker.SyncWorker"
+        ) as worker, mock.patch.object(
+            server.signal, "signal"
+        ), mock.patch(
+            "sys.stdout", output
+        ):
+            self.assertEqual(server.main(), 0)
+        worker.assert_not_called()
+        fake_server.serve_forever.assert_called_once_with(poll_interval=0.5)
+
+    def test_https_starts_before_background_sync_and_worker_stops(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            requests_preauth_compatibility=False,
+            data_probe=None,
+            http_auth_discovery=None,
+            sync=mock.Mock(),
+            verifier=mock.Mock(),
+            tls_context=mock.Mock(),
+            source="test",
+        )
+        fake_server = mock.Mock()
+        fake_server.socket = object()
+        output = io.StringIO()
+        worker_instance = mock.Mock()
+
+        def worker_started() -> None:
+            self.assertIn('"event":"service_started"', output.getvalue())
+
+        worker_instance.start.side_effect = worker_started
+        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch.object(
+            server, "CollectorHttpServer", return_value=fake_server
+        ), mock.patch(
+            "collector_service.sync_worker.SyncWorker", return_value=worker_instance
+        ), mock.patch.object(
+            server.signal, "signal"
+        ), mock.patch(
+            "sys.stdout", output
+        ):
+            self.assertEqual(server.main(), 0)
+        worker_instance.start.assert_called_once_with()
+        worker_instance.stop.assert_called_once_with()
+        fake_server.serve_forever.assert_called_once_with(poll_interval=0.5)
 
 
 if __name__ == "__main__":

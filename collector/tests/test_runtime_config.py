@@ -68,6 +68,57 @@ class RuntimeConfigurationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown private configuration"):
             runtime_config.PrivateConfigurationError("untrusted-dynamic-value")
 
+    def test_sync_configuration_is_explicit_bounded_and_secret_safe(self) -> None:
+        self.assertIsNone(runtime_config._load_sync_configuration({}))
+        options = {
+            "cez_sync_enabled": True,
+            "cez_username": "private-user",
+            "cez_password": "private-password",
+            "cez_ean": "8" * 18,
+        }
+        configuration = runtime_config._load_sync_configuration(options)
+        self.assertEqual(configuration.ean, "8" * 18)
+        self.assertIsNone(configuration.electrometer_id)
+        rendered = repr(configuration)
+        self.assertNotIn("private-user", rendered)
+        self.assertNotIn("private-password", rendered)
+        self.assertNotIn("8" * 18, rendered)
+
+    def test_sync_requires_credentials_and_meter_identity(self) -> None:
+        base = {"cez_sync_enabled": True}
+        cases = (
+            (base, "discovery_config_missing_username"),
+            ({**base, "cez_username": "user"}, "discovery_config_missing_password"),
+            (
+                {**base, "cez_username": "user", "cez_password": "password"},
+                "sync_config_meter_identity_required",
+            ),
+        )
+        for options, code in cases:
+            with self.subTest(code=code), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._load_sync_configuration(options)
+            self.assertEqual(raised.exception.code, code)
+
+    def test_sync_conflicts_with_every_one_shot_mode(self) -> None:
+        for mode in (
+            "cez_discovery_mode",
+            "cez_http_auth_discovery_mode",
+            "cez_requests_preauth_compatibility_mode",
+            "cez_data_probe_mode",
+        ):
+            with self.subTest(mode=mode), self.assertRaises(
+                runtime_config.DiscoveryConfigurationError
+            ) as raised:
+                runtime_config._validate_discovery_modes(
+                    {"cez_sync_enabled": True, mode: True}
+                )
+            self.assertEqual(raised.exception.code, "sync_config_conflicting_modes")
+        with self.assertRaises(runtime_config.DiscoveryConfigurationError) as raised:
+            runtime_config._validate_discovery_modes({"cez_sync_enabled": "yes"})
+        self.assertEqual(raised.exception.code, "sync_config_invalid_mode")
+
     def test_supervisor_self_info_url_is_exact_v1_addon_route(self) -> None:
         self.assertEqual(
             runtime_config.SUPERVISOR_SELF_INFO_URL,

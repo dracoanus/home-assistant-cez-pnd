@@ -356,6 +356,44 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertIn("data_probe_production_parsed", names)
         self.assertIn("data_probe_dataset_committed", names)
 
+    def test_automatic_collection_does_not_persist_raw_responses(self) -> None:
+        session = _successful_session()
+        transport = requests_preauth.RequestsSessionTransport(
+            resolver=_resolver, session_factory=lambda: session
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "must-not-exist"
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+            timestamps = iter(
+                (
+                    datetime(2026, 9, 8, tzinfo=UTC),
+                    datetime(2026, 9, 8, 1, tzinfo=UTC),
+                )
+            )
+            with mock.patch.object(
+                cez_data_probe,
+                "parse_pnd_csv",
+                side_effect=[
+                    _parsed(PndChannel.CONSUMPTION),
+                    _parsed(PndChannel.PRODUCTION),
+                ],
+            ):
+                result = cez_data_probe.run_data_probe(
+                    _configuration(),
+                    transport,
+                    resolver=transport.resolve,
+                    output_directory=output,
+                    dataset_store=store,
+                    persist_raw_outputs=False,
+                    now=lambda: next(timestamps),
+                    emit=lambda _event: None,
+                )
+            self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
+            self.assertFalse(output.exists())
+            self.assertIsNotNone(store.read_status())
+
     def test_meter_identity_is_required(self) -> None:
         client = _ProbeClient(
             [

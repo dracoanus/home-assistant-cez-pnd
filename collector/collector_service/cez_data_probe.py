@@ -82,6 +82,7 @@ class CezDataProbe:
         *,
         output_directory: Path = PROBE_DIRECTORY,
         dataset_store: NormalizedDatasetStore | None = None,
+        persist_raw_outputs: bool = True,
         collected_at: datetime | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         emit: Callable[[SafeHttpAuthEvent], None] | None = None,
@@ -89,6 +90,7 @@ class CezDataProbe:
         self._configuration = configuration
         self._output_directory = output_directory
         self._dataset_store = dataset_store
+        self._persist_raw_outputs = persist_raw_outputs
         self._collected_at = collected_at
         self._now = now
         self._emit = emit or (lambda _event: None)
@@ -141,21 +143,23 @@ class CezDataProbe:
         )
         self._emit(SafeHttpAuthEvent("production_export_received"))
 
-        summary_fields = observation.as_dict()
-        summary_fields.update(
-            {
-                "schema_version": "1",
-                "dashboard_json_object": metadata.usable,
-                "meter_collection_present": metadata.meter_collection_present,
-                "consumption_bytes": len(consumption),
-                "production_bytes": len(production),
-            }
-        )
-        summary = _encode_summary(summary_fields)
-        try:
-            self._store(summary, consumption, production)
-        except (OSError, ValueError) as error:
-            raise _AuthFailure("data_probe_storage_failed") from error
+        if self._persist_raw_outputs:
+            summary_fields = observation.as_dict()
+            summary_fields.update(
+                {
+                    "schema_version": "1",
+                    "dashboard_json_object": metadata.usable,
+                    "meter_collection_present": metadata.meter_collection_present,
+                    "consumption_bytes": len(consumption),
+                    "production_bytes": len(production),
+                }
+            )
+            try:
+                self._store(
+                    _encode_summary(summary_fields), consumption, production
+                )
+            except (OSError, ValueError) as error:
+                raise _AuthFailure("data_probe_storage_failed") from error
 
         if self._dataset_store is not None:
             parsed_consumption = self._parse(
@@ -270,10 +274,11 @@ class CezDataProbe:
                 metadata_observation=observation,
             )
         )
-        try:
-            self._store_metadata_summary(observation)
-        except (OSError, ValueError) as error:
-            raise _AuthFailure("data_probe_storage_failed") from error
+        if self._persist_raw_outputs:
+            try:
+                self._store_metadata_summary(observation)
+            except (OSError, ValueError) as error:
+                raise _AuthFailure("data_probe_storage_failed") from error
 
         if content_type != "application/json":
             raise _AuthFailure("data_probe_metadata_content_type_invalid")
@@ -509,6 +514,7 @@ def run_data_probe(
     resolver: Resolver = _default_resolver,
     output_directory: Path = PROBE_DIRECTORY,
     dataset_store: NormalizedDatasetStore | None = None,
+    persist_raw_outputs: bool = True,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     emit: Callable[[SafeHttpAuthEvent], None] | None = None,
 ) -> AuthResult:
@@ -524,7 +530,7 @@ def run_data_probe(
         return AuthResult(AuthStatus.FAILED, "data_probe_storage_failed")
     probe = CezDataProbe(
         configuration, output_directory=output_directory, dataset_store=store,
-        now=now, emit=safe_emit
+        persist_raw_outputs=persist_raw_outputs, now=now, emit=safe_emit
     )
     result = CezHttpAuthClient(
         configuration,
