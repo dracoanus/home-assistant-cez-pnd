@@ -1,9 +1,9 @@
 # CEZ PND Collector App
 
-The released `0.2.3` service provides the authenticated synthetic Collector
-API. The unreleased Phase 3A source adds an explicit one-shot CEZ
-authentication-discovery mode. Normal startup remains synthetic-only and does
-not start a browser or contact CEZ.
+The Collector service provides the authenticated API from the normalized
+dataset in `/data/cez-pnd.sqlite3`. The Phase 3A source adds an explicit
+one-shot CEZ authentication-discovery mode. Normal startup performs no CEZ
+request and serves only the last successfully committed dataset.
 
 Before starting the App, provide:
 
@@ -77,7 +77,7 @@ and exactly two raw CSV exports for one configured calendar day. Set
 `cez_data_probe_date` to an ISO date such as `2026-09-08`. Configure at least
 one private meter selector: `cez_ean` (exactly 18 ASCII digits), `cez_elm`, or
 both. Both are masked private options; EAN and ELM remain inside the Collector
-and are never written to logs. Normal Collector startup remains synthetic-only.
+and are never written to logs. Normal Collector startup remains offline.
 
 The authenticated meter lookup is best-effort when a validated `cez_elm` is
 already configured: an unavailable lookup is recorded structurally and export
@@ -104,15 +104,19 @@ For an owner-authorized manual HA OS probe, keep the App stopped, enable only
 `cez_data_probe_mode`, retain the existing private CEZ credentials, set exactly
 one probe date, optionally set the masked ELM value, save, and start the App
 once. Require the fixed `data_probe_started`, metadata/export receipt,
-`data_probe_complete`, cleanup, and authenticated result events. The App exits
-after the one-shot attempt. Then disable the mode and remove the probe-only
-date/ELM options before returning to normal service operation. A failed or
-incomplete event sequence is not a successful data acquisition result.
+`data_probe_consumption_parsed`, `data_probe_production_parsed`,
+`data_probe_dataset_committed`, `data_probe_complete`, cleanup, and
+authenticated result events. The App exits after the one-shot attempt. Then
+disable the mode and restart into normal HTTPS service mode to expose the
+committed revision. A failed or incomplete event sequence is not a successful
+data acquisition result.
 
-The CSV payload remains unparsed in this phase. Initial historical backfill,
-persisted synchronization checkpoints, incremental fetches, and a bounded
-overlap with idempotent correction upserts belong to a later data-acquisition
-phase.
+After both bounded CSV responses pass HTTP validation, the probe parses the
+downloaded bytes directly, preserves valid/missing/invalid quality separately,
+and commits consumption plus production atomically to SQLite. Parser or
+database failure leaves the previous revision intact. Initial historical
+backfill, scheduling, persisted synchronization checkpoints, incremental
+fetches, and a bounded correction overlap belong to a later phase.
 
 ## Temporary requests PREAUTH compatibility mode
 

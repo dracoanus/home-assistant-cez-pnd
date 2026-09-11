@@ -84,6 +84,9 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "data_probe_export_response_observed",
         "data_probe_meter_selection_observed",
         "data_probe_meter_lookup_unavailable",
+        "data_probe_consumption_parsed",
+        "data_probe_production_parsed",
+        "data_probe_dataset_committed",
         "data_probe_complete",
         "data_probe_failed",
         "auth_state_needs_live_verification",
@@ -305,6 +308,76 @@ class DataProbeMeterLookupUnavailableObservation:
 
 
 @dataclass(frozen=True)
+class DataProbeParsedObservation:
+    channel: str
+    interval_count: int
+    valid_count: int
+    missing_count: int
+    invalid_count: int
+    complete: bool
+
+    def __post_init__(self) -> None:
+        if self.channel not in {"consumption", "production"}:
+            raise ValueError("unsafe parsed channel")
+        if any(
+            type(value) is not int or not 0 <= value <= 10_000
+            for value in (
+                self.interval_count,
+                self.valid_count,
+                self.missing_count,
+                self.invalid_count,
+            )
+        ) or self.valid_count + self.missing_count + self.invalid_count != self.interval_count or type(self.complete) is not bool:
+            raise ValueError("unsafe parsed counts")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "channel": self.channel,
+            "interval_count": self.interval_count,
+            "valid_count": self.valid_count,
+            "missing_count": self.missing_count,
+            "invalid_count": self.invalid_count,
+            "complete": self.complete,
+        }
+
+
+@dataclass(frozen=True)
+class DataProbeDatasetCommittedObservation:
+    consumption_intervals: int
+    consumption_valid: int
+    consumption_missing: int
+    consumption_invalid: int
+    production_intervals: int
+    production_valid: int
+    production_missing: int
+    production_invalid: int
+    dataset_state: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.consumption_intervals,
+            self.consumption_valid,
+            self.consumption_missing,
+            self.consumption_invalid,
+            self.production_intervals,
+            self.production_valid,
+            self.production_missing,
+            self.production_invalid,
+        )
+        if any(type(value) is not int or not 0 <= value <= 10_000 for value in values):
+            raise ValueError("unsafe committed counts")
+        if self.consumption_valid + self.consumption_missing + self.consumption_invalid != self.consumption_intervals:
+            raise ValueError("invalid consumption counts")
+        if self.production_valid + self.production_missing + self.production_invalid != self.production_intervals:
+            raise ValueError("invalid production counts")
+        if self.dataset_state not in {"complete", "partial"}:
+            raise ValueError("unsafe dataset state")
+
+    def as_dict(self) -> dict[str, object]:
+        return dict(self.__dict__)
+
+
+@dataclass(frozen=True)
 class SafeHttpAuthEvent:
     event: str
     hostname: str | None = None
@@ -323,13 +396,44 @@ class SafeHttpAuthEvent:
     meter_lookup_unavailable_observation: (
         DataProbeMeterLookupUnavailableObservation | None
     ) = field(default=None, repr=False)
+    parsed_observation: DataProbeParsedObservation | None = field(default=None, repr=False)
+    dataset_committed_observation: DataProbeDatasetCommittedObservation | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.event not in SAFE_HTTP_AUTH_EVENTS:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "data_probe_meter_lookup_unavailable":
+        if self.event == "data_probe_dataset_committed":
+            if self.dataset_committed_observation is None or any(
+                value is not None
+                for value in (
+                    self.hostname, self.status, self.code, self.metadata_observation,
+                    self.json_root_type, self.export_observation,
+                    self.meter_selection_observation,
+                    self.meter_lookup_unavailable_observation,
+                    self.parsed_observation,
+                )
+            ):
+                raise ValueError("invalid dataset committed event")
+        elif self.dataset_committed_observation is not None:
+            raise ValueError("unexpected dataset committed observation")
+        elif self.event in {"data_probe_consumption_parsed", "data_probe_production_parsed"}:
+            if self.parsed_observation is None or self.parsed_observation.channel != self.event.removeprefix("data_probe_").removesuffix("_parsed") or any(
+                value is not None for value in (
+                    self.hostname, self.status, self.code, self.metadata_observation,
+                    self.json_root_type, self.export_observation,
+                    self.meter_selection_observation,
+                    self.meter_lookup_unavailable_observation,
+                    self.dataset_committed_observation,
+                )
+            ):
+                raise ValueError("invalid parsed event")
+        elif self.parsed_observation is not None:
+            raise ValueError("unexpected parsed observation")
+        elif self.event == "data_probe_meter_lookup_unavailable":
             if (
                 self.hostname is not None
                 or self.status is not None
@@ -417,6 +521,10 @@ class SafeHttpAuthEvent:
             result.update(self.meter_selection_observation.as_dict())
         if self.meter_lookup_unavailable_observation is not None:
             result.update(self.meter_lookup_unavailable_observation.as_dict())
+        if self.parsed_observation is not None:
+            result.update(self.parsed_observation.as_dict())
+        if self.dataset_committed_observation is not None:
+            result.update(self.dataset_committed_observation.as_dict())
         return result
 
 
@@ -483,6 +591,8 @@ SAFE_ERROR_CODES = frozenset(
         "data_probe_production_export_content_type_invalid",
         "data_probe_production_export_html_rejected",
         "data_probe_storage_failed",
+        "data_probe_consumption_parse_failed",
+        "data_probe_production_parse_failed",
     }
 )
 

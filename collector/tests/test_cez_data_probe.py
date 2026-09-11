@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 import io
 import json
 import os
@@ -22,6 +23,8 @@ from collector_service import (
     runtime_config,
     server,
 )
+from collector_service.cez_csv_models import IntervalQuality, IntervalRecord, ParsedPndData, PndChannel
+from collector_service.dataset_store import NormalizedDatasetStore
 
 
 GLOBAL_IP = "93.184.216.34"
@@ -35,6 +38,13 @@ PRODUCTION = b"private-production-csv\n"
 TEST_EAN = "8" * 18
 OTHER_TEST_EAN = "7" * 18
 MATCHED_METADATA = b'{"meters":[{"elm":"secret-elm"}]}'
+
+
+def _parsed(channel: PndChannel) -> ParsedPndData:
+    start = datetime(2026, 9, 8, tzinfo=UTC)
+    return ParsedPndData(channel, channel.profile_marker, "utf-8", ";", (
+        IntervalRecord(channel, start, start + timedelta(minutes=15), Decimal("1.25"), IntervalQuality.VALID, date(2026, 9, 8)),
+    ))
 
 
 class _Headers(dict[str, str]):
@@ -256,13 +266,14 @@ class CezDataProbeTests(unittest.TestCase):
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "probe"
-            result = cez_data_probe.run_data_probe(
-                _configuration(),
-                transport,
-                resolver=transport.resolve,
-                output_directory=output,
-                emit=events.append,
-            )
+            store = NormalizedDatasetStore(Path(temporary) / "dataset.sqlite3", required_uid=None)
+            timestamps = iter((datetime(2026, 9, 8, tzinfo=UTC), datetime(2026, 9, 8, 1, tzinfo=UTC)))
+            with mock.patch.object(cez_data_probe, "parse_pnd_csv", side_effect=[_parsed(PndChannel.CONSUMPTION), _parsed(PndChannel.PRODUCTION)]):
+                result = cez_data_probe.run_data_probe(
+                    _configuration(), transport, resolver=transport.resolve,
+                    output_directory=output, dataset_store=store,
+                    now=lambda: next(timestamps), emit=events.append,
+                )
             self.assertEqual(result.status, cez_http_auth.AuthStatus.AUTHENTICATED)
             self.assertEqual(len(session.calls), 7)
             self.assertEqual(session.calls[4][1], cez_http_auth.CEZ_PND_DASHBOARD_DATA_URL)
@@ -299,6 +310,8 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertEqual(summary["top_level_keys"], ["idDeviceSet", "meters"])
             self.assertEqual(summary["consumption_bytes"], len(CONSUMPTION))
             self.assertEqual(summary["production_bytes"], len(PRODUCTION))
+            self.assertEqual(store.read_status().last_attempt, "2026-09-08T00:00:00Z")
+            self.assertEqual(store.read_status().last_success, "2026-09-08T01:00:00Z")
             if os.name == "posix":
                 self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
                 for name in (
@@ -339,6 +352,9 @@ class CezDataProbeTests(unittest.TestCase):
             filtered.index("data_probe_complete"),
         )
         self.assertIn("production_export_received", names)
+        self.assertIn("data_probe_consumption_parsed", names)
+        self.assertIn("data_probe_production_parsed", names)
+        self.assertIn("data_probe_dataset_committed", names)
 
     def test_meter_identity_is_required(self) -> None:
         client = _ProbeClient(
@@ -989,16 +1005,37 @@ class CezDataProbeTests(unittest.TestCase):
         transport = requests_preauth.RequestsSessionTransport(
             resolver=_resolver, session_factory=lambda: session
         )
-        with mock.patch.object(
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
             cez_data_probe.CezDataProbe, "_store", side_effect=OSError("private")
         ):
             result = cez_data_probe.run_data_probe(
-                _configuration(), transport, resolver=transport.resolve
+                _configuration(), transport, resolver=transport.resolve,
+                dataset_store=NormalizedDatasetStore(Path(temporary) / "dataset.sqlite3", required_uid=None),
             )
         self.assertEqual(result.status, cez_http_auth.AuthStatus.FAILED)
         self.assertEqual(result.code, "data_probe_storage_failed")
         self.assertTrue(session.closed)
         self.assertTrue(session.cookies.cleared)
+
+    def test_parser_failure_does_not_replace_previous_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(Path(temporary) / "dataset.sqlite3", required_uid=None,
+                revision_factory=lambda: "ds_" + "b" * 32)
+            previous = store.commit_dataset(_parsed(PndChannel.CONSUMPTION),
+                _parsed(PndChannel.PRODUCTION), collected_at=datetime(2026, 9, 8, tzinfo=UTC))
+            probe = cez_data_probe.CezDataProbe(_configuration(),
+                output_directory=Path(temporary) / "raw", dataset_store=store,
+                collected_at=datetime(2026, 9, 9, tzinfo=UTC))
+            client = _ProbeClient([
+                _http_response(200, MATCHED_METADATA),
+                _http_response(200, CONSUMPTION, "text/csv"),
+                _http_response(200, PRODUCTION, "text/csv"),
+            ])
+            with mock.patch.object(cez_data_probe, "parse_pnd_csv",
+                side_effect=cez_data_probe.PndCsvParseError("csv_schema_invalid")), self.assertRaises(cez_http_auth._AuthFailure) as raised:
+                probe.collect(client)  # type: ignore[arg-type]
+            self.assertEqual(raised.exception.code, "data_probe_consumption_parse_failed")
+            self.assertEqual(store.read_status().revision, previous.revision)
 
     def test_server_selects_explicit_data_probe_mode(self) -> None:
         configuration = SimpleNamespace(

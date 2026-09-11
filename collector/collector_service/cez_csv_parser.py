@@ -36,8 +36,9 @@ DEFAULT_SOURCE_TIMEZONE = "Europe/Prague"
 _VALID_STATUSES = frozenset(
     {"", "1", "a", "ok", "true", "v", "valid", "validni", "platna", "platny"}
 )
-_MISSING_STATUSES = frozenset(
-    {"0", "false", "invalid", "missing", "n", "n/a", "na", "neplatna", "neplatny"}
+_MISSING_STATUSES = frozenset({"missing", "n/a", "na"})
+_INVALID_STATUSES = frozenset(
+    {"0", "false", "invalid", "n", "neplatna", "neplatny"}
 )
 _PLACEHOLDERS = frozenset({"", "-", "--", "n/a", "na", "none", "null"})
 
@@ -270,7 +271,10 @@ def _parse_rows(
         status = _parse_status(row[columns.status] if columns.status is not None else "")
         raw_value = row[columns.value].strip()
         placeholder = _normalize(raw_value) in _PLACEHOLDERS
-        if status is IntervalQuality.MISSING or placeholder:
+        if status is IntervalQuality.INVALID:
+            value_kwh = None
+            quality = IntervalQuality.INVALID
+        elif status is IntervalQuality.MISSING or placeholder:
             value_kwh = None
             quality = IntervalQuality.MISSING
         else:
@@ -324,6 +328,8 @@ def _parse_status(value: str) -> IntervalQuality:
         return IntervalQuality.VALID
     if normalized in _MISSING_STATUSES:
         return IntervalQuality.MISSING
+    if normalized in _INVALID_STATUSES:
+        return IntervalQuality.INVALID
     raise PndCsvParseError("csv_status_invalid")
 
 

@@ -423,14 +423,17 @@ class Phase3ADiscoveryTests(unittest.TestCase):
         self.assertIn('"code":"discovery_config_missing_password"', output)
         self.assertNotIn(PASSWORD, output)
 
-    def test_synthetic_api_contract_and_responses_contain_no_credentials(self) -> None:
+    def test_real_api_without_dataset_fails_closed_and_contains_no_credentials(self) -> None:
         token = secrets.token_urlsafe(32)
         verifier = TokenVerifier(
             hashlib.sha256(token.encode("ascii")).hexdigest(),
             SYNTHETIC_METER_ID,
             frozenset({"health:read", "status:read", "measurements:read"}),
         )
-        api = CollectorApi(verifier)
+        store = mock.Mock()
+        store.read_status.return_value = None
+        store.read_measurements.return_value = None
+        api = CollectorApi(verifier, store)
         authorization = {"Authorization": f"Bearer {token}"}
         responses = (
             api.handle("GET", "/api/v1/health", authorization),
@@ -450,13 +453,9 @@ class Phase3ADiscoveryTests(unittest.TestCase):
         self.assertNotIn(USERNAME, encoded)
         self.assertNotIn(PASSWORD, encoded)
         self.assertEqual(responses[0].status, 200)
-        missing = [
-            value
-            for value in responses[2].body["values"]
-            if value["quality"] == "missing"
-        ]
-        self.assertEqual(len(missing), 1)
-        self.assertIsNone(missing[0]["value_kwh"])
+        self.assertEqual(responses[1].status, 503)
+        self.assertEqual(responses[2].status, 503)
+        self.assertEqual(responses[2].body["error"]["code"], "dataset_unavailable")
 
 
 if __name__ == "__main__":

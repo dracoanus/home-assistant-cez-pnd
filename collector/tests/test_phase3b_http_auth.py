@@ -716,23 +716,23 @@ class Phase3BHttpAuthTests(unittest.TestCase):
                 payload["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
             )
 
-    def test_current_synthetic_api_semantics_are_unchanged(self) -> None:
+    def test_api_without_normalized_dataset_fails_closed(self) -> None:
         token = secrets.token_urlsafe(32)
         verifier = TokenVerifier(
             hashlib.sha256(token.encode("ascii")).hexdigest(),
             SYNTHETIC_METER_ID,
             frozenset({"health:read", "status:read", "measurements:read"}),
         )
-        response = CollectorApi(verifier).handle(
+        store = mock.Mock()
+        store.read_measurements.return_value = None
+        response = CollectorApi(verifier, store).handle(
             "GET",
             f"/api/v1/measurements?meter_id={SYNTHETIC_METER_ID}"
             "&start=2026-08-01T00:00:00Z&end=2026-08-01T00:30:00Z",
             {"Authorization": f"Bearer {token}"},
         )
-        self.assertEqual(response.status, 200)
-        missing = [item for item in response.body["values"] if item["quality"] == "missing"]
-        self.assertEqual(len(missing), 1)
-        self.assertIsNone(missing[0]["value_kwh"])
+        self.assertEqual(response.status, 503)
+        self.assertEqual(response.body["error"]["code"], "dataset_unavailable")
 
 
 if __name__ == "__main__":

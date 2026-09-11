@@ -52,7 +52,7 @@ def _status_payload() -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "meter_id": METER_ID,
-        "dataset_revision": "synthetic-20260801-0001",
+        "dataset_revision": "ds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "data_timestamp": "2026-08-01T00:15:00Z",
         "last_attempt": "2026-08-01T01:00:00Z",
         "last_success": None,
@@ -63,7 +63,7 @@ def _status_payload() -> dict[str, object]:
             "missing_count": 1,
             "invalid_count": 0,
         },
-        "source_status": "synthetic_offline_partial",
+        "source_status": "partial",
     }
 
 
@@ -83,10 +83,10 @@ def _measurements_payload() -> dict[str, object]:
                     "interval_end": "2026-08-01T00:15:00Z",
                     "value_kwh": "0.125",
                     "quality": "valid",
-                    "source_timezone": "Etc/UTC",
-                    "source_profile": "synthetic_v1",
+                    "source_timezone": "Europe/Prague",
+                    "source_profile": "+A",
                     "collected_at": "2026-08-01T01:00:00Z",
-                    "revision": "synthetic-20260801-0001",
+                    "revision": "ds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 },
                 {
                     "channel": "grid_import",
@@ -94,10 +94,10 @@ def _measurements_payload() -> dict[str, object]:
                     "interval_end": "2026-08-01T00:30:00Z",
                     "value_kwh": None,
                     "quality": "missing",
-                    "source_timezone": "Etc/UTC",
-                    "source_profile": "synthetic_v1",
+                    "source_timezone": "Europe/Prague",
+                    "source_profile": "+A",
                     "collected_at": "2026-08-01T01:00:00Z",
-                    "revision": "synthetic-20260801-0001",
+                    "revision": "ds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 },
             ],
             "missing": [
@@ -111,6 +111,19 @@ def _measurements_payload() -> dict[str, object]:
             "next_cursor": None,
         }
     )
+    return payload
+
+
+def _page(values, missing, cursor, *, revision="ds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", expected=2, valid=1, missing_count=1):
+    payload = _measurements_payload()
+    payload["dataset_revision"] = revision
+    payload["values"] = values
+    payload["missing"] = missing
+    payload["next_cursor"] = cursor
+    payload["completeness"].update({"expected_count": expected, "valid_count": valid,
+        "missing_count": missing_count, "invalid_count": expected - valid - missing_count})
+    for item in values:
+        item["revision"] = revision
     return payload
 
 
@@ -285,6 +298,47 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
             await client.async_measurements(
                 "2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z"
             )
+
+    async def test_multiple_pages_are_combined_with_consistent_metadata(self) -> None:
+        complete = _measurements_payload()
+        first_value, second_value = complete["values"]
+        missing = complete["missing"][0]
+        first = _page([first_value], [], "cursor_one")
+        second = _page([second_value], [missing], None)
+        client, session = self._client([_Response(200, first), _Response(200, second)])
+        result = await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
+        self.assertEqual(len(result.values), 2)
+        self.assertEqual(len(result.missing), 1)
+        self.assertNotIn("cursor", session.calls[0][1]["params"])
+        self.assertEqual(session.calls[1][1]["params"]["cursor"], "cursor_one")
+
+    async def test_revision_change_cursor_loop_and_duplicate_fail_closed(self) -> None:
+        complete = _measurements_payload()
+        value = complete["values"][0]
+        first = _page([dict(value)], [], "cursor_one", expected=2, valid=2, missing_count=0)
+        changed = _page([], [], None, revision="ds_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", expected=2, valid=2, missing_count=0)
+        client, _ = self._client([_Response(200, first), _Response(200, changed)])
+        with self.assertRaises(client_module.CollectorProtocolError):
+            await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
+
+        loop_first = _page([], [], "cursor_one", expected=0, valid=0, missing_count=0)
+        loop_second = _page([], [], "cursor_one", expected=0, valid=0, missing_count=0)
+        client, _ = self._client([_Response(200, loop_first), _Response(200, loop_second)])
+        with self.assertRaisesRegex(client_module.CollectorProtocolError, "cursor_loop"):
+            await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
+
+        duplicate_first = _page([dict(value)], [], "cursor_one", expected=2, valid=2, missing_count=0)
+        duplicate_second = _page([dict(value)], [], None, expected=2, valid=2, missing_count=0)
+        client, _ = self._client([_Response(200, duplicate_first), _Response(200, duplicate_second)])
+        with self.assertRaisesRegex(client_module.CollectorProtocolError, "duplicate_measurement_interval"):
+            await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
+
+    async def test_excessive_pages_fail_closed(self) -> None:
+        responses = [_Response(200, _page([], [], f"cursor_{index}", expected=0, valid=0, missing_count=0))
+            for index in range(client_module.MAX_PAGES)]
+        client, _ = self._client(responses)
+        with self.assertRaisesRegex(client_module.CollectorProtocolError, "too_many_pages"):
+            await client.async_measurements("2026-08-01T00:00:00Z", "2026-08-01T00:30:00Z")
 
     async def test_unexpected_fields_fail_closed(self) -> None:
         payload = _status_payload()

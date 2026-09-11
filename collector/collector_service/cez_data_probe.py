@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import tempfile
 from typing import Callable
@@ -22,8 +23,10 @@ from .cez_http_auth import (
     CezHttpAuthClient,
     DashboardMetadataObservation,
     DataProbeExportObservation,
+    DataProbeDatasetCommittedObservation,
     DataProbeMeterLookupUnavailableObservation,
     DataProbeMeterSelectionObservation,
+    DataProbeParsedObservation,
     HttpResponse,
     HttpTransport,
     MAX_RESPONSE_BODY_BYTES,
@@ -33,6 +36,9 @@ from .cez_http_auth import (
     _default_resolver,
     _single_header,
 )
+from .cez_csv_models import ParsedPndData, PndChannel
+from .cez_csv_parser import PndCsvParseError, parse_pnd_csv
+from .dataset_store import NormalizedDatasetStore
 from .runtime_config import DataProbeConfiguration
 
 
@@ -74,10 +80,16 @@ class CezDataProbe:
         configuration: DataProbeConfiguration,
         *,
         output_directory: Path = PROBE_DIRECTORY,
+        dataset_store: NormalizedDatasetStore | None = None,
+        collected_at: datetime | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
         emit: Callable[[SafeHttpAuthEvent], None] | None = None,
     ) -> None:
         self._configuration = configuration
         self._output_directory = output_directory
+        self._dataset_store = dataset_store
+        self._collected_at = collected_at
+        self._now = now
         self._emit = emit or (lambda _event: None)
 
     def collect(self, client: CezHttpAuthClient) -> None:
@@ -143,7 +155,55 @@ class CezDataProbe:
             self._store(summary, consumption, production)
         except (OSError, ValueError) as error:
             raise _AuthFailure("data_probe_storage_failed") from error
+
+        if self._dataset_store is not None:
+            parsed_consumption = self._parse(
+                consumption, PndChannel.CONSUMPTION,
+                "data_probe_consumption_parse_failed",
+            )
+            parsed_production = self._parse(
+                production, PndChannel.PRODUCTION,
+                "data_probe_production_parse_failed",
+            )
+            try:
+                status = self._dataset_store.commit_dataset(
+                    parsed_consumption,
+                    parsed_production,
+                    collected_at=self._collected_at or self._now(),
+                )
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                raise _AuthFailure("data_probe_storage_failed") from error
+            self._emit(SafeHttpAuthEvent(
+                "data_probe_dataset_committed",
+                dataset_committed_observation=DataProbeDatasetCommittedObservation(
+                    len(parsed_consumption.intervals), parsed_consumption.valid_count,
+                    parsed_consumption.missing_count, parsed_consumption.invalid_count,
+                    len(parsed_production.intervals), parsed_production.valid_count,
+                    parsed_production.missing_count, parsed_production.invalid_count,
+                    status.state,
+                ),
+            ))
         self._emit(SafeHttpAuthEvent("data_probe_complete"))
+
+    def _parse(
+        self, content: bytes, channel: PndChannel, failure_code: str
+    ) -> ParsedPndData:
+        try:
+            parsed = parse_pnd_csv(
+                content,
+                channel=channel,
+                source_timezone="Europe/Prague",
+            )
+        except PndCsvParseError as error:
+            raise _AuthFailure(failure_code) from error
+        self._emit(SafeHttpAuthEvent(
+            f"data_probe_{channel.value}_parsed",
+            parsed_observation=DataProbeParsedObservation(
+                channel.value, len(parsed.intervals), parsed.valid_count,
+                parsed.missing_count, parsed.invalid_count, parsed.complete,
+            ),
+        ))
+        return parsed
 
     def _request(
         self,
@@ -441,14 +501,23 @@ def run_data_probe(
     *,
     resolver: Resolver = _default_resolver,
     output_directory: Path = PROBE_DIRECTORY,
+    dataset_store: NormalizedDatasetStore | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
     emit: Callable[[SafeHttpAuthEvent], None] | None = None,
 ) -> AuthResult:
     """Authenticate and probe through the same transport/session, then clean up."""
 
     safe_emit = emit or (lambda _event: None)
     safe_emit(SafeHttpAuthEvent("data_probe_started"))
+    attempt_at = now()
+    store = dataset_store or NormalizedDatasetStore()
+    try:
+        store.record_attempt(attempt_at)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        return AuthResult(AuthStatus.FAILED, "data_probe_storage_failed")
     probe = CezDataProbe(
-        configuration, output_directory=output_directory, emit=safe_emit
+        configuration, output_directory=output_directory, dataset_store=store,
+        now=now, emit=safe_emit
     )
     result = CezHttpAuthClient(
         configuration,

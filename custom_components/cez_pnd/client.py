@@ -17,11 +17,15 @@ import aiohttp
 API_SCHEMA_VERSION = "1.0"
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_COLLECTION_ITEMS = 1000
+MAX_COMBINED_ITEMS = 12_000
+MAX_PAGES = 64
 MAX_TEXT_LENGTH = 255
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
 METER_ID_PATTERN = re.compile(r"^mtr_[a-f0-9]{32}$")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9]\d{0,11})(?:\.\d{1,9})?$")
+CURSOR_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
+REVISION_PATTERN = re.compile(r"^ds_[a-f0-9]{2,77}$")
 
 
 class CollectorError(Exception):
@@ -132,6 +136,12 @@ class CollectorMeasurements:
         return max(valid, key=lambda item: item.interval_end, default=None)
 
 
+@dataclass(frozen=True)
+class _CollectorMeasurementsPage:
+    measurements: CollectorMeasurements
+    next_cursor: str | None
+
+
 def normalize_collector_url(value: str) -> str:
     """Validate and normalize the configured HTTPS Collector origin."""
 
@@ -220,13 +230,78 @@ class CollectorClient:
     async def async_measurements(
         self, start: str, end: str
     ) -> CollectorMeasurements:
-        """Return one validated bounded measurement response."""
+        """Follow bounded Collector pagination and return one consistent snapshot."""
 
-        payload = await self._async_get(
-            "/api/v1/measurements",
-            params={"meter_id": self._meter_id, "start": start, "end": end},
+        cursor: str | None = None
+        requested_start, requested_end = _parse_utc(start), _parse_utc(end)
+        seen_cursors: set[str] = set()
+        first: CollectorMeasurements | None = None
+        values: list[CollectorMeasurement] = []
+        missing: list[CollectorMissingInterval] = []
+        identities: set[tuple[str, datetime, datetime]] = set()
+        last_order: tuple[datetime, str] | None = None
+        for _page_number in range(MAX_PAGES):
+            params = {"meter_id": self._meter_id, "start": start, "end": end}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = _parse_measurements_page(
+                await self._async_get("/api/v1/measurements", params=params),
+                self._meter_id,
+            )
+            current = page.measurements
+            if current.requested_start != requested_start or current.requested_end != requested_end:
+                raise CollectorProtocolError("requested_range_mismatch")
+            if first is None:
+                first = current
+            elif _page_metadata(current) != _page_metadata(first):
+                raise CollectorProtocolError("pagination_metadata_changed")
+            for item in current.values:
+                identity = (item.channel, item.interval_start, item.interval_end)
+                if item.interval_start < requested_start or item.interval_end > requested_end:
+                    raise CollectorProtocolError("measurement_outside_requested_range")
+                if identity in identities:
+                    raise CollectorProtocolError("duplicate_measurement_interval")
+                order = (item.interval_start, item.channel)
+                if last_order is not None and order <= last_order:
+                    raise CollectorProtocolError("invalid_measurement_order")
+                identities.add(identity)
+                last_order = order
+                values.append(item)
+            missing.extend(current.missing)
+            if len(values) > MAX_COMBINED_ITEMS or len(missing) > MAX_COMBINED_ITEMS:
+                raise CollectorProtocolError("too_many_measurements")
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+            if cursor in seen_cursors:
+                raise CollectorProtocolError("cursor_loop")
+            seen_cursors.add(cursor)
+        else:
+            raise CollectorProtocolError("too_many_pages")
+        if first is None:
+            raise CollectorProtocolError("empty_pagination")
+        completeness = first.completeness
+        if (
+            len(values) != completeness.valid_count + completeness.missing_count
+            or sum(item.quality == "valid" for item in values) != completeness.valid_count
+            or sum(item.quality == "missing" for item in values) != completeness.missing_count
+            or len(missing) != completeness.missing_count
+            or {
+                (item.channel, item.interval_start, item.interval_end)
+                for item in missing
+            }
+            != {
+                (item.channel, item.interval_start, item.interval_end)
+                for item in values if item.quality == "missing"
+            }
+        ):
+            raise CollectorProtocolError("contradictory_completeness")
+        return CollectorMeasurements(
+            first.meter_id, first.dataset_revision, first.data_timestamp,
+            first.last_attempt, first.last_success, completeness,
+            first.source_status, first.requested_start, first.requested_end,
+            tuple(values), tuple(missing),
         )
-        return _parse_measurements(payload, self._meter_id)
 
     async def _async_get(
         self, path: str, params: dict[str, str] | None = None
@@ -299,18 +374,18 @@ def _parse_status(payload: dict[str, Any], expected_meter_id: str) -> CollectorS
     meter_id = _require_meter(payload["meter_id"], expected_meter_id)
     return CollectorStatus(
         meter_id=meter_id,
-        dataset_revision=_require_text(payload["dataset_revision"], "dataset_revision"),
+        dataset_revision=_require_revision(payload["dataset_revision"]),
         data_timestamp=_parse_nullable_utc(payload["data_timestamp"]),
         last_attempt=_parse_nullable_utc(payload["last_attempt"]),
         last_success=_parse_nullable_utc(payload["last_success"]),
         completeness=_parse_completeness(payload["completeness"], include_range=False),
-        source_status=_require_text(payload["source_status"], "source_status"),
+        source_status=_require_source_status(payload["source_status"]),
     )
 
 
-def _parse_measurements(
+def _parse_measurements_page(
     payload: dict[str, Any], expected_meter_id: str
-) -> CollectorMeasurements:
+) -> _CollectorMeasurementsPage:
     _require_exact_keys(
         payload,
         {
@@ -329,7 +404,7 @@ def _parse_measurements(
     )
     _require_schema(payload)
     meter_id = _require_meter(payload["meter_id"], expected_meter_id)
-    revision = _require_text(payload["dataset_revision"], "dataset_revision")
+    revision = _require_revision(payload["dataset_revision"])
     values_raw = payload["values"]
     missing_raw = payload["missing"]
     if not isinstance(values_raw, list) or len(values_raw) > MAX_COLLECTION_ITEMS:
@@ -339,8 +414,10 @@ def _parse_measurements(
     values = tuple(_parse_measurement(item, revision) for item in values_raw)
     missing = tuple(_parse_missing_interval(item) for item in missing_raw)
     next_cursor = payload["next_cursor"]
-    if next_cursor is not None:
-        raise CollectorProtocolError("unexpected_pagination")
+    if next_cursor is not None and (
+        not isinstance(next_cursor, str) or not CURSOR_PATTERN.fullmatch(next_cursor)
+    ):
+        raise CollectorProtocolError("invalid_next_cursor")
     completeness_raw = payload["completeness"]
     completeness = _parse_completeness(completeness_raw, include_range=True)
     if (
@@ -348,26 +425,38 @@ def _parse_measurements(
         + completeness.missing_count
         + completeness.invalid_count
         != completeness.expected_count
-        or len(values) != completeness.valid_count + completeness.missing_count
-        or sum(item.quality == "valid" for item in values)
-        != completeness.valid_count
-        or sum(item.quality == "missing" for item in values)
-        != completeness.missing_count
-        or len(missing) != completeness.missing_count
     ):
         raise CollectorProtocolError("contradictory_completeness")
-    return CollectorMeasurements(
+    measurements = CollectorMeasurements(
         meter_id=meter_id,
         dataset_revision=revision,
         data_timestamp=_parse_nullable_utc(payload["data_timestamp"]),
         last_attempt=_parse_nullable_utc(payload["last_attempt"]),
         last_success=_parse_nullable_utc(payload["last_success"]),
         completeness=completeness,
-        source_status=_require_text(payload["source_status"], "source_status"),
+        source_status=_require_source_status(payload["source_status"]),
         requested_start=_parse_utc(completeness_raw["requested_start"]),
         requested_end=_parse_utc(completeness_raw["requested_end"]),
         values=values,
         missing=missing,
+    )
+    return _CollectorMeasurementsPage(measurements, next_cursor)
+
+
+def _parse_measurements(payload: dict[str, Any], expected_meter_id: str) -> CollectorMeasurements:
+    """Compatibility parser for tests and single-page responses."""
+
+    page = _parse_measurements_page(payload, expected_meter_id)
+    if page.next_cursor is not None:
+        raise CollectorProtocolError("unexpected_pagination")
+    return page.measurements
+
+
+def _page_metadata(value: CollectorMeasurements) -> tuple[object, ...]:
+    return (
+        value.meter_id, value.dataset_revision, value.data_timestamp,
+        value.last_attempt, value.last_success, value.completeness,
+        value.source_status, value.requested_start, value.requested_end,
     )
 
 
@@ -393,12 +482,15 @@ def _parse_completeness(value: Any, include_range: bool) -> CollectorCompletenes
         if (
             isinstance(count, bool)
             or not isinstance(count, int)
-            or not 0 <= count <= MAX_COLLECTION_ITEMS
+            or not 0 <= count <= MAX_COMBINED_ITEMS
         ):
             raise CollectorProtocolError("invalid_completeness")
         counts.append(count)
+    state = _require_text(value["state"], "completeness_state")
+    if state not in {"complete", "partial", "empty"}:
+        raise CollectorProtocolError("invalid_completeness_state")
     return CollectorCompleteness(
-        state=_require_text(value["state"], "completeness_state"),
+        state=state,
         expected_count=counts[0],
         valid_count=counts[1],
         missing_count=counts[2],
@@ -425,6 +517,8 @@ def _parse_measurement(value: Any, revision: str) -> CollectorMeasurement:
     )
     channel = _require_text(value["channel"], "channel")
     quality = _require_text(value["quality"], "quality")
+    if channel not in {"grid_import", "grid_export"}:
+        raise CollectorProtocolError("invalid_channel")
     if value["revision"] != revision:
         raise CollectorProtocolError("revision_mismatch")
     interval_start = _parse_utc(value["interval_start"])
@@ -447,8 +541,11 @@ def _parse_measurement(value: Any, revision: str) -> CollectorMeasurement:
             raise CollectorProtocolError("invalid_measurement_value") from error
     else:
         raise CollectorProtocolError("invalid_measurement_quality")
-    _require_text(value["source_timezone"], "source_timezone")
-    _require_text(value["source_profile"], "source_profile")
+    if value["source_timezone"] != "Europe/Prague":
+        raise CollectorProtocolError("invalid_source_timezone")
+    expected_profile = "+A" if channel == "grid_import" else "-A"
+    if value["source_profile"] != expected_profile:
+        raise CollectorProtocolError("invalid_source_profile")
     _parse_utc(value["collected_at"])
     return CollectorMeasurement(
         channel=channel,
@@ -496,6 +593,18 @@ def _require_meter(value: Any, expected: str) -> str:
 def _require_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value or len(value) > MAX_TEXT_LENGTH:
         raise CollectorProtocolError(f"invalid_{field}")
+    return value
+
+
+def _require_revision(value: Any) -> str:
+    if not isinstance(value, str) or not REVISION_PATTERN.fullmatch(value):
+        raise CollectorProtocolError("invalid_dataset_revision")
+    return value
+
+
+def _require_source_status(value: Any) -> str:
+    if value not in {"ok", "partial", "no_data"}:
+        raise CollectorProtocolError("invalid_source_status")
     return value
 
 
