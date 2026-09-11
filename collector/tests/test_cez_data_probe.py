@@ -1019,13 +1019,14 @@ class CezDataProbeTests(unittest.TestCase):
 
     def test_parser_failure_does_not_replace_previous_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
+            events: list[cez_http_auth.SafeHttpAuthEvent] = []
             store = NormalizedDatasetStore(Path(temporary) / "dataset.sqlite3", required_uid=None,
                 revision_factory=lambda: "ds_" + "b" * 32)
             previous = store.commit_dataset(_parsed(PndChannel.CONSUMPTION),
                 _parsed(PndChannel.PRODUCTION), collected_at=datetime(2026, 9, 8, tzinfo=UTC))
             probe = cez_data_probe.CezDataProbe(_configuration(),
                 output_directory=Path(temporary) / "raw", dataset_store=store,
-                collected_at=datetime(2026, 9, 9, tzinfo=UTC))
+                collected_at=datetime(2026, 9, 9, tzinfo=UTC), emit=events.append)
             client = _ProbeClient([
                 _http_response(200, MATCHED_METADATA),
                 _http_response(200, CONSUMPTION, "text/csv"),
@@ -1036,6 +1037,16 @@ class CezDataProbeTests(unittest.TestCase):
                 probe.collect(client)  # type: ignore[arg-type]
             self.assertEqual(raised.exception.code, "data_probe_consumption_parse_failed")
             self.assertEqual(store.read_status().revision, previous.revision)
+            diagnostic = next(event.as_dict() for event in events if event.event == "data_probe_csv_parse_failed")
+            self.assertEqual(diagnostic, {
+                "event": "data_probe_csv_parse_failed",
+                "channel": "consumption",
+                "code": "csv_schema_invalid",
+            })
+            for forbidden in ("private-consumption-csv", "secret-elm", "2026-09-09"):
+                self.assertNotIn(forbidden, repr(diagnostic))
+            with self.assertRaises(ValueError):
+                cez_http_auth.DataProbeCsvParseFailureObservation("consumption", "arbitrary")
 
     def test_server_selects_explicit_data_probe_mode(self) -> None:
         configuration = SimpleNamespace(

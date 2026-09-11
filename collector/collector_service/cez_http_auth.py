@@ -18,6 +18,7 @@ import time
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
+from .cez_csv_parser import CSV_PARSE_ERROR_CODES
 from .runtime_config import (
     DataProbeConfiguration,
     DiscoveryConfiguration,
@@ -86,6 +87,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "data_probe_meter_lookup_unavailable",
         "data_probe_consumption_parsed",
         "data_probe_production_parsed",
+        "data_probe_csv_parse_failed",
         "data_probe_dataset_committed",
         "data_probe_complete",
         "data_probe_failed",
@@ -342,6 +344,21 @@ class DataProbeParsedObservation:
 
 
 @dataclass(frozen=True)
+class DataProbeCsvParseFailureObservation:
+    channel: str
+    code: str
+
+    def __post_init__(self) -> None:
+        if self.channel not in {"consumption", "production"}:
+            raise ValueError("unsafe CSV parser channel")
+        if self.code not in CSV_PARSE_ERROR_CODES:
+            raise ValueError("unsafe CSV parser error code")
+
+    def as_dict(self) -> dict[str, object]:
+        return {"channel": self.channel, "code": self.code}
+
+
+@dataclass(frozen=True)
 class DataProbeDatasetCommittedObservation:
     consumption_intervals: int
     consumption_valid: int
@@ -397,6 +414,9 @@ class SafeHttpAuthEvent:
         DataProbeMeterLookupUnavailableObservation | None
     ) = field(default=None, repr=False)
     parsed_observation: DataProbeParsedObservation | None = field(default=None, repr=False)
+    csv_parse_failure_observation: DataProbeCsvParseFailureObservation | None = field(
+        default=None, repr=False
+    )
     dataset_committed_observation: DataProbeDatasetCommittedObservation | None = field(
         default=None, repr=False
     )
@@ -406,7 +426,20 @@ class SafeHttpAuthEvent:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "data_probe_dataset_committed":
+        if self.event == "data_probe_csv_parse_failed":
+            if self.csv_parse_failure_observation is None or any(
+                value is not None for value in (
+                    self.hostname, self.status, self.code, self.metadata_observation,
+                    self.json_root_type, self.export_observation,
+                    self.meter_selection_observation,
+                    self.meter_lookup_unavailable_observation,
+                    self.parsed_observation, self.dataset_committed_observation,
+                )
+            ):
+                raise ValueError("invalid CSV parser failure event")
+        elif self.csv_parse_failure_observation is not None:
+            raise ValueError("unexpected CSV parser failure observation")
+        elif self.event == "data_probe_dataset_committed":
             if self.dataset_committed_observation is None or any(
                 value is not None
                 for value in (
@@ -523,6 +556,8 @@ class SafeHttpAuthEvent:
             result.update(self.meter_lookup_unavailable_observation.as_dict())
         if self.parsed_observation is not None:
             result.update(self.parsed_observation.as_dict())
+        if self.csv_parse_failure_observation is not None:
+            result.update(self.csv_parse_failure_observation.as_dict())
         if self.dataset_committed_observation is not None:
             result.update(self.dataset_committed_observation.as_dict())
         return result

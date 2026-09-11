@@ -34,11 +34,22 @@ SUPPORTED_DELIMITERS = (";", ",")
 DEFAULT_SOURCE_TIMEZONE = "Europe/Prague"
 
 _VALID_STATUSES = frozenset(
-    {"", "1", "a", "ok", "true", "v", "valid", "validni", "platna", "platny"}
+    {
+        "", "1", "a", "ok", "true", "v", "valid", "validni",
+        "platna", "platne", "platny", "platna data", "namerena data ok",
+    }
 )
-_MISSING_STATUSES = frozenset({"missing", "n/a", "na"})
+_MISSING_STATUSES = frozenset(
+    {
+        "missing", "n/a", "n / a", "n.a", "n.a.", "n-a", "na", "neznama hodnota", "neznama",
+        "nezname", "nedostupna data", "nedostupna", "unknown", "unavailable",
+    }
+)
 _INVALID_STATUSES = frozenset(
-    {"0", "false", "invalid", "n", "neplatna", "neplatny"}
+    {
+        "0", "false", "invalid", "n", "neplatna", "neplatne", "neplatny",
+        "neplatna data", "chyba", "chyba mereni",
+    }
 )
 _PLACEHOLDERS = frozenset({"", "-", "--", "n/a", "na", "none", "null"})
 
@@ -52,7 +63,10 @@ _UNIT_HEADERS = frozenset({"jednotka", "unit"})
 _STATUS_HEADERS = frozenset({"platnost", "status", "stav", "validita", "validity"})
 _PROFILE_HEADERS = frozenset({"profil", "profile", "typ profilu", "typ mereni"})
 
-_ERROR_CODES = frozenset(
+_CONSUMPTION_HEADER_KEYWORDS = ("+a", "+e", "spotreb", "odber")
+_PRODUCTION_HEADER_KEYWORDS = ("-a", "-e", "vyrob", "dodavk")
+
+CSV_PARSE_ERROR_CODES = frozenset(
     {
         "csv_file_invalid",
         "csv_file_too_large",
@@ -78,7 +92,7 @@ class PndCsvParseError(ValueError):
     """Fail-closed parser error carrying only a fixed non-secret code."""
 
     def __init__(self, code: str) -> None:
-        if code not in _ERROR_CODES:
+        if code not in CSV_PARSE_ERROR_CODES:
             raise ValueError("unknown CSV parser error code")
         self.code = code
         super().__init__(code)
@@ -207,21 +221,30 @@ def _identify_columns(header: list[str], channel: PndChannel) -> _Columns:
     combined = _find(normalized, _COMBINED_TIME_HEADERS)
     date_column = _find(normalized, _DATE_HEADERS)
     time_column = _find(normalized, _TIME_HEADERS)
+    if combined is None and date_column is not None and time_column is None:
+        combined = date_column
+        date_column = None
     if combined is None and (date_column is None or time_column is None):
         raise PndCsvParseError("csv_schema_invalid")
-    marker = channel.profile_marker.casefold()
-    opposite = "-a" if marker == "+a" else "+a"
+    expected_keywords = _channel_header_keywords(channel)
+    opposite_keywords = _channel_header_keywords(
+        PndChannel.PRODUCTION
+        if channel is PndChannel.CONSUMPTION
+        else PndChannel.CONSUMPTION
+    )
     value_candidates = [
         index
         for index, value in enumerate(normalized)
-        if value in _VALUE_HEADERS or marker in value
+        if value in _VALUE_HEADERS or _contains_keyword(value, expected_keywords)
     ]
-    if len(value_candidates) != 1 or any(opposite in value for value in normalized):
+    if len(value_candidates) != 1 or any(
+        _contains_keyword(value, opposite_keywords) for value in normalized
+    ):
         raise PndCsvParseError("csv_profile_invalid")
     value_column = value_candidates[0]
     unit_from_header = _unit_from_text(header[value_column])
     profile_column = _find(normalized, _PROFILE_HEADERS)
-    if marker not in " ".join(normalized) and profile_column is None:
+    if not any(_contains_keyword(value, expected_keywords) for value in normalized) and profile_column is None:
         raise PndCsvParseError("csv_profile_invalid")
     return _Columns(
         combined,
@@ -263,9 +286,14 @@ def _parse_rows(
             raise PndCsvParseError("csv_schema_invalid")
         if columns.profile is not None:
             profile = _normalize(row[columns.profile])
-            expected = channel.profile_marker.casefold()
-            opposite = "-a" if expected == "+a" else "+a"
-            if expected not in profile or opposite in profile:
+            if not _contains_keyword(profile, _channel_header_keywords(channel)) or _contains_keyword(
+                profile,
+                _channel_header_keywords(
+                    PndChannel.PRODUCTION
+                    if channel is PndChannel.CONSUMPTION
+                    else PndChannel.CONSUMPTION
+                ),
+            ):
                 raise PndCsvParseError("csv_profile_invalid")
         local_end, source_day = _parse_timestamp(row, columns)
         status = _parse_status(row[columns.status] if columns.status is not None else "")
@@ -426,6 +454,18 @@ def _find(values: list[str], candidates: frozenset[str]) -> int | None:
     if len(matches) > 1:
         raise PndCsvParseError("csv_schema_invalid")
     return matches[0] if matches else None
+
+
+def _channel_header_keywords(channel: PndChannel) -> tuple[str, ...]:
+    return (
+        _CONSUMPTION_HEADER_KEYWORDS
+        if channel is PndChannel.CONSUMPTION
+        else _PRODUCTION_HEADER_KEYWORDS
+    )
+
+
+def _contains_keyword(value: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in value for keyword in keywords)
 
 
 def _normalize(value: str) -> str:
