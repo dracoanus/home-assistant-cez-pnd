@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -69,6 +69,13 @@ class MeasurementPage:
     rows: tuple[StoredMeasurement, ...]
 
 
+@dataclass(frozen=True)
+class SyncState:
+    requested_history_start: date
+    backfill_next_day: date
+    backfill_complete: bool
+
+
 class NormalizedDatasetStore:
     """One-meter store that publishes both channels in one transaction."""
 
@@ -121,7 +128,6 @@ class NormalizedDatasetStore:
             self._initialize(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
-                connection.execute("UPDATE measurements SET revision=?", (revision,))
                 for record in all_records:
                     connection.execute(
                         """
@@ -194,6 +200,91 @@ class NormalizedDatasetStore:
             raise RuntimeError("dataset commit was not visible")
         return status
 
+    def prepare_sync_state(
+        self, history_start: date, latest_completed_day: date
+    ) -> SyncState:
+        """Initialize or extend the monotonic historical backfill checkpoint."""
+
+        with closing(self._connect()) as connection:
+            self._initialize(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT requested_history_start,backfill_next_day,backfill_complete "
+                "FROM sync_state WHERE id=1"
+            ).fetchone()
+            if row is None:
+                next_day = history_start
+                complete = next_day > latest_completed_day
+                connection.execute(
+                    "INSERT INTO sync_state(id,requested_history_start,backfill_next_day,"
+                    "backfill_complete) VALUES(1,?,?,?)",
+                    (history_start.isoformat(), next_day.isoformat(), int(complete)),
+                )
+            else:
+                requested = _local_date(row[0])
+                next_day = _local_date(row[1])
+                complete = bool(row[2])
+                if history_start < requested:
+                    requested = history_start
+                    next_day = history_start
+                    complete = next_day > latest_completed_day
+                    connection.execute(
+                        "UPDATE sync_state SET requested_history_start=?,"
+                        "backfill_next_day=?,backfill_complete=? WHERE id=1",
+                        (requested.isoformat(), next_day.isoformat(), int(complete)),
+                    )
+            connection.commit()
+        state = self.read_sync_state()
+        if state is None:
+            raise RuntimeError("sync state was not visible")
+        return state
+
+    def advance_sync_state(
+        self,
+        expected_start: date,
+        exclusive_end: date,
+        latest_completed_day: date,
+    ) -> SyncState:
+        """Advance a checkpoint only after its corresponding dataset commit."""
+
+        if (
+            exclusive_end <= expected_start
+            or exclusive_end > latest_completed_day + timedelta(days=1)
+        ):
+            raise ValueError("invalid checkpoint range")
+        complete = exclusive_end > latest_completed_day
+        with closing(self._connect()) as connection:
+            self._initialize(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE sync_state SET backfill_next_day=?,backfill_complete=? "
+                "WHERE id=1 AND backfill_next_day=? AND backfill_complete=0",
+                (
+                    exclusive_end.isoformat(),
+                    int(complete),
+                    expected_start.isoformat(),
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise ValueError("stale backfill checkpoint")
+            connection.commit()
+        state = self.read_sync_state()
+        if state is None:
+            raise RuntimeError("sync state was not visible")
+        return state
+
+    def read_sync_state(self) -> SyncState | None:
+        with closing(self._connect()) as connection:
+            self._initialize(connection)
+            row = connection.execute(
+                "SELECT requested_history_start,backfill_next_day,backfill_complete "
+                "FROM sync_state WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return None
+        return SyncState(_local_date(row[0]), _local_date(row[1]), bool(row[2]))
+
     def read_status(self) -> DatasetStatus | None:
         with closing(self._connect()) as connection:
             self._initialize(connection)
@@ -237,8 +328,8 @@ class NormalizedDatasetStore:
             if after is not None:
                 position = connection.execute(
                     "SELECT 1 FROM measurements WHERE interval_start=? AND channel=? "
-                    "AND revision=? AND interval_start>=? AND interval_start<?",
-                    (after[0], after[1], metadata[0], start, end),
+                    "AND interval_start>=? AND interval_start<?",
+                    (after[0], after[1], start, end),
                 ).fetchone()
                 if position is None:
                     connection.rollback()
@@ -255,13 +346,16 @@ class NormalizedDatasetStore:
             ).fetchall()
             connection.commit()
         expected, valid, missing, invalid = (int(value or 0) for value in counts)
+        stored_rows = tuple(
+            StoredMeasurement(*row[:-1], metadata[0]) for row in rows
+        )
         return MeasurementPage(
             DatasetStatus(*metadata),
             expected,
             valid,
             missing,
             invalid,
-            tuple(StoredMeasurement(*row) for row in rows),
+            stored_rows,
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -336,6 +430,12 @@ class NormalizedDatasetStore:
             );
             CREATE INDEX IF NOT EXISTS measurements_range
               ON measurements(interval_start,channel);
+            CREATE TABLE IF NOT EXISTS sync_state(
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              requested_history_start TEXT NOT NULL,
+              backfill_next_day TEXT NOT NULL,
+              backfill_complete INTEGER NOT NULL CHECK(backfill_complete IN (0,1))
+            );
             """
         )
 
@@ -354,3 +454,12 @@ def _decimal_text(value: Decimal | None) -> str | None:
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
     return rendered or "0"
+
+
+def _local_date(value: object) -> date:
+    if not isinstance(value, str):
+        raise ValueError("invalid sync date")
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError("invalid sync date")
+    return parsed

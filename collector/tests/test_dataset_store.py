@@ -1,6 +1,7 @@
 """Offline tests for the transactional normalized dataset store."""
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,9 +19,9 @@ from collector_service.dataset_store import NormalizedDatasetStore
 START = datetime(2026, 9, 1, tzinfo=UTC)
 
 
-def _parsed(channel: PndChannel, values: tuple[tuple[Decimal | None, IntervalQuality], ...]) -> ParsedPndData:
-    intervals = tuple(IntervalRecord(channel, START + timedelta(minutes=15 * index),
-        START + timedelta(minutes=15 * (index + 1)), value, quality, date(2026, 9, 1))
+def _parsed(channel: PndChannel, values: tuple[tuple[Decimal | None, IntervalQuality], ...], *, start: datetime = START) -> ParsedPndData:
+    intervals = tuple(IntervalRecord(channel, start + timedelta(minutes=15 * index),
+        start + timedelta(minutes=15 * (index + 1)), value, quality, start.date())
         for index, (value, quality) in enumerate(values))
     return ParsedPndData(channel, channel.profile_marker, "utf-8", ";", intervals)
 
@@ -88,6 +89,100 @@ class DatasetStoreTests(unittest.TestCase):
                 self.store.commit_dataset(self.consumption, self.production, collected_at=START + timedelta(hours=1))
         self.assertEqual(self.store.read_status().revision, previous.revision)
         self.assertEqual(len(self.store.read_measurements("2026-09-01T00:00:00Z", "2026-09-01T01:00:00Z", limit=100).rows), 4)
+
+    def test_backfill_checkpoint_initializes_advances_and_resumes(self) -> None:
+        state = self.store.prepare_sync_state(
+            date(2025, 1, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(state.requested_history_start, date(2025, 1, 1))
+        self.assertEqual(state.backfill_next_day, date(2025, 1, 1))
+        self.assertFalse(state.backfill_complete)
+        advanced = self.store.advance_sync_state(
+            date(2025, 1, 1), date(2025, 2, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(advanced.backfill_next_day, date(2025, 2, 1))
+        reopened = NormalizedDatasetStore(self.path, required_uid=None)
+        self.assertEqual(reopened.read_sync_state(), advanced)
+
+    def test_checkpoint_never_advances_on_stale_or_failed_chunk(self) -> None:
+        initial = self.store.prepare_sync_state(
+            date(2025, 1, 1), date(2026, 9, 10)
+        )
+        with self.assertRaises(ValueError):
+            self.store.advance_sync_state(
+                date(2025, 2, 1), date(2025, 3, 1), date(2026, 9, 10)
+            )
+        self.assertEqual(self.store.read_sync_state(), initial)
+
+    def test_earlier_history_start_extends_and_later_start_is_monotonic(self) -> None:
+        self.store.prepare_sync_state(date(2025, 3, 1), date(2026, 9, 10))
+        self.store.advance_sync_state(
+            date(2025, 3, 1), date(2025, 4, 1), date(2026, 9, 10)
+        )
+        earlier = self.store.prepare_sync_state(
+            date(2025, 1, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(earlier.requested_history_start, date(2025, 1, 1))
+        self.assertEqual(earlier.backfill_next_day, date(2025, 1, 1))
+        later = self.store.prepare_sync_state(
+            date(2025, 6, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(later, earlier)
+
+    def test_revision_is_dataset_level_without_mass_rewrite(self) -> None:
+        statements: list[str] = []
+        original_connect = self.store._connect
+
+        def traced_connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        first = self.store.commit_dataset(
+            self.consumption, self.production, collected_at=START
+        )
+        next_day = START + timedelta(days=1)
+        day_two_consumption = _parsed(
+            PndChannel.CONSUMPTION,
+            ((Decimal("2"), IntervalQuality.VALID),),
+            start=next_day,
+        )
+        day_two_production = _parsed(
+            PndChannel.PRODUCTION,
+            ((Decimal("1"), IntervalQuality.VALID),),
+            start=next_day,
+        )
+        with mock.patch.object(self.store, "_connect", side_effect=traced_connect):
+            status = self.store.commit_dataset(
+                day_two_consumption, day_two_production,
+                collected_at=next_day,
+            )
+        self.assertFalse(
+            any(
+                statement.upper().startswith("UPDATE MEASUREMENTS SET REVISION")
+                for statement in statements
+            )
+        )
+        with closing(sqlite3.connect(self.path)) as connection:
+            physical = connection.execute(
+                "SELECT DISTINCT revision FROM measurements WHERE interval_start<?",
+                ("2026-09-02T00:00:00Z",),
+            ).fetchall()
+        self.assertEqual(physical, [(first.revision,)])
+        page = self.store.read_measurements(
+            "2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z", limit=100
+        )
+        self.assertTrue(all(row.revision == status.revision for row in page.rows))
+
+    def test_existing_database_gains_sync_state_without_rebuild(self) -> None:
+        previous = self.store.commit_dataset(
+            self.consumption, self.production, collected_at=START
+        )
+        state = self.store.prepare_sync_state(
+            date(2025, 1, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(state.backfill_next_day, date(2025, 1, 1))
+        self.assertEqual(self.store.read_status(), previous)
 
     def test_wrong_second_channel_is_rejected_before_publication(self) -> None:
         previous = self.store.commit_dataset(self.consumption, self.production, collected_at=START)

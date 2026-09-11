@@ -32,8 +32,10 @@ from collector_service.runtime_config import SyncConfiguration
 from collector_service.structured_logging import structured_event_json
 
 
-def _configuration() -> SyncConfiguration:
-    return SyncConfiguration("private-user", "private-password", "private-elm", None)
+def _configuration(history_start: date | None = None) -> SyncConfiguration:
+    return SyncConfiguration(
+        "private-user", "private-password", "private-elm", None, history_start
+    )
 
 
 def _committed() -> DataProbeDatasetCommittedObservation:
@@ -70,6 +72,8 @@ class SyncWorkerTests(unittest.TestCase):
 
         def probe(configuration, supplied_transport, **kwargs):
             self.assertEqual(configuration.probe_date, date(2026, 9, 10))
+            self.assertEqual(kwargs["start_day"], date(2026, 9, 10))
+            self.assertEqual(kwargs["end_day"], date(2026, 9, 11))
             self.assertIs(supplied_transport, transport)
             self.assertFalse(kwargs["persist_raw_outputs"])
             kwargs["emit"](
@@ -89,6 +93,7 @@ class SyncWorkerTests(unittest.TestCase):
             outcome = sync_worker.run_sync_cycle(
                 _configuration(),
                 date(2026, 9, 10),
+                date(2026, 9, 11),
                 store=NormalizedDatasetStore(
                     Path(temporary) / "dataset.sqlite3", required_uid=None
                 ),
@@ -107,11 +112,12 @@ class SyncWorkerTests(unittest.TestCase):
         days: list[date] = []
         events: list[sync_worker.SafeSyncEvent] = []
 
-        def cycle(_configuration, target_day):
+        def cycle(_configuration, target_day, end_day):
             nonlocal active, maximum_active
             active += 1
             maximum_active = max(maximum_active, active)
             days.append(target_day)
+            self.assertEqual(end_day, target_day + sync_worker.timedelta(days=1))
             entered.set()
             release.wait(1.0)
             active -= 1
@@ -150,7 +156,7 @@ class SyncWorkerTests(unittest.TestCase):
         events: list[sync_worker.SafeSyncEvent] = []
         attempted = threading.Event()
 
-        def failed_cycle(_configuration, _target_day):
+        def failed_cycle(_configuration, _target_day, _end_day):
             attempted.set()
             raise RuntimeError(" ".join(private_values))
 
@@ -197,6 +203,7 @@ class SyncWorkerTests(unittest.TestCase):
                 outcome = sync_worker.run_sync_cycle(
                     _configuration(),
                     date(2026, 9, 10),
+                    date(2026, 9, 11),
                     store=store,
                     transport_factory=lambda: transport,
                     emit_auth=lambda _event: None,
@@ -240,7 +247,7 @@ class SyncWorkerTests(unittest.TestCase):
                 }
             )
 
-            def cycle(_configuration, _target_day):
+            def cycle(_configuration, _target_day, _end_day):
                 entered.set()
                 release.wait(1.0)
                 return sync_worker.SyncCycleOutcome(True, committed=_committed())
@@ -276,6 +283,159 @@ class SyncWorkerTests(unittest.TestCase):
                 "dataset_state": "complete",
             },
         )
+
+    def test_backfill_processes_at_most_two_sequential_31_day_chunks(self) -> None:
+        ranges: list[tuple[date, date]] = []
+        events: list[sync_worker.SafeSyncEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def cycle(_configuration, start_day, end_day):
+                ranges.append((start_day, end_day))
+                return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2025, 1, 1)),
+                store=store,
+                cycle=cycle,
+                emit=events.append,
+            )
+            outcome = worker._scheduled_cycle(date(2025, 3, 10))
+            state = store.read_sync_state()
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(
+            ranges,
+            [
+                (date(2025, 1, 1), date(2025, 2, 1)),
+                (date(2025, 2, 1), date(2025, 3, 4)),
+            ],
+        )
+        self.assertEqual(state.backfill_next_day, date(2025, 3, 4))
+        self.assertFalse(state.backfill_complete)
+        self.assertEqual(
+            sum(event.event == "backfill_chunk_succeeded" for event in events),
+            2,
+        )
+
+    def test_backfill_failure_stops_chunks_without_advancing_failed_range(self) -> None:
+        ranges: list[tuple[date, date]] = []
+        events: list[sync_worker.SafeSyncEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def cycle(_configuration, start_day, end_day):
+                ranges.append((start_day, end_day))
+                if len(ranges) == 2:
+                    return sync_worker.SyncCycleOutcome(
+                        False, code="data_probe_auth_failed"
+                    )
+                return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2025, 1, 1)),
+                store=store,
+                cycle=cycle,
+                emit=events.append,
+            )
+            outcome = worker._scheduled_cycle(date(2025, 3, 10))
+            state = store.read_sync_state()
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(len(ranges), 2)
+        self.assertEqual(state.backfill_next_day, date(2025, 2, 1))
+        failure = next(
+            event for event in events if event.event == "backfill_chunk_failed"
+        )
+        self.assertEqual(failure.code, "data_probe_auth_failed")
+
+    def test_backfill_exception_fails_safely_without_advancing_checkpoint(self) -> None:
+        events: list[sync_worker.SafeSyncEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def cycle(_configuration, _start_day, _end_day):
+                raise RuntimeError("private runtime detail")
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2025, 1, 1)),
+                store=store,
+                cycle=cycle,
+                emit=events.append,
+            )
+            outcome = worker._scheduled_cycle(date(2025, 3, 10))
+            state = store.read_sync_state()
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(outcome.code, "sync_cycle_internal_failed")
+        self.assertEqual(state.backfill_next_day, date(2025, 1, 1))
+        failure = next(
+            event for event in events if event.event == "backfill_chunk_failed"
+        )
+        self.assertEqual(failure.code, "sync_cycle_internal_failed")
+        self.assertNotIn("private runtime detail", structured_event_json(failure.as_dict()))
+
+    def test_backfill_completion_transitions_to_three_day_overlap(self) -> None:
+        ranges: list[tuple[date, date]] = []
+        events: list[sync_worker.SafeSyncEvent] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = NormalizedDatasetStore(
+                Path(temporary) / "dataset.sqlite3", required_uid=None
+            )
+
+            def cycle(_configuration, start_day, end_day):
+                ranges.append((start_day, end_day))
+                return sync_worker.SyncCycleOutcome(True, committed=_committed())
+
+            worker = sync_worker.SyncWorker(
+                _configuration(date(2026, 9, 1)),
+                store=store,
+                cycle=cycle,
+                emit=events.append,
+            )
+            worker._scheduled_cycle(date(2026, 9, 10))
+            completed = store.read_sync_state()
+            worker._scheduled_cycle(date(2026, 9, 10))
+        self.assertTrue(completed.backfill_complete)
+        self.assertEqual(
+            ranges,
+            [
+                (date(2026, 9, 1), date(2026, 9, 11)),
+                (date(2026, 9, 8), date(2026, 9, 11)),
+            ],
+        )
+        self.assertIn("backfill_complete", [event.event for event in events])
+        self.assertEqual(sync_worker.CORRECTION_OVERLAP_DAYS, 3)
+
+    def test_backfill_events_expose_only_dates_counts_and_fixed_codes(self) -> None:
+        event = sync_worker.SafeSyncEvent(
+            "backfill_chunk_succeeded",
+            committed=_committed(),
+            start_day=date(2025, 1, 1),
+            end_day=date(2025, 2, 1),
+        )
+        rendered = structured_event_json(event.as_dict())
+        self.assertEqual(
+            set(event.as_dict()),
+            {
+                "event",
+                "start_day",
+                "end_day",
+                "consumption_intervals",
+                "production_intervals",
+                "dataset_state",
+            },
+        )
+        for private in (
+            "private-user",
+            "private-password",
+            "private-elm",
+            "measurement-value",
+        ):
+            self.assertNotIn(private, rendered)
 
 
 if __name__ == "__main__":

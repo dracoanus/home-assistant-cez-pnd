@@ -84,6 +84,17 @@ class IntegrationStructureTests(unittest.TestCase):
             self.assertIn(f'key="{key}"', source)
         self.assertIn("else None", source)
 
+    def test_sync_sensor_names_are_explicit_without_changing_keys(self) -> None:
+        for name in ("strings.json", "translations/en.json"):
+            payload = json.loads((INTEGRATION / name).read_text(encoding="utf-8"))
+            sensors = payload["entity"]["sensor"]
+            self.assertEqual(
+                sensors["last_attempt"]["name"], "Last CEZ sync attempt"
+            )
+            self.assertEqual(
+                sensors["last_success"]["name"], "Last CEZ sync success"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

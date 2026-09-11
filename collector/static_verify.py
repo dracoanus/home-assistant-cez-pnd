@@ -354,6 +354,9 @@ assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
 assert "SyncWorker(sync_configuration, store=dataset_store)" in SERVER_SOURCE
 assert "SYNC_INTERVAL_SECONDS = 6 * 60 * 60" in SYNC_WORKER_SOURCE
+assert "BACKFILL_CHUNK_DAYS = 31" in SYNC_WORKER_SOURCE
+assert "BACKFILL_MAX_CHUNKS_PER_CYCLE = 2" in SYNC_WORKER_SOURCE
+assert "CORRECTION_OVERLAP_DAYS = 3" in SYNC_WORKER_SOURCE
 assert 'ZoneInfo("Europe/Prague")' in SYNC_WORKER_SOURCE
 assert "persist_raw_outputs=False" in SYNC_WORKER_SOURCE
 assert '"sync_cycle_internal_failed"' in SYNC_WORKER_SOURCE
@@ -451,6 +454,9 @@ assert 'raise OSError("unsafe dataset directory owner")' in DATASET_STORE_SOURCE
 assert "sqlite3.connect" in DATASET_STORE_SOURCE
 assert "BEGIN IMMEDIATE" in DATASET_STORE_SOURCE
 assert "ON CONFLICT(channel,interval_start) DO UPDATE" in DATASET_STORE_SOURCE
+assert 'CREATE TABLE IF NOT EXISTS sync_state(' in DATASET_STORE_SOURCE
+assert 'UPDATE measurements SET revision' not in DATASET_STORE_SOURCE
+assert 'StoredMeasurement(*row[:-1], metadata[0])' in DATASET_STORE_SOURCE
 assert "CHECK(valid_count+missing_count+invalid_count=expected_count)" in DATASET_STORE_SOURCE
 assert 'getattr(os, "O_NOFOLLOW", 0)' in DATASET_STORE_SOURCE
 assert "os.chmod(self.path, 0o600)" in DATASET_STORE_SOURCE
@@ -641,6 +647,8 @@ assert "  cez_data_probe_mode: false" in APP_MANIFEST
 assert "  cez_data_probe_mode: bool" in APP_MANIFEST
 assert "  cez_sync_enabled: false" in APP_MANIFEST
 assert "  cez_sync_enabled: bool" in APP_MANIFEST
+assert "  cez_history_start: null" in APP_MANIFEST
+assert "  cez_history_start: str?" in APP_MANIFEST
 assert "  cez_data_probe_date: null" in APP_MANIFEST
 assert "  cez_data_probe_date: str?" in APP_MANIFEST
 assert "  cez_ean: null" in APP_MANIFEST

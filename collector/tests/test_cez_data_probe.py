@@ -394,6 +394,64 @@ class CezDataProbeTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertIsNotNone(store.read_status())
 
+    def test_bounded_ranges_use_inclusive_start_and_exclusive_end(self) -> None:
+        cases = (
+            (date(2026, 3, 1), date(2026, 4, 1), "01.03.2026 00:00", "01.04.2026 00:00"),
+            (date(2026, 10, 1), date(2026, 11, 1), "01.10.2026 00:00", "01.11.2026 00:00"),
+        )
+        for start_day, end_day, expected_from, expected_to in cases:
+            with self.subTest(start_day=start_day), tempfile.TemporaryDirectory() as temporary:
+                session = _successful_session()
+                transport = requests_preauth.RequestsSessionTransport(
+                    resolver=_resolver, session_factory=lambda: session
+                )
+                store = NormalizedDatasetStore(
+                    Path(temporary) / "dataset.sqlite3", required_uid=None
+                )
+                timestamps = iter(
+                    (
+                        datetime(2026, 9, 8, tzinfo=UTC),
+                        datetime(2026, 9, 8, 1, tzinfo=UTC),
+                    )
+                )
+                with mock.patch.object(
+                    cez_data_probe,
+                    "parse_pnd_csv",
+                    side_effect=[
+                        _parsed(PndChannel.CONSUMPTION),
+                        _parsed(PndChannel.PRODUCTION),
+                    ],
+                ):
+                    result = cez_data_probe.run_data_probe(
+                        _configuration(),
+                        transport,
+                        resolver=transport.resolve,
+                        dataset_store=store,
+                        persist_raw_outputs=False,
+                        start_day=start_day,
+                        end_day=end_day,
+                        now=lambda: next(timestamps),
+                        emit=lambda _event: None,
+                    )
+                self.assertEqual(
+                    result.status, cez_http_auth.AuthStatus.AUTHENTICATED
+                )
+                queries = [
+                    parse_qs(urlsplit(call[1]).query) for call in session.calls[5:]
+                ]
+                self.assertEqual(len(queries), 2)
+                for query in queries:
+                    self.assertEqual(query["intervalFrom"], [expected_from])
+                    self.assertEqual(query["intervalTo"], [expected_to])
+
+    def test_collection_range_is_bounded_to_31_days(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid collection range"):
+            cez_data_probe.CezDataProbe(
+                _configuration(),
+                start_day=date(2026, 1, 1),
+                end_day=date(2026, 2, 2),
+            )
+
     def test_meter_identity_is_required(self) -> None:
         client = _ProbeClient(
             [
