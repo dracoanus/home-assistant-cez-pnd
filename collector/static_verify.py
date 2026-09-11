@@ -422,6 +422,13 @@ assert 'SUPPORTED_DELIMITERS = (";", ",")' in CSV_PARSER_SOURCE
 assert 'Decimal("0.25")' in CSV_PARSER_SOURCE
 assert 'frozenset({"", "-", "--", "n/a", "na", "none", "null"})' in CSV_PARSER_SOURCE
 assert 'raise PndCsvParseError("csv_status_invalid")' in CSV_PARSER_SOURCE
+assert '"platna data", "namerena data ok"' in CSV_PARSER_SOURCE
+assert '"neznama hodnota"' in CSV_PARSER_SOURCE
+assert '"nedostupna data"' in CSV_PARSER_SOURCE
+assert '"neplatna data", "chyba", "chyba mereni"' in CSV_PARSER_SOURCE
+assert '_CONSUMPTION_HEADER_KEYWORDS = ("+a", "+e", "spotreb", "odber")' in CSV_PARSER_SOURCE
+assert '_PRODUCTION_HEADER_KEYWORDS = ("-a", "-e", "vyrob", "dodavk")' in CSV_PARSER_SOURCE
+assert "date_column is not None and time_column is None" in CSV_PARSER_SOURCE
 assert 'raise PndCsvParseError("csv_duplicate_conflict")' in CSV_PARSER_SOURCE
 assert "expected not in {92, 96, 100}" in CSV_PARSER_SOURCE
 assert "class IntervalRecord" in CSV_MODELS_SOURCE
@@ -441,6 +448,10 @@ assert "SYNTHETIC_START" not in API_SOURCE
 assert "SYNTHETIC_REVISION" not in API_SOURCE
 assert "data_probe_dataset_committed" in HTTP_AUTH_SOURCE
 assert "parse_pnd_csv(" in DATA_PROBE_SOURCE
+assert '"data_probe_csv_parse_failed"' in HTTP_AUTH_SOURCE
+assert "class DataProbeCsvParseFailureObservation" in HTTP_AUTH_SOURCE
+assert "CSV_PARSE_ERROR_CODES" in HTTP_AUTH_SOURCE
+assert "csv_parse_failure_observation=DataProbeCsvParseFailureObservation" in DATA_PROBE_SOURCE
 assert "Copyright (c) 2026 igracek" in CSV_PARSER_SOURCE
 assert "Copyright (c) 2026 igracek" in THIRD_PARTY_NOTICES
 assert '"data_probe_export_response_observed"' in HTTP_AUTH_SOURCE

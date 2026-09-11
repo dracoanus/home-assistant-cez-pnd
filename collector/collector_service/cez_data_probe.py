@@ -22,6 +22,7 @@ from .cez_http_auth import (
     CEZ_PND_START_URL,
     CezHttpAuthClient,
     DashboardMetadataObservation,
+    DataProbeCsvParseFailureObservation,
     DataProbeExportObservation,
     DataProbeDatasetCommittedObservation,
     DataProbeMeterLookupUnavailableObservation,
@@ -195,6 +196,12 @@ class CezDataProbe:
                 source_timezone="Europe/Prague",
             )
         except PndCsvParseError as error:
+            self._emit(SafeHttpAuthEvent(
+                "data_probe_csv_parse_failed",
+                csv_parse_failure_observation=DataProbeCsvParseFailureObservation(
+                    channel.value, error.code
+                ),
+            ))
             raise _AuthFailure(failure_code) from error
         self._emit(SafeHttpAuthEvent(
             f"data_probe_{channel.value}_parsed",

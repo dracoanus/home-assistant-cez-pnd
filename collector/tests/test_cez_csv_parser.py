@@ -68,6 +68,89 @@ def _complete_day(day: date, channel: PndChannel) -> bytes:
 
 
 class CezCsvParserTests(unittest.TestCase):
+    def test_real_cez_datum_timestamp_and_profile_headers(self) -> None:
+        for channel, header in (
+            (PndChannel.CONSUMPTION, "+A/profile [kW]"),
+            (PndChannel.PRODUCTION, "-A/profile [kW]"),
+        ):
+            with self.subTest(channel=channel):
+                parsed = parse_pnd_csv(
+                    _csv_bytes([
+                        ["Datum", header, "Status"],
+                        ["10.09.2026 00:15:00", "0,309", "naměřená data OK"],
+                    ]),
+                    channel=channel,
+                    require_complete_days=False,
+                )
+                self.assertEqual(parsed.intervals[0].value_kwh, Decimal("0.07725"))
+
+    def test_combined_and_split_timestamp_headers_remain_supported(self) -> None:
+        combined = parse_pnd_csv(
+            _single(timestamp="10.09.2026 00:15:00"),
+            channel=PndChannel.CONSUMPTION,
+            require_complete_days=False,
+        )
+        split = parse_pnd_csv(
+            _csv_bytes([
+                ["Datum", "Čas", "+A [kWh]", "Status"],
+                ["10.09.2026", "00:15:00", "1,25", "platná data"],
+            ]),
+            channel=PndChannel.CONSUMPTION,
+            require_complete_days=False,
+        )
+        self.assertEqual(combined.intervals[0].interval_end, split.intervals[0].interval_end)
+
+    def test_upstream_profile_header_keywords_select_only_expected_channel(self) -> None:
+        cases = (
+            (PndChannel.CONSUMPTION, "+E [kWh]"),
+            (PndChannel.CONSUMPTION, "Spotřeba [kWh]"),
+            (PndChannel.CONSUMPTION, "Odběr [kWh]"),
+            (PndChannel.PRODUCTION, "-E [kWh]"),
+            (PndChannel.PRODUCTION, "Výroba [kWh]"),
+            (PndChannel.PRODUCTION, "Dodávka [kWh]"),
+        )
+        for channel, header in cases:
+            with self.subTest(channel=channel, header=header):
+                parsed = parse_pnd_csv(
+                    _csv_bytes([["Datum", header, "Status"], ["10.09.2026 00:15", "1", "OK"]]),
+                    channel=channel,
+                    require_complete_days=False,
+                )
+                self.assertEqual(parsed.channel, channel)
+
+    def test_real_cez_status_semantics_are_distinct_and_unknown_fails(self) -> None:
+        cases = {
+            IntervalQuality.VALID: (
+                "platná", "platna data", "naměřená data OK", "OK", "valid", "platné",
+            ),
+            IntervalQuality.MISSING: (
+                "neznámá hodnota", "neznámá", "neznámé", "nedostupná data",
+                "nedostupná", "unknown", "unavailable", "N/A",
+            ),
+            IntervalQuality.INVALID: (
+                "neplatná data", "neplatná", "neplatné", "invalid", "chyba", "chyba měření",
+            ),
+        }
+        for quality, statuses in cases.items():
+            for status in statuses:
+                with self.subTest(status=status):
+                    parsed = parse_pnd_csv(
+                        _csv_bytes([["Datum", "+A [kWh]", "Status"], ["10.09.2026 00:15", "1", status]]),
+                        channel=PndChannel.CONSUMPTION,
+                        require_complete_days=False,
+                    )
+                    record = parsed.intervals[0]
+                    self.assertEqual(record.quality, quality)
+                    if quality is not IntervalQuality.VALID:
+                        self.assertIsNone(record.value_kwh)
+        with self.assertRaises(PndCsvParseError) as raised:
+            parse_pnd_csv(
+                _csv_bytes([["Datum", "+A [kWh]", "Status"], ["10.09.2026 00:15", "1", "nový stav"]]),
+                channel=PndChannel.CONSUMPTION,
+                require_complete_days=False,
+            )
+        self.assertEqual(raised.exception.code, "csv_status_invalid")
+
     def test_encoding_and_delimiter_detection(self) -> None:
         rows = [
             ["Datum a čas", "Profil", "Hodnota", "Jednotka", "Stav"],
