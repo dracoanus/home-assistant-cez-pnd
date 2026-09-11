@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -19,7 +19,7 @@ from .client import (
     CollectorProtocolError,
     CollectorStatus,
 )
-from .const import DOMAIN, POLL_INTERVAL, SYNTHETIC_RANGE_END, SYNTHETIC_RANGE_START
+from .const import DOMAIN, POLL_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,12 +54,16 @@ class CezPndCoordinator(DataUpdateCoordinator[CollectorSnapshot]):
 
     async def _async_update_data(self) -> CollectorSnapshot:
         try:
-            health, status, measurements = await asyncio.gather(
-                self._client.async_health(),
-                self._client.async_status(),
-                self._client.async_measurements(
-                    SYNTHETIC_RANGE_START, SYNTHETIC_RANGE_END
-                ),
+            status = await self._client.async_status()
+            if status.data_timestamp is None or status.last_success is None:
+                raise UpdateFailed("collector_dataset_unavailable")
+            range_end = _format_utc(status.data_timestamp)
+            range_start = _format_utc(
+                status.data_timestamp - timedelta(hours=24)
+            )
+            health = await self._client.async_health()
+            measurements = await self._client.async_measurements(
+                range_start, range_end
             )
             _validate_consistent_snapshot(status, measurements)
             return CollectorSnapshot(health, status, measurements)
@@ -69,6 +73,12 @@ class CezPndCoordinator(DataUpdateCoordinator[CollectorSnapshot]):
             ) from error
         except CollectorError as error:
             raise UpdateFailed("Collector API update failed") from error
+
+
+def _format_utc(value: datetime) -> str:
+    """Format a validated Collector timestamp for the bounded API range."""
+
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _validate_consistent_snapshot(
@@ -81,6 +91,5 @@ def _validate_consistent_snapshot(
         or status.last_attempt != measurements.last_attempt
         or status.last_success != measurements.last_success
         or status.source_status != measurements.source_status
-        or status.completeness != measurements.completeness
     ):
         raise CollectorProtocolError("inconsistent_collector_snapshot")
