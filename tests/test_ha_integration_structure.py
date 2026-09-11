@@ -26,6 +26,7 @@ class IntegrationStructureTests(unittest.TestCase):
             "config_flow.py",
             "coordinator.py",
             "sensor.py",
+            "statistics.py",
         ):
             self.assertTrue((INTEGRATION / name).is_file())
 
