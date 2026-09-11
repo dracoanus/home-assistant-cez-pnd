@@ -203,7 +203,7 @@ class NormalizedDatasetStore:
     def prepare_sync_state(
         self, history_start: date, latest_completed_day: date
     ) -> SyncState:
-        """Initialize or extend the monotonic historical backfill checkpoint."""
+        """Initialize or rebase the backfill checkpoint without deleting data."""
 
         with closing(self._connect()) as connection:
             self._initialize(connection)
@@ -228,6 +228,11 @@ class NormalizedDatasetStore:
                     requested = history_start
                     next_day = history_start
                     complete = next_day > latest_completed_day
+                elif history_start > requested:
+                    requested = history_start
+                    next_day = max(next_day, history_start)
+                    complete = complete or next_day > latest_completed_day
+                if history_start != _local_date(row[0]):
                     connection.execute(
                         "UPDATE sync_state SET requested_history_start=?,"
                         "backfill_next_day=?,backfill_complete=? WHERE id=1",

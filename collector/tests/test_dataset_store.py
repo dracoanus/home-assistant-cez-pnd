@@ -114,7 +114,7 @@ class DatasetStoreTests(unittest.TestCase):
             )
         self.assertEqual(self.store.read_sync_state(), initial)
 
-    def test_earlier_history_start_extends_and_later_start_is_monotonic(self) -> None:
+    def test_earlier_history_start_extends_backwards(self) -> None:
         self.store.prepare_sync_state(date(2025, 3, 1), date(2026, 9, 10))
         self.store.advance_sync_state(
             date(2025, 3, 1), date(2025, 4, 1), date(2026, 9, 10)
@@ -124,10 +124,65 @@ class DatasetStoreTests(unittest.TestCase):
         )
         self.assertEqual(earlier.requested_history_start, date(2025, 1, 1))
         self.assertEqual(earlier.backfill_next_day, date(2025, 1, 1))
-        later = self.store.prepare_sync_state(
-            date(2025, 6, 1), date(2026, 9, 10)
+
+    def test_later_history_start_rebases_failed_checkpoint(self) -> None:
+        self.store.prepare_sync_state(date(2025, 1, 1), date(2026, 9, 10))
+        rebased = self.store.prepare_sync_state(
+            date(2025, 9, 1), date(2026, 9, 10)
         )
-        self.assertEqual(later, earlier)
+        self.assertEqual(rebased.requested_history_start, date(2025, 9, 1))
+        self.assertEqual(rebased.backfill_next_day, date(2025, 9, 1))
+        self.assertFalse(rebased.backfill_complete)
+
+    def test_later_history_start_does_not_move_progress_backwards(self) -> None:
+        self.store.prepare_sync_state(date(2025, 1, 1), date(2026, 9, 10))
+        self.store.advance_sync_state(
+            date(2025, 1, 1), date(2025, 10, 1), date(2026, 9, 10)
+        )
+        rebased = self.store.prepare_sync_state(
+            date(2025, 9, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(rebased.requested_history_start, date(2025, 9, 1))
+        self.assertEqual(rebased.backfill_next_day, date(2025, 10, 1))
+        self.assertFalse(rebased.backfill_complete)
+
+    def test_later_history_start_does_not_delete_measurements(self) -> None:
+        previous = self.store.commit_dataset(
+            self.consumption, self.production, collected_at=START
+        )
+        self.store.prepare_sync_state(date(2025, 1, 1), date(2026, 9, 10))
+        self.store.prepare_sync_state(date(2025, 9, 1), date(2026, 9, 10))
+        current = self.store.read_status()
+        page = self.store.read_measurements(
+            "2026-09-01T00:00:00Z", "2026-09-01T01:00:00Z", limit=100
+        )
+        self.assertEqual(current, previous)
+        self.assertEqual(len(page.rows), 4)
+
+    def test_completed_backfill_remains_complete_after_later_start(self) -> None:
+        self.store.prepare_sync_state(date(2025, 1, 1), date(2025, 1, 31))
+        self.store.advance_sync_state(
+            date(2025, 1, 1), date(2025, 2, 1), date(2025, 1, 31)
+        )
+        rebased = self.store.prepare_sync_state(
+            date(2025, 1, 15), date(2026, 9, 10)
+        )
+        self.assertEqual(rebased.requested_history_start, date(2025, 1, 15))
+        self.assertEqual(rebased.backfill_next_day, date(2025, 2, 1))
+        self.assertTrue(rebased.backfill_complete)
+
+    def test_later_then_earlier_history_start_extends_again(self) -> None:
+        self.store.prepare_sync_state(date(2025, 1, 1), date(2026, 9, 10))
+        later = self.store.prepare_sync_state(
+            date(2025, 9, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(later.backfill_next_day, date(2025, 9, 1))
+        earlier = self.store.prepare_sync_state(
+            date(2024, 12, 1), date(2026, 9, 10)
+        )
+        self.assertEqual(earlier.requested_history_start, date(2024, 12, 1))
+        self.assertEqual(earlier.backfill_next_day, date(2024, 12, 1))
+        self.assertFalse(earlier.backfill_complete)
 
     def test_revision_is_dataset_level_without_mass_rewrite(self) -> None:
         statements: list[str] = []
