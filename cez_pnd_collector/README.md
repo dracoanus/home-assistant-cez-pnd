@@ -1,12 +1,11 @@
-# CEZ PND Collector
+# CEZ PND Collector App
 
-This experimental App wrapper runs the prebuilt Collector service image. It
-exposes only the authenticated HTTPS Collector API on the internal Home
-Assistant App network. It publishes no host port and contains no Dockerfile.
+This App runs the prebuilt CEZ PND Collector image and exposes its
+authenticated HTTPS API only on the internal Home Assistant App network. It
+does not publish a host port and contains no App Dockerfile.
 
-Release `0.2.3` is the validated synthetic Collector baseline. The unreleased
-Phase 3A source adds only an explicitly enabled one-shot CEZ authentication
-discovery mode; normal startup remains the unchanged synthetic API. See
-[App documentation](DOCS.md), the
-[HA OS acceptance plan](../docs/phase2b-collector-ha-app.md), and the
-[Phase 3A discovery design](../docs/phase3a-cez-auth-discovery.md).
+The App stores normalized CEZ interval data, performs scheduled synchronization
+and keeps CEZ credentials inside its own private configuration. See the
+[installation guide](../docs/installation.md),
+[configuration guide](../docs/configuration.md), and detailed
+[App option reference](DOCS.md).
