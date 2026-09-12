@@ -1,0 +1,53 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Připojit CEZ PND Collector",
+        "description": "Nastavte místní API Collectoru. Přihlašovací údaje k účtu CEZ se nikdy nevyžadují ani neukládají v Home Assistant Core.",
+        "data": {
+          "collector_url": "HTTPS URL Collectoru",
+          "meter_id": "Neprůhledné ID měřidla",
+          "api_token": "API token Collectoru",
+          "ca_certificate": "CA certifikát Collectoru (PEM)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Aktualizovat přihlašovací údaj API Collectoru",
+        "description": "Zadejte náhradní omezený API token Collectoru.",
+        "data": {"api_token": "API token Collectoru"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Nelze se připojit k Collectoru",
+      "invalid_auth": "API token Collectoru byl odmítnut",
+      "invalid_configuration": "Nastavení připojení k Collectoru není platné",
+      "invalid_response": "Collector vrátil neplatnou odpověď",
+      "invalid_tls": "Certifikát TLS Collectoru nelze ověřit"
+    },
+    "abort": {"already_configured": "Toto měřidlo je již nastaveno"}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Interval aktualizace",
+        "description": "Nastavte, jak často Home Assistant ověří novou revizi datasetu v místním Collectoru.",
+        "data": {"poll_interval_seconds": "Interval dotazování"}
+      }
+    },
+    "error": {"invalid_poll_interval": "Zadejte celé číslo od 30 do 3600 sekund"}
+  },
+  "entity": {
+    "sensor": {
+      "collector_health": {"name": "Stav Collectoru"},
+      "source_status": {"name": "Stav zdroje"},
+      "data_timestamp": {"name": "Čas posledního dostupného měření"},
+      "last_attempt": {"name": "Poslední pokus o synchronizaci CEZ"},
+      "last_success": {"name": "Poslední úspěšná synchronizace CEZ"},
+      "completeness": {"name": "Úplnost dat"},
+      "valid_count": {"name": "Počet platných intervalů"},
+      "missing_count": {"name": "Počet chybějících intervalů"},
+      "dataset_revision": {"name": "Revize datasetu"},
+      "grid_import": {"name": "Interval odběru ze sítě"}
+    }
+  }
+}

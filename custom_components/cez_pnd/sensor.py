@@ -140,7 +140,7 @@ class CezPndSensor(CoordinatorEntity[CezPndCoordinator], SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Expose bounded interval metadata for the synthetic measurement."""
+        """Expose bounded interval metadata for the latest measurement."""
 
         if self.entity_description.key != "grid_import":
             return None
