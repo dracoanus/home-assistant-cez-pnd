@@ -49,7 +49,7 @@ jobs:
 
       - name: Check diff whitespace
         run: git diff --check "${BASE_SHA}...${HEAD_SHA}"
-      
+
       - name: Install Collector dependencies
         run: >-
           python3 -m pip install
