@@ -34,6 +34,8 @@ kernel_modules: false
 realtime: false
 ingress: false
 stdin: false
+discovery:
+  - cez_pnd
 options:
   meter_id: null
   api_token_sha256: null
@@ -50,10 +52,10 @@ options:
   cez_elm: null
   cez_allowed_origins: []
 schema:
-  meter_id: "match(^mtr_[a-f0-9]{32}$)"
-  api_token_sha256: "match(^[a-f0-9]{64}$)"
-  tls_certificate_b64: password
-  tls_private_key_b64: password
+  meter_id: "match(^mtr_[a-f0-9]{32}$)?"
+  api_token_sha256: "match(^[a-f0-9]{64}$)?"
+  tls_certificate_b64: password?
+  tls_private_key_b64: password?
   cez_discovery_mode: bool
   cez_http_auth_discovery_mode: bool
   cez_requests_preauth_compatibility_mode: bool

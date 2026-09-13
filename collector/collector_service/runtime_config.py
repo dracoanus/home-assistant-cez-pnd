@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 import base64
 import binascii
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -15,10 +16,12 @@ import tempfile
 from typing import Iterator
 import unicodedata
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from .api import EXPECTED_SCOPES, TokenVerifier
+from .managed_identity import ManagedIdentity, ManagedIdentityStore, hostname_from_supervisor_slug
+from .pairing import ManagedCredentialStore
 from .security_files import descriptor_path, open_verified_file
 
 
@@ -49,6 +52,9 @@ PRIVATE_CONFIGURATION_ERROR_CODES = frozenset(
         "private_config_ssl_context_load_failed",
         "private_config_file_verifier_failed",
         "private_config_file_tls_load_failed",
+        "private_config_partial_legacy_identity",
+        "private_config_managed_identity_invalid",
+        "private_config_supervisor_identity_invalid",
     }
 )
 
@@ -152,7 +158,7 @@ class SyncConfiguration:
 class RuntimeConfiguration:
     """Validated API verifier and an initialized TLS server context."""
 
-    verifier: TokenVerifier
+    verifier: TokenVerifier | ManagedCredentialStore
     tls_context: ssl.SSLContext
     source: str
     discovery: DiscoveryConfiguration | None = None
@@ -160,6 +166,15 @@ class RuntimeConfiguration:
     requests_preauth_compatibility: bool = False
     data_probe: DataProbeConfiguration | None = None
     sync: SyncConfiguration | None = None
+    managed_identity: ManagedIdentity | None = None
+    managed_identity_created: bool = False
+    supervisor_token: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class SupervisorSelfInfo:
+    options: dict[str, object] = field(repr=False)
+    slug: str | None
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -174,20 +189,11 @@ def load_runtime_configuration() -> RuntimeConfiguration:
 
     supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
     if supervisor_token:
-        options = _read_supervisor_options(supervisor_token)
-        try:
-            verifier = TokenVerifier.from_mapping(
-                {
-                    "schema_version": "1",
-                    "token_sha256": options.get("api_token_sha256"),
-                    "meter_id": options.get("meter_id"),
-                    "scopes": sorted(EXPECTED_SCOPES),
-                }
-            )
-        except (TypeError, ValueError) as error:
-            raise PrivateConfigurationError(
-                "private_config_invalid_token_verifier"
-            ) from error
+        self_info = _read_supervisor_self_info(supervisor_token)
+        options = self_info.options
+        legacy_state = _legacy_configuration_state(options)
+        if legacy_state == "partial":
+            raise PrivateConfigurationError("private_config_partial_legacy_identity")
         _validate_discovery_modes(options)
         discovery = _load_discovery_configuration(options)
         http_auth_discovery = _load_http_auth_discovery_configuration(options)
@@ -196,17 +202,53 @@ def load_runtime_configuration() -> RuntimeConfiguration:
         sync = _load_sync_configuration(options)
         options.pop("cez_username", None)
         options.pop("cez_password", None)
-        certificate = _decode_tls_option(options, "tls_certificate_b64")
-        private_key = _decode_tls_option(options, "tls_private_key_b64")
+        managed_identity = None
+        managed_identity_created = False
+        if legacy_state == "complete":
+            try:
+                verifier = TokenVerifier.from_mapping(
+                    {
+                        "schema_version": "1",
+                        "token_sha256": options.get("api_token_sha256"),
+                        "meter_id": options.get("meter_id"),
+                        "scopes": sorted(EXPECTED_SCOPES),
+                    }
+                )
+            except (TypeError, ValueError) as error:
+                raise PrivateConfigurationError("private_config_invalid_token_verifier") from error
+            certificate = _decode_tls_option(options, "tls_certificate_b64")
+            private_key = _decode_tls_option(options, "tls_private_key_b64")
+            tls_context = _context_from_memory(certificate, private_key)
+            source = "supervisor_self_info"
+        else:
+            try:
+                if self_info.slug is None:
+                    raise ValueError("missing Supervisor slug")
+                hostname = hostname_from_supervisor_slug(self_info.slug)
+            except ValueError as error:
+                raise PrivateConfigurationError("private_config_supervisor_identity_invalid") from error
+            try:
+                managed_identity, managed_identity_created = ManagedIdentityStore().load_or_create(hostname)
+                verifier = ManagedCredentialStore(managed_identity.meter_id)
+                tls_context = _context_from_memory(
+                    managed_identity.server_certificate_pem.encode("ascii"),
+                    managed_identity.server_private_key_pem.encode("ascii"),
+                )
+            except (OSError, UnicodeError, ValueError) as error:
+                raise PrivateConfigurationError("private_config_managed_identity_invalid") from error
+            source = "managed_identity"
         return RuntimeConfiguration(
             verifier=verifier,
-            tls_context=_context_from_memory(certificate, private_key),
-            source="supervisor_self_info",
+            tls_context=tls_context,
+            source=source,
             discovery=discovery,
             http_auth_discovery=http_auth_discovery,
             requests_preauth_compatibility=requests_preauth_compatibility,
             data_probe=data_probe,
             sync=sync,
+            managed_identity=managed_identity,
+            managed_identity_created=managed_identity_created,
+            supervisor_token=supervisor_token,
         )
 
     try:
@@ -504,7 +546,7 @@ def _required_discovery_text(
     return value
 
 
-def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
+def _read_supervisor_self_info(supervisor_token: str) -> SupervisorSelfInfo:
     if len(supervisor_token) > 8192 or any(
         character.isspace() for character in supervisor_token
     ):
@@ -518,7 +560,7 @@ def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
             },
             method="GET",
         )
-        opener = build_opener(_RejectRedirects())
+        opener = build_opener(ProxyHandler({}), _RejectRedirects())
         with opener.open(request, timeout=5.0) as response:
             if response.status != 200:
                 raise PrivateConfigurationError(
@@ -527,7 +569,15 @@ def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
             body = response.read(MAX_SUPERVISOR_RESPONSE_BYTES + 1)
     except PrivateConfigurationError:
         raise
-    except (HTTPError, URLError, TimeoutError, OSError, TypeError, ValueError) as error:
+    except (
+        HTTPError,
+        URLError,
+        HTTPException,
+        TimeoutError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise PrivateConfigurationError(
             "private_config_supervisor_request_failed"
         ) from error
@@ -549,7 +599,28 @@ def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
     options = data.get("options")
     if not isinstance(options, dict):
         raise PrivateConfigurationError("private_config_supervisor_response_invalid")
-    return options
+    slug = data.get("slug")
+    if slug is not None and not isinstance(slug, str):
+        raise PrivateConfigurationError("private_config_supervisor_response_invalid")
+    return SupervisorSelfInfo(options, slug)
+
+
+def _read_supervisor_options(supervisor_token: str) -> dict[str, object]:
+    """Compatibility wrapper retained for focused configuration tests."""
+
+    return _read_supervisor_self_info(supervisor_token).options
+
+
+def _legacy_configuration_state(options: dict[str, object]) -> str:
+    names = (
+        "meter_id", "api_token_sha256", "tls_certificate_b64", "tls_private_key_b64"
+    )
+    present = tuple(options.get(name) not in (None, "") for name in names)
+    if all(present):
+        return "complete"
+    if any(present):
+        return "partial"
+    return "none"
 
 
 def _decode_tls_option(options: dict[str, object], name: str) -> bytes:

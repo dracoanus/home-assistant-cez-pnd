@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
+import secrets
 from typing import Iterator
 
 
@@ -50,6 +51,70 @@ def descriptor_path(descriptor: int) -> str:
     """Return the already-open Linux descriptor path used by OpenSSL."""
 
     return f"/proc/self/fd/{descriptor}"
+
+
+def atomic_write_private(path: Path, content: bytes, *, maximum_bytes: int) -> None:
+    """Atomically replace one bounded UID-2000 private file using a directory FD."""
+
+    if not content or len(content) > maximum_bytes:
+        raise ValueError("private file content is invalid")
+    if path.name in {"", ".", ".."} or path.parent == path:
+        raise ValueError("unsafe private file")
+    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required):
+        raise OSError("required secure file-writing mechanism is unavailable")
+    directory = path.parent
+    directory_descriptor = os.open(
+        directory,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    temporary_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+    try:
+        directory_metadata = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory_metadata.st_uid != 2000
+            or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        ):
+            raise ValueError("unsafe private directory")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=directory_descriptor)
+        try:
+            try:
+                view = memoryview(content)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("private file write failed")
+                    view = view[written:]
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            try:
+                existing = os.stat(
+                    path.name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                _validate_file_metadata(existing, private=True)
+            os.replace(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+            os.fsync(directory_descriptor)
+        finally:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(directory_descriptor)
 
 
 def _validate_file_metadata(metadata: os.stat_result, *, private: bool) -> None:

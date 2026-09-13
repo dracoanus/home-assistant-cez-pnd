@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import socket
+import ssl
 import sys
 
 from .api import ApiResponse, CollectorApi
@@ -24,6 +25,12 @@ from .runtime_config import (
 )
 from .structured_logging import structured_event_json
 from .dataset_store import NormalizedDatasetStore
+from .pairing import (
+    MAX_PAIRING_BODY_BYTES,
+    PairingApi,
+    PairingDiscoveryWorker,
+    SupervisorDiscoveryClient,
+)
 
 
 BIND_ADDRESS = "0.0.0.0"
@@ -39,6 +46,12 @@ class CollectorHttpServer(HTTPServer):
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         connection, address = super().get_request()
         connection.settimeout(5.0)
+        if isinstance(connection, ssl.SSLSocket):
+            try:
+                connection.do_handshake()
+            except Exception:
+                connection.close()
+                raise
         return connection, address
 
 
@@ -64,8 +77,19 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         self._respond()
 
     def _respond(self) -> None:
-        app: CollectorApi = self.server.collector_api  # type: ignore[attr-defined]
-        response = app.handle(self.command, self.path, self.headers)
+        if self.path.split("?", 1)[0].startswith("/pairing/"):
+            pairing_api: PairingApi | None = getattr(self.server, "pairing_api", None)
+            if pairing_api is None:
+                response = CollectorApi._error(404, "not_found", False, "unavailable", "unknown")
+            else:
+                body = self._read_pairing_body()
+                if body is None:
+                    response = CollectorApi._error(400, "invalid_request_body", False, "unavailable", "unknown")
+                else:
+                    response = pairing_api.handle(self.command, self.path, self.headers, body)
+        else:
+            app: CollectorApi = self.server.collector_api  # type: ignore[attr-defined]
+            response = app.handle(self.command, self.path, self.headers)
         encoded = json.dumps(
             response.body,
             ensure_ascii=True,
@@ -88,6 +112,20 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         _audit(response, self.command)
+
+    def _read_pairing_body(self) -> bytes | None:
+        if self.headers.get("Transfer-Encoding") is not None:
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            return b""
+        try:
+            length = int(raw_length)
+        except ValueError:
+            return None
+        if not 0 <= length <= MAX_PAIRING_BODY_BYTES:
+            return None
+        return self.rfile.read(length)
 
     def log_message(self, _format: str, *args: object) -> None:
         """Suppress BaseHTTPRequestHandler's raw request logging."""
@@ -176,7 +214,24 @@ def main() -> int:
         server.collector_api = CollectorApi(  # type: ignore[attr-defined]
             configuration.verifier, dataset_store
         )
-        server.socket = configuration.tls_context.wrap_socket(server.socket, server_side=True)
+        pairing_worker = None
+        if getattr(configuration, "managed_identity", None) is not None:
+            credentials = configuration.verifier
+            supervisor = SupervisorDiscoveryClient(configuration.supervisor_token)
+            pairing_worker = PairingDiscoveryWorker(
+                configuration.managed_identity,
+                credentials,
+                supervisor,
+                _emit_pairing_event,
+            )
+            server.pairing_api = PairingApi(  # type: ignore[attr-defined]
+                credentials, pairing_worker.remove_after_activation, _emit_pairing_event
+            )
+        server.socket = configuration.tls_context.wrap_socket(
+            server.socket,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
     except (OSError, ValueError, json.JSONDecodeError):
         print(
             structured_event_json(
@@ -199,6 +254,11 @@ def main() -> int:
         ),
         flush=True,
     )
+    if getattr(configuration, "managed_identity", None) is not None:
+        _emit_pairing_event(
+            {"event": "managed_identity_created" if configuration.managed_identity_created else "managed_identity_loaded"}
+        )
+        pairing_worker.start()
     sync_worker = None
     sync_configuration = getattr(configuration, "sync", None)
     if sync_configuration is not None:
@@ -213,6 +273,8 @@ def main() -> int:
     finally:
         if sync_worker is not None:
             sync_worker.stop()
+        if pairing_worker is not None:
+            pairing_worker.stop()
         server.server_close()
         print(structured_event_json({"event": "service_stopped"}), flush=True)
     return 0
@@ -235,6 +297,10 @@ def _audit(response: ApiResponse, method: str) -> None:
 
 def _request_stop(_signum: int, _frame: object) -> None:
     raise KeyboardInterrupt
+
+
+def _emit_pairing_event(event: dict[str, object]) -> None:
+    print(structured_event_json(event), flush=True)
 
 
 if __name__ == "__main__":

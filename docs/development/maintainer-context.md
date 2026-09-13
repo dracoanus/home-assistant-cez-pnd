@@ -16,7 +16,7 @@ exposes sensors and writes Recorder external statistics. CEZ credentials, EAN
 and ELM stay in Collector configuration; HA has only a limited API token,
 opaque meter ID and Collector CA certificate.
 
-API routes: `GET /api/v1/health`, `GET /api/v1/status` and
+Data API routes: `GET /api/v1/health`, `GET /api/v1/status` and
 `GET /api/v1/measurements`. There is no browser, shell, debug or arbitrary URL
 API.
 
@@ -69,3 +69,36 @@ before tagging; never rewrite public tags.
 
 Future work: automated TLS/token lifecycle, safer DNS connection pinning,
 operational monitoring and further CEZ compatibility validation.
+
+## Phase 5B managed pairing foundation
+
+Phase 5B-B1 deliberately uses Supervisor discovery instead of Ingress.
+Supervisor binds each discovery message to the requesting App and accepts only
+services declared by that App. The `cez_pnd` payload is bounded and carries a
+short-lived bootstrap secret plus public trust data; it never contains CEZ
+credentials, EAN/ELM, private keys, an arbitrary hostname, or a long-lived API
+token. The future HA flow must derive the internal hostname from the
+Supervisor-provided App slug.
+
+New installations with none of the four legacy identity options use an atomic
+managed identity in `/data/cez-pnd-identity`. The root entrypoint creates only
+that private `0700` directory, then UID/GID 2000 generates the CA and leaf
+keys. Complete legacy identity/token options retain exact precedence. A partial
+legacy set is always an error and must never trigger silent CA or token
+replacement.
+
+Managed credentials have at most one ACTIVE verifier, one PENDING verifier and
+one bootstrap authorization. Bootstrap lifetime is ten minutes with eight
+attempts; PENDING lifetime is 24 hours and survives restart. Only ACTIVE can
+authorize the existing read API. Activation is idempotent, and discovery
+cleanup failure does not revoke a successfully activated token.
+
+The managed-only pairing surface is exactly `POST /pairing/v1/claim` and
+`POST /pairing/v1/activate`. It is separate from the three data routes and does
+not expose credential, browser, file, or arbitrary command functionality.
+
+This foundation is intentionally incomplete: the HA `SOURCE_HASSIO` config
+flow, token generation and durable activation sequence are deferred to Phase
+5B-B2. Do not present managed pairing as a finished installation path until
+that slice passes HA OS validation. Automatic leaf renewal, CA rotation and
+legacy-to-managed rotation are also deferred.

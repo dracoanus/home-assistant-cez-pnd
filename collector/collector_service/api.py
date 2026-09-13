@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -46,7 +46,7 @@ class ApiResponse:
 @dataclass(frozen=True)
 class TokenVerifier:
     """Single-client, single-meter read-only token verifier."""
-    token_sha256: str
+    token_sha256: str = field(repr=False)
     meter_id: str
     scopes: frozenset[str]
 

@@ -13,6 +13,37 @@ import collector_entrypoint
 
 
 class CollectorEntrypointTests(unittest.TestCase):
+    def test_bootstrap_creates_private_identity_directory_without_touching_data(self) -> None:
+        ownership = []
+        modes = []
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            data.mkdir()
+            marker = data / "existing"
+            marker.write_text("unchanged")
+            identity = collector_entrypoint.prepare_identity_directory(
+                data,
+                chown=lambda path, uid, gid, *, follow_symlinks: ownership.append((path, uid, gid, follow_symlinks)),
+                chmod=lambda path, mode, *, follow_symlinks: modes.append((path, mode, follow_symlinks)),
+            )
+            self.assertEqual(identity.name, "cez-pnd-identity")
+            self.assertEqual(marker.read_text(), "unchanged")
+            self.assertEqual(ownership, [(identity, 2000, 2000, False)])
+            self.assertEqual(modes, [(identity, 0o700, False)])
+
+    def test_bootstrap_rejects_symlinked_identity_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            target = Path(temporary) / "target"
+            data.mkdir()
+            target.mkdir()
+            try:
+                (data / "cez-pnd-identity").symlink_to(target, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            with self.assertRaisesRegex(RuntimeError, "unsafe identity directory"):
+                collector_entrypoint.prepare_identity_directory(data, chown=mock.Mock(), chmod=mock.Mock())
+
     def test_bootstrap_creates_only_private_probe_directory(self) -> None:
         ownership: list[tuple[Path, int, int, bool]] = []
         modes: list[tuple[Path, int, bool]] = []
@@ -174,6 +205,10 @@ class CollectorEntrypointTests(unittest.TestCase):
             side_effect=lambda: calls.append("dataset"),
         ), mock.patch.object(
             collector_entrypoint,
+            "prepare_identity_directory",
+            side_effect=lambda: calls.append("identity"),
+        ), mock.patch.object(
+            collector_entrypoint,
             "drop_privileges",
             side_effect=lambda: calls.append("drop"),
         ), mock.patch.object(
@@ -182,7 +217,7 @@ class CollectorEntrypointTests(unittest.TestCase):
             side_effect=execute,
         ):
             self.assertEqual(collector_entrypoint.main(), 1)
-        self.assertEqual(calls, ["prepare", "dataset", "drop", "exec"])
+        self.assertEqual(calls, ["prepare", "dataset", "identity", "drop", "exec"])
 
     def test_failed_identity_verification_cannot_continue_as_root(self) -> None:
         with mock.patch.object(
