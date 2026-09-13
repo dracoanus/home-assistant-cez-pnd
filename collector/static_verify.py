@@ -39,6 +39,10 @@ ENTRYPOINT_SOURCE = (ROOT / "collector_entrypoint.py").read_text(encoding="utf-8
 REQUESTS_COMPATIBILITY_REQUIREMENTS = (
     ROOT / "requirements-requests-compatibility.txt"
 ).read_text(encoding="utf-8")
+MANAGED_IDENTITY_SOURCE = (
+    ROOT / "collector_service" / "managed_identity.py"
+).read_text(encoding="utf-8")
+PAIRING_SOURCE = (ROOT / "collector_service" / "pairing.py").read_text(encoding="utf-8")
 STRUCTURED_LOGGING_SOURCE = (
     ROOT / "collector_service" / "structured_logging.py"
 ).read_text(encoding="utf-8")
@@ -116,6 +120,9 @@ assert (
 ) in DOCKERFILE
 assert 'PROBE_DIRECTORY_NAME = "cez-pnd-probe"' in ENTRYPOINT_SOURCE
 assert 'DATA_DIRECTORY = Path("/data")' in ENTRYPOINT_SOURCE
+assert 'IDENTITY_DIRECTORY_NAME = "cez-pnd-identity"' in ENTRYPOINT_SOURCE
+assert "prepare_identity_directory()" in ENTRYPOINT_SOURCE
+assert "mode_setter(identity_directory, 0o700" in ENTRYPOINT_SOURCE
 assert "probe_directory.mkdir(mode=0o700, exist_ok=True)" in ENTRYPOINT_SOURCE
 assert "RUNTIME_UID = 2000" in ENTRYPOINT_SOURCE
 assert "RUNTIME_GID = 2000" in ENTRYPOINT_SOURCE
@@ -131,6 +138,9 @@ for installer in ("apt-get", "apt ", "apk add", "curl ", "wget "):
 assert REQUESTS_COMPATIBILITY_REQUIREMENTS.splitlines() == [
     "requests==2.32.5",
     "charset-normalizer==3.4.3",
+    "cryptography==50.0.1",
+    "cffi==2.0.0",
+    "pycparser==2.23",
 ]
 
 for forbidden in (
@@ -163,6 +173,24 @@ for forbidden in (
 routes = set(re.findall(r'f"\{API_PREFIX\}(/[^"}]*)"', SOURCE))
 assert routes == {"/health", "/status", "/measurements"}
 assert "hmac.compare_digest" in SOURCE
+assert 'PAIRING_PREFIX = "/pairing/v1"' in PAIRING_SOURCE
+assert PAIRING_SOURCE.count('f"{PAIRING_PREFIX}/') == 2
+assert "MAX_PAIRING_BODY_BYTES = 2048" in PAIRING_SOURCE
+assert "MAX_DISCOVERY_BYTES = 16 * 1024" in PAIRING_SOURCE
+assert "BOOTSTRAP_LIFETIME = timedelta(minutes=10)" in PAIRING_SOURCE
+assert "PENDING_LIFETIME = timedelta(hours=24)" in PAIRING_SOURCE
+assert "MAX_BOOTSTRAP_ATTEMPTS = 8" in PAIRING_SOURCE
+assert "hmac.compare_digest" in PAIRING_SOURCE
+assert "ProxyHandler({})" in PAIRING_SOURCE
+assert "ProxyHandler({})" in RUNTIME_CONFIG_SOURCE
+assert "object_pairs_hook=exact_object" in PAIRING_SOURCE
+assert 'IDENTITY_DIRECTORY = Path("/data/cez-pnd-identity")' in MANAGED_IDENTITY_SOURCE
+assert '"mtr_" + secrets.token_hex(16)' in MANAGED_IDENTITY_SOURCE
+assert "x509.SubjectAlternativeName([x509.DNSName(hostname)])" in MANAGED_IDENTITY_SOURCE
+assert "x509.DNSName(\"*\")" not in MANAGED_IDENTITY_SOURCE
+assert '"private_config_partial_legacy_identity"' in RUNTIME_CONFIG_SOURCE
+assert 'legacy_state == "complete"' in RUNTIME_CONFIG_SOURCE
+assert 'legacy_state == "partial"' in RUNTIME_CONFIG_SOURCE
 assert "Cache-Control" in SOURCE and "no-store" in SOURCE
 assert "Access-Control-Allow-Origin" not in SOURCE
 assert '"value_kwh": row.value_kwh' in API_SOURCE
@@ -170,6 +198,9 @@ assert "value_kwh\": 0" not in SOURCE
 assert "BIND_ADDRESS = \"0.0.0.0\"" in SOURCE
 assert "BIND_PORT = 8443" in SOURCE
 assert "ssl.PROTOCOL_TLS_SERVER" in SOURCE
+assert "do_handshake_on_connect=False" in SERVER_SOURCE
+assert "connection.settimeout(5.0)" in SERVER_SOURCE
+assert "connection.do_handshake()" in SERVER_SOURCE
 assert 'context.set_alpn_protocols(["http/1.1"])' in STRICT_TRANSPORT_SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
@@ -207,7 +238,8 @@ assert "MAX_SUPERVISOR_RESPONSE_BYTES = 256 * 1024" in RUNTIME_CONFIG_SOURCE
 assert "base64.b64decode(encoded, validate=True)" in SOURCE
 assert "api_token_sha256" in SOURCE
 assert "tls_private_key_b64" in SOURCE
-assert 'source="supervisor_self_info"' in SOURCE
+assert 'source = "supervisor_self_info"' in SOURCE
+assert 'source = "managed_identity"' in SOURCE
 assert "tempfile.mkstemp" in SOURCE and "os.fchmod(descriptor, 0o600)" in SOURCE
 assert "os.unlink(path)" in SOURCE
 assert "from selenium import webdriver" in DISCOVERY_SOURCE
@@ -602,6 +634,7 @@ expected_manifest_keys = {
     "realtime",
     "ingress",
     "stdin",
+    "discovery",
     "options",
     "schema",
 }
@@ -627,6 +660,7 @@ for required in (
     "full_access: false",
     "apparmor: true",
     "ingress: false",
+    "  - cez_pnd",
 ):
     assert required in APP_MANIFEST
 for forbidden in (
@@ -644,6 +678,10 @@ for forbidden in (
     assert forbidden not in APP_MANIFEST
 assert "api_token_sha256" in APP_MANIFEST
 assert "api_token:" not in APP_MANIFEST
+assert 'api_token_sha256: "match(^[a-f0-9]{64}$)?"' in APP_MANIFEST
+assert 'meter_id: "match(^mtr_[a-f0-9]{32}$)?"' in APP_MANIFEST
+assert "tls_certificate_b64: password?" in APP_MANIFEST
+assert "tls_private_key_b64: password?" in APP_MANIFEST
 assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
 assert "  cez_discovery_mode: false" in APP_MANIFEST
@@ -699,7 +737,7 @@ print("PASS: CEZ hosts exist only in reviewed authentication/data-probe code")
 print("PASS: missing measurement is null, never synthesized zero")
 print("PASS: immutable GHCR workflow retains SBOM and provenance")
 print("PASS: isolated non-root offline container smoke profile")
-print("PASS: PR validation workflow is read-only, pinned, and offline")
+print("PASS: PR validation workflow is read-only, pinned, and performs no CEZ access")
 print("PASS: production App wrapper is prebuilt-image-only and least-privilege")
 print("PASS: HA bootstrap stores only the API verifier and fails closed")
 print("PASS: one-shot CEZ discovery is explicit, allowlisted, and non-secret")

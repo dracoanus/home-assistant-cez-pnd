@@ -64,6 +64,9 @@ class RuntimeConfigurationTest(unittest.TestCase):
                 "private_config_ssl_context_load_failed",
                 "private_config_file_verifier_failed",
                 "private_config_file_tls_load_failed",
+                "private_config_partial_legacy_identity",
+                "private_config_managed_identity_invalid",
+                "private_config_supervisor_identity_invalid",
             },
         )
         with self.assertRaisesRegex(ValueError, "unknown private configuration"):
@@ -85,6 +88,18 @@ class RuntimeConfigurationTest(unittest.TestCase):
         self.assertNotIn("private-password", rendered)
         self.assertNotIn("8" * 18, rendered)
         self.assertIsNone(configuration.history_start)
+
+    def test_token_verifier_repr_does_not_expose_hash(self) -> None:
+        verifier_hash = "a" * 64
+        verifier = runtime_config.TokenVerifier.from_mapping(
+            {
+                "schema_version": "1",
+                "token_sha256": verifier_hash,
+                "meter_id": SYNTHETIC_METER_ID,
+                "scopes": sorted(runtime_config.EXPECTED_SCOPES),
+            }
+        )
+        self.assertNotIn(verifier_hash, repr(verifier))
 
     def test_sync_history_start_is_strict_and_not_future(self) -> None:
         base = {
@@ -158,6 +173,16 @@ class RuntimeConfigurationTest(unittest.TestCase):
             '"http://supervisor/v2/apps/self/info"', executable_source
         )
 
+    def test_supervisor_self_info_repr_hides_options(self) -> None:
+        sensitive_marker = "unique-private-supervisor-option"
+        self_info = runtime_config.SupervisorSelfInfo(
+            options={"tls_private_key_b64": sensitive_marker},
+            slug="local_cez_pnd_collector",
+        )
+        rendered = repr(self_info)
+        self.assertNotIn(sensitive_marker, rendered)
+        self.assertIn("local_cez_pnd_collector", rendered)
+
     def test_supervisor_redirect_is_rejected(self) -> None:
         handler = runtime_config._RejectRedirects()
         with self.assertRaisesRegex(ValueError, "redirected"):
@@ -180,8 +205,50 @@ class RuntimeConfigurationTest(unittest.TestCase):
         self.assertEqual(request.full_url, "http://supervisor/addons/self/info")
         self.assertEqual(request.get_header("Authorization"), "Bearer platform-token")
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 5.0)
-        redirect_handler = build_opener_mock.call_args.args[0]
+        handlers = build_opener_mock.call_args.args
+        proxy_handler = next(
+            handler
+            for handler in handlers
+            if isinstance(handler, runtime_config.ProxyHandler)
+        )
+        self.assertEqual(proxy_handler.proxies, {})
+        redirect_handler = next(
+            handler
+            for handler in handlers
+            if isinstance(handler, runtime_config._RejectRedirects)
+        )
         self.assertIsInstance(redirect_handler, runtime_config._RejectRedirects)
+
+    def test_supervisor_self_info_ignores_environment_proxy(self) -> None:
+        payload = json.dumps(
+            {"result": "ok", "data": {"options": {}, "slug": "local_cez_pnd_collector"}}
+        ).encode()
+        opener = mock.Mock()
+        opener.open.return_value = _FakeResponse(payload)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HTTP_PROXY": "http://attacker.invalid:8080",
+                    "HTTPS_PROXY": "http://attacker.invalid:8080",
+                },
+                clear=False,
+            ),
+            mock.patch(
+                "collector_service.runtime_config.build_opener", return_value=opener
+            ) as build_opener_mock,
+        ):
+            runtime_config._read_supervisor_self_info("platform-token")
+        proxy_handler = next(
+            handler
+            for handler in build_opener_mock.call_args.args
+            if isinstance(handler, runtime_config.ProxyHandler)
+        )
+        self.assertEqual(proxy_handler.proxies, {})
+        self.assertEqual(
+            opener.open.call_args.args[0].full_url,
+            "http://supervisor/addons/self/info",
+        )
 
     def test_supervisor_transport_failure_does_not_expose_token(self) -> None:
         supervisor_token = "private-platform-token"
@@ -257,8 +324,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
                 os.environ, {"SUPERVISOR_TOKEN": "platform-token"}, clear=True
             ),
             mock.patch(
-                "collector_service.runtime_config._read_supervisor_options",
-                return_value=options,
+                "collector_service.runtime_config._read_supervisor_self_info",
+                return_value=runtime_config.SupervisorSelfInfo(options, None),
             ),
             mock.patch(
                 "collector_service.runtime_config._context_from_memory",
@@ -272,6 +339,57 @@ class RuntimeConfigurationTest(unittest.TestCase):
         )
         self.assertNotEqual(configuration.verifier.token_sha256, token)
         context_from_memory.assert_called_once_with(b"certificate", b"private-key")
+
+    def test_legacy_presence_is_complete_none_or_partial(self) -> None:
+        names = ("meter_id", "api_token_sha256", "tls_certificate_b64", "tls_private_key_b64")
+        self.assertEqual(runtime_config._legacy_configuration_state({}), "none")
+        complete = {name: "set" for name in names}
+        self.assertEqual(runtime_config._legacy_configuration_state(complete), "complete")
+        for mask in range(1, 15):
+            partial = {name: "set" for index, name in enumerate(names) if mask & (1 << index)}
+            with self.subTest(mask=mask):
+                self.assertEqual(runtime_config._legacy_configuration_state(partial), "partial")
+
+    def test_no_legacy_configuration_loads_managed_identity(self) -> None:
+        identity = mock.Mock(
+            meter_id=SYNTHETIC_METER_ID,
+            server_certificate_pem="certificate",
+            server_private_key_pem="private-key",
+        )
+        credentials = mock.Mock()
+        context = mock.Mock()
+        with (
+            mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "platform-token"}, clear=True),
+            mock.patch.object(
+                runtime_config,
+                "_read_supervisor_self_info",
+                return_value=runtime_config.SupervisorSelfInfo({}, "606197c3_cez_pnd_collector"),
+            ),
+            mock.patch.object(runtime_config.ManagedIdentityStore, "load_or_create", return_value=(identity, True)),
+            mock.patch.object(runtime_config, "ManagedCredentialStore", return_value=credentials),
+            mock.patch.object(runtime_config, "_context_from_memory", return_value=context) as load_tls,
+        ):
+            configuration = runtime_config.load_runtime_configuration()
+        self.assertEqual(configuration.source, "managed_identity")
+        self.assertIs(configuration.verifier, credentials)
+        self.assertIs(configuration.managed_identity, identity)
+        self.assertTrue(configuration.managed_identity_created)
+        load_tls.assert_called_once_with(b"certificate", b"private-key")
+
+    def test_partial_legacy_configuration_fails_without_managed_fallback(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"SUPERVISOR_TOKEN": "platform-token"}, clear=True),
+            mock.patch.object(
+                runtime_config,
+                "_read_supervisor_self_info",
+                return_value=runtime_config.SupervisorSelfInfo({"meter_id": SYNTHETIC_METER_ID}, "606197c3_cez_pnd_collector"),
+            ),
+            mock.patch.object(runtime_config.ManagedIdentityStore, "load_or_create") as create,
+        ):
+            self.assert_private_code(
+                "private_config_partial_legacy_identity", runtime_config.load_runtime_configuration
+            )
+        create.assert_not_called()
 
     def test_tls_option_decoding_is_strict_and_bounded(self) -> None:
         self.assertEqual(
@@ -316,8 +434,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {"SUPERVISOR_TOKEN": "platform-token"}, clear=True
         ), mock.patch(
-            "collector_service.runtime_config._read_supervisor_options",
-            return_value=options,
+            "collector_service.runtime_config._read_supervisor_self_info",
+            return_value=runtime_config.SupervisorSelfInfo(options, None),
         ):
             self.assert_private_code(
                 "private_config_invalid_token_verifier",

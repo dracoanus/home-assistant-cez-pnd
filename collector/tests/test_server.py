@@ -18,6 +18,60 @@ from collector_service.structured_logging import structured_event_json
 
 
 class CollectorServerLifecycleTest(unittest.TestCase):
+    def test_tls_timeout_is_set_before_handshake(self) -> None:
+        calls: list[object] = []
+
+        class FakeTlsSocket:
+            def settimeout(self, value: float) -> None:
+                calls.append(("timeout", value))
+
+            def do_handshake(self) -> None:
+                calls.append("handshake")
+
+            def close(self) -> None:
+                calls.append("close")
+
+        connection = FakeTlsSocket()
+        collector_server = object.__new__(server.CollectorHttpServer)
+        with (
+            mock.patch.object(
+                server.HTTPServer,
+                "get_request",
+                return_value=(connection, ("127.0.0.1", 1)),
+            ),
+            mock.patch.object(server.ssl, "SSLSocket", FakeTlsSocket),
+        ):
+            accepted, _address = collector_server.get_request()
+        self.assertIs(accepted, connection)
+        self.assertEqual(calls, [("timeout", 5.0), "handshake"])
+
+    def test_failed_tls_handshake_closes_connection(self) -> None:
+        calls: list[object] = []
+
+        class FakeTlsSocket:
+            def settimeout(self, value: float) -> None:
+                calls.append(("timeout", value))
+
+            def do_handshake(self) -> None:
+                calls.append("handshake")
+                raise TimeoutError("synthetic")
+
+            def close(self) -> None:
+                calls.append("close")
+
+        collector_server = object.__new__(server.CollectorHttpServer)
+        with (
+            mock.patch.object(
+                server.HTTPServer,
+                "get_request",
+                return_value=(FakeTlsSocket(), ("127.0.0.1", 1)),
+            ),
+            mock.patch.object(server.ssl, "SSLSocket", FakeTlsSocket),
+            self.assertRaises(TimeoutError),
+        ):
+            collector_server.get_request()
+        self.assertEqual(calls, [("timeout", 5.0), "handshake", "close"])
+
     def test_structured_timestamp_is_utc_second_precision_and_first(self) -> None:
         encoded = structured_event_json(
             {"event": "example", "code": "fixed"},
@@ -90,7 +144,8 @@ class CollectorServerLifecycleTest(unittest.TestCase):
             source="test",
         )
         fake_server = mock.Mock()
-        fake_server.socket = object()
+        listening_socket = object()
+        fake_server.socket = listening_socket
         output = io.StringIO()
         with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
             server.os, "getegid", return_value=2000, create=True
@@ -108,6 +163,11 @@ class CollectorServerLifecycleTest(unittest.TestCase):
             self.assertEqual(server.main(), 0)
         worker.assert_not_called()
         fake_server.serve_forever.assert_called_once_with(poll_interval=0.5)
+        configuration.tls_context.wrap_socket.assert_called_once_with(
+            listening_socket,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
 
     def test_https_starts_before_background_sync_and_worker_stops(self) -> None:
         configuration = SimpleNamespace(

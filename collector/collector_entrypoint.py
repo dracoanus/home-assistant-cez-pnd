@@ -15,6 +15,7 @@ DATA_DIRECTORY = Path("/data")
 PROBE_DIRECTORY_NAME = "cez-pnd-probe"
 DATASET_DIRECTORY_NAME = "cez-pnd-dataset"
 DATASET_FILE_NAME = "cez-pnd.sqlite3"
+IDENTITY_DIRECTORY_NAME = "cez-pnd-identity"
 SERVER_ARGV = (
     "/opt/collector-venv/bin/python",
     "-m",
@@ -88,6 +89,30 @@ def prepare_dataset_storage(
     return dataset
 
 
+def prepare_identity_directory(
+    data_directory: Path = DATA_DIRECTORY,
+    *,
+    chown: Callable[..., None] | None = None,
+    chmod: Callable[..., None] | None = None,
+) -> Path:
+    """Create only the private directory used by managed identity state."""
+
+    if data_directory.is_symlink() or not data_directory.is_dir():
+        raise RuntimeError("unsafe data directory")
+    identity_directory = data_directory / IDENTITY_DIRECTORY_NAME
+    if identity_directory.is_symlink():
+        raise RuntimeError("unsafe identity directory")
+    identity_directory.mkdir(mode=0o700, exist_ok=True)
+    metadata = identity_directory.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or identity_directory.is_symlink():
+        raise RuntimeError("unsafe identity directory")
+    owner_setter = chown or os.chown
+    mode_setter = chmod or os.chmod
+    owner_setter(identity_directory, RUNTIME_UID, RUNTIME_GID, follow_symlinks=False)
+    mode_setter(identity_directory, 0o700, follow_symlinks=False)
+    return identity_directory
+
+
 def drop_privileges() -> None:
     """Irreversibly enter the non-root Collector runtime identity."""
 
@@ -112,6 +137,7 @@ def main() -> int:
     try:
         prepare_probe_directory()
         prepare_dataset_storage()
+        prepare_identity_directory()
         drop_privileges()
         os.execv(SERVER_ARGV[0], list(SERVER_ARGV))
     except (OSError, RuntimeError):

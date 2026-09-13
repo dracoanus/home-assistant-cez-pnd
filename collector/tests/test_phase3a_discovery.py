@@ -165,7 +165,9 @@ class Phase3ADiscoveryTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {"SUPERVISOR_TOKEN": "platform-token"}, clear=True
         ), mock.patch.object(
-            runtime_config, "_read_supervisor_options", return_value=options
+            runtime_config,
+            "_read_supervisor_self_info",
+            return_value=runtime_config.SupervisorSelfInfo(options, None),
         ), mock.patch.object(
             runtime_config, "_context_from_memory", return_value=mock.Mock()
         ):
