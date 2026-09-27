@@ -16,6 +16,7 @@ import aiohttp
 
 API_SCHEMA_VERSION = "1.0"
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_PAIRING_RESPONSE_BYTES = 4096
 MAX_COLLECTION_ITEMS = 1000
 MAX_COMBINED_ITEMS = 12_000
 # SQLite/API dataset counters are metadata, not response collection sizes.
@@ -25,6 +26,8 @@ MAX_TEXT_LENGTH = 255
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
 METER_ID_PATTERN = re.compile(r"^mtr_[a-f0-9]{32}$")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
+PAIRING_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
+SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9]\d{0,11})(?:\.\d{1,9})?$")
 CURSOR_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 REVISION_PATTERN = re.compile(r"^ds_[a-f0-9]{2,77}$")
@@ -60,6 +63,14 @@ class CollectorHttpError(CollectorError):
 
 class CollectorProtocolError(CollectorError):
     """Collector response violated the bounded API contract."""
+
+
+class PairingRejectedError(CollectorError):
+    """Collector rejected a claim or activation authorization."""
+
+
+class PairingUnavailableError(CollectorError):
+    """Collector pairing service returned an unusable response."""
 
 
 @dataclass(frozen=True)
@@ -356,6 +367,167 @@ class CollectorClient:
         if not isinstance(payload, dict):
             raise CollectorProtocolError("invalid_json_root")
         return payload
+
+
+class CollectorPairingClient:
+    """Narrow client for the three fixed managed-pairing operations."""
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        base_url: str,
+        ssl_context: ssl.SSLContext,
+    ) -> None:
+        self._session = session
+        self._base_url = normalize_collector_url(base_url)
+        self._ssl_context = ssl_context
+
+    async def async_claim(
+        self,
+        pairing_id: str,
+        pairing_secret: str,
+        api_token_sha256: str,
+    ) -> None:
+        """Claim one bootstrap using only the generated token verifier."""
+
+        if (
+            not isinstance(pairing_id, str)
+            or not PAIRING_ID_PATTERN.fullmatch(pairing_id)
+            or not isinstance(pairing_secret, str)
+            or not TOKEN_PATTERN.fullmatch(pairing_secret)
+            or not isinstance(api_token_sha256, str)
+            or not SHA256_PATTERN.fullmatch(api_token_sha256)
+        ):
+            raise CollectorConfigurationError("invalid_pairing_claim")
+        payload = {
+            "pairing_schema_version": 1,
+            "pairing_id": pairing_id,
+            "pairing_secret": pairing_secret,
+            "api_token_sha256": api_token_sha256,
+        }
+        response = await self._async_post("/pairing/v1/claim", json_body=payload)
+        _require_pairing_response(response, "pairing_claimed")
+
+    async def async_activate(self, api_token: str) -> None:
+        """Promote the matching PENDING verifier to ACTIVE."""
+
+        if not isinstance(api_token, str) or not TOKEN_PATTERN.fullmatch(api_token):
+            raise CollectorConfigurationError("invalid_api_token")
+        response = await self._async_post(
+            "/pairing/v1/activate",
+            authorization=f"Bearer {api_token}",
+        )
+        _require_pairing_response(response, "pairing_activated")
+
+    async def async_finalize(self, api_token: str) -> None:
+        """Remove discovery after the ACTIVE entry is known to be persistent."""
+
+        if not isinstance(api_token, str) or not TOKEN_PATTERN.fullmatch(api_token):
+            raise CollectorConfigurationError("invalid_api_token")
+        response = await self._async_post(
+            "/pairing/v1/finalize",
+            authorization=f"Bearer {api_token}",
+        )
+        _require_pairing_response(response, "pairing_finalized")
+
+    async def _async_post(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, object] | None = None,
+        authorization: str | None = None,
+    ) -> dict[str, Any]:
+        if path not in {
+            "/pairing/v1/claim",
+            "/pairing/v1/activate",
+            "/pairing/v1/finalize",
+        }:
+            raise CollectorConfigurationError("invalid_pairing_route")
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if authorization is not None:
+            headers["Authorization"] = authorization
+        kwargs: dict[str, object] = {
+            "headers": headers,
+            "ssl": self._ssl_context,
+            "timeout": REQUEST_TIMEOUT,
+            "allow_redirects": False,
+        }
+        if json_body is None:
+            kwargs["data"] = b""
+        else:
+            kwargs["json"] = json_body
+        try:
+            async with self._session.post(
+                f"{self._base_url}{path}", **kwargs
+            ) as response:
+                if 300 <= response.status < 400:
+                    raise PairingUnavailableError("pairing_redirect_rejected")
+                if response.status in (401, 403):
+                    raise PairingRejectedError("pairing_rejected")
+                if response.status < 200 or response.status >= 300:
+                    raise PairingUnavailableError("pairing_unavailable")
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+                if content_type.strip().lower() != "application/json":
+                    raise PairingUnavailableError("pairing_response_invalid")
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(4096):
+                    body.extend(chunk)
+                    if len(body) > MAX_PAIRING_RESPONSE_BYTES:
+                        raise PairingUnavailableError("pairing_response_too_large")
+        except CollectorError:
+            raise
+        except (
+            aiohttp.ClientConnectorCertificateError,
+            aiohttp.ClientConnectorSSLError,
+            aiohttp.ClientSSLError,
+            aiohttp.ServerFingerprintMismatch,
+            ssl.SSLError,
+        ) as error:
+            raise CollectorTlsError("collector_tls_verification_failed") from error
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            asyncio.TimeoutError,
+        ) as error:
+            raise CollectorConnectionError("collector_connection_failed") from error
+        try:
+            return _strict_json_object(bytes(body))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as error:
+            raise PairingUnavailableError("pairing_response_invalid") from error
+
+
+def _strict_json_object(raw: bytes) -> dict[str, Any]:
+    """Decode a JSON object without duplicate-key or non-finite coercion."""
+
+    def exact_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> object:
+        raise ValueError("invalid JSON constant")
+
+    result = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=exact_object,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(result, dict):
+        raise ValueError("JSON object required")
+    return result
+
+
+def _require_pairing_response(payload: dict[str, Any], expected_status: str) -> None:
+    if (
+        set(payload) != {"pairing_schema_version", "status"}
+        or type(payload["pairing_schema_version"]) is not int
+        or payload["pairing_schema_version"] != 1
+        or payload["status"] != expected_status
+    ):
+        raise PairingUnavailableError("pairing_response_invalid")
 
 
 def _parse_status(payload: dict[str, Any], expected_meter_id: str) -> CollectorStatus:

@@ -23,6 +23,7 @@ from .security_files import atomic_write_private, read_private_file
 
 PAIRING_STATE_FILE = Path("/data/cez-pnd-identity/pairing-state.json")
 PAIRING_SCHEMA_VERSION = 1
+PAIRING_STATE_SCHEMA_VERSION = 2
 PAIRING_PREFIX = "/pairing/v1"
 SUPERVISOR_DISCOVERY_URL = "http://supervisor/discovery"
 MAX_STATE_BYTES = 16 * 1024
@@ -55,7 +56,7 @@ class ManagedCredentialStore:
         self.meter_id = meter_id
         self.scopes = EXPECTED_SCOPES
         self.path = path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         if path.exists():
             self._read()
 
@@ -104,6 +105,25 @@ class ManagedCredentialStore:
         with self._lock:
             current = _utc_now(now)
             state = self._read()
+            if state["state"] in {"pending", "active"}:
+                if state["state"] == "pending" and _expired(
+                    state["pending_expires_at"], current
+                ):
+                    return "pairing_bootstrap_unavailable"
+                expected_verifier = (
+                    state["pending_token_sha256"]
+                    if state["state"] == "pending"
+                    else state["active_token_sha256"]
+                )
+                if not _matching_pairing_authorization(state, pairing_id, secret):
+                    return "pairing_authorization_invalid"
+                if not isinstance(verifier, str) or not SHA256_PATTERN.fullmatch(verifier):
+                    return "pairing_verifier_invalid"
+                return (
+                    "pairing_claimed"
+                    if hmac.compare_digest(verifier, expected_verifier)
+                    else "pairing_verifier_conflict"
+                )
             if state["state"] != "bootstrap_available":
                 return "pairing_bootstrap_unavailable"
             if _expired(state["bootstrap_expires_at"], current):
@@ -128,9 +148,6 @@ class ManagedCredentialStore:
                 state="pending",
                 pending_token_sha256=verifier,
                 pending_expires_at=_utc_text(current + PENDING_LIFETIME),
-                pairing_id=None,
-                bootstrap_sha256=None,
-                bootstrap_expires_at=None,
                 bootstrap_attempts=0,
             )
             self._write(state)
@@ -151,13 +168,25 @@ class ManagedCredentialStore:
                 active_token_sha256=state["pending_token_sha256"],
                 pending_token_sha256=None,
                 pending_expires_at=None,
-                pairing_id=None,
-                bootstrap_sha256=None,
-                bootstrap_expires_at=None,
                 bootstrap_attempts=0,
             )
             self._write(state)
             return "pairing_activated"
+
+    def complete_finalize(self) -> None:
+        """Clear only recovery/discovery material after external cleanup."""
+
+        with self._lock:
+            state = self._read()
+            if state["state"] != "active" or state["active_token_sha256"] is None:
+                raise ValueError("pairing_active_unavailable")
+            state.update(
+                pairing_id=None,
+                bootstrap_sha256=None,
+                bootstrap_expires_at=None,
+                discovery_uuid=None,
+            )
+            self._write(state)
 
     def _failed_attempt(self, state: dict[str, object]) -> None:
         state["bootstrap_attempts"] = int(state["bootstrap_attempts"]) + 1
@@ -183,18 +212,22 @@ class ManagedCredentialStore:
 
 
 class PairingApi:
-    """Two explicit pairing operations isolated from the read API."""
+    """Three explicit pairing operations isolated from the read API."""
 
     def __init__(self, credentials: ManagedCredentialStore,
-                 on_activated: Callable[[], None] | None = None,
+                 on_finalize: Callable[[], None] | None = None,
                  emit: Callable[[dict[str, object]], None] | None = None) -> None:
         self.credentials = credentials
-        self._on_activated = on_activated
+        self._on_finalize = on_finalize
         self._emit = emit or (lambda _event: None)
 
     def handle(self, method: str, target: str, headers: Mapping[str, str], body: bytes) -> ApiResponse:
         request_id = secrets.token_hex(8)
-        if target not in {f"{PAIRING_PREFIX}/claim", f"{PAIRING_PREFIX}/activate"}:
+        if target not in {
+            f"{PAIRING_PREFIX}/claim",
+            f"{PAIRING_PREFIX}/activate",
+            f"{PAIRING_PREFIX}/finalize",
+        }:
             return _pairing_response(404, "pairing_not_found", request_id, "unknown")
         if method != "POST":
             return _pairing_response(405, "pairing_method_not_allowed", request_id, target)
@@ -227,18 +260,27 @@ class PairingApi:
                 return _pairing_response(400, "pairing_request_invalid", request_id, target)
             if payload:
                 return _pairing_response(400, "pairing_request_invalid", request_id, target)
-        try:
-            code = self.credentials.activate(_header(headers, "Authorization"))
-        except (OSError, ValueError):
-            self._emit({"event": "pairing_activation_failed"})
-            return _pairing_response(503, "pairing_state_unavailable", request_id, target)
-        if code == "pairing_activated" and self._on_activated is not None:
+        authorization = _header(headers, "Authorization")
+        if target.endswith("/activate"):
             try:
-                self._on_activated()
-            except Exception:
-                self._emit({"event": "pairing_discovery_failed"})
-        self._emit({"event": "pairing_activated" if code == "pairing_activated" else "pairing_activation_failed"})
-        return _pairing_response(200 if code == "pairing_activated" else 401, code, request_id, target)
+                code = self.credentials.activate(authorization)
+            except (OSError, ValueError):
+                self._emit({"event": "pairing_activation_failed"})
+                return _pairing_response(503, "pairing_state_unavailable", request_id, target)
+            self._emit({"event": "pairing_activated" if code == "pairing_activated" else "pairing_activation_failed"})
+            return _pairing_response(200 if code == "pairing_activated" else 401, code, request_id, target)
+        if not self.credentials.authorize(authorization, "health:read"):
+            self._emit({"event": "pairing_finalize_failed"})
+            return _pairing_response(401, "pairing_active_unauthorized", request_id, target)
+        try:
+            if self._on_finalize is None:
+                raise ValueError("pairing_finalize_unavailable")
+            self._on_finalize()
+        except (HTTPException, OSError, ValueError):
+            self._emit({"event": "pairing_finalize_failed"})
+            return _pairing_response(503, "pairing_finalize_unavailable", request_id, target)
+        self._emit({"event": "pairing_finalized"})
+        return _pairing_response(200, "pairing_finalized", request_id, target)
 
 
 class SupervisorDiscoveryClient:
@@ -263,9 +305,21 @@ class SupervisorDiscoveryClient:
     def remove(self, discovery_uuid: str) -> None:
         if not DISCOVERY_UUID_PATTERN.fullmatch(discovery_uuid):
             raise ValueError("invalid discovery UUID")
-        self._request(f"{SUPERVISOR_DISCOVERY_URL}/{discovery_uuid}", "DELETE", None)
+        self._request(
+            f"{SUPERVISOR_DISCOVERY_URL}/{discovery_uuid}",
+            "DELETE",
+            None,
+            not_found_ok=True,
+        )
 
-    def _request(self, url: str, method: str, body: bytes | None) -> dict[str, object]:
+    def _request(
+        self,
+        url: str,
+        method: str,
+        body: bytes | None,
+        *,
+        not_found_ok: bool = False,
+    ) -> dict[str, object]:
         request = Request(url, data=body, method=method, headers={
             "Authorization": f"Bearer {self._token}", "Accept": "application/json",
             "Content-Type": "application/json",
@@ -277,7 +331,11 @@ class SupervisorDiscoveryClient:
                 if response.status != 200:
                     raise ValueError("Supervisor discovery failed")
                 raw = response.read(4097)
-        except (HTTPError, URLError, HTTPException, TimeoutError, OSError, ValueError) as error:
+        except HTTPError as error:
+            if not_found_ok and method == "DELETE" and error.code == 404:
+                return {}
+            raise ValueError("Supervisor discovery failed") from error
+        except (URLError, HTTPException, TimeoutError, OSError, ValueError) as error:
             raise ValueError("Supervisor discovery failed") from error
         if len(raw) > 4096:
             raise ValueError("Supervisor discovery response too large")
@@ -285,7 +343,11 @@ class SupervisorDiscoveryClient:
             envelope = _strict_json_object(raw)
         except (UnicodeError, ValueError, json.JSONDecodeError, RecursionError) as error:
             raise ValueError("invalid discovery response") from error
-        if envelope.get("result") != "ok" or not isinstance(envelope.get("data"), dict):
+        if envelope.get("result") != "ok":
+            raise ValueError("invalid discovery response")
+        if method == "DELETE" and envelope.get("data") is None:
+            return {}
+        if not isinstance(envelope.get("data"), dict):
             raise ValueError("invalid discovery response")
         return envelope["data"]
 
@@ -297,6 +359,7 @@ class PairingDiscoveryWorker:
                  supervisor: SupervisorDiscoveryClient, emit: Callable[[dict[str, object]], None]) -> None:
         self.identity, self.credentials, self.supervisor, self.emit = identity, credentials, supervisor, emit
         self._stop = threading.Event()
+        self._finalize_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -308,16 +371,15 @@ class PairingDiscoveryWorker:
         if self._thread is not None:
             self._thread.join(timeout=6.0)
 
-    def remove_after_activation(self) -> None:
-        discovery_uuid = self.credentials.discovery_uuid()
-        if discovery_uuid is None:
-            return
-        try:
-            self.supervisor.remove(discovery_uuid)
-            self.credentials.set_discovery_uuid(None)
-            self.emit({"event": "pairing_discovery_removed"})
-        except (HTTPException, OSError, ValueError):
-            self.emit({"event": "pairing_discovery_failed"})
+    def finalize(self) -> None:
+        """Remove discovery and clear recovery state without revoking ACTIVE."""
+
+        with self._finalize_lock:
+            discovery_uuid = self.credentials.discovery_uuid()
+            if discovery_uuid is not None:
+                self.supervisor.remove(discovery_uuid)
+                self.emit({"event": "pairing_discovery_removed"})
+            self.credentials.complete_finalize()
 
     def _run(self) -> None:
         self._publish_new()
@@ -336,59 +398,79 @@ class PairingDiscoveryWorker:
                 self._publish_new()
 
     def _publish_new(self) -> None:
-        try:
-            old_uuid = self.credentials.discovery_uuid()
-        except (OSError, ValueError):
-            self.emit({"event": "pairing_state_failed"})
-            return
-        if old_uuid:
+        with self._finalize_lock, self.credentials._lock:
             try:
-                self.supervisor.remove(old_uuid)
-            except (HTTPException, OSError, ValueError):
-                self.emit({"event": "pairing_discovery_failed"})
-                return
-            try:
-                self.credentials.set_discovery_uuid(None)
-                self.emit({"event": "pairing_discovery_removed"})
+                state = self.credentials._read()
+                current = _utc_now()
             except (OSError, ValueError):
                 self.emit({"event": "pairing_state_failed"})
                 return
-        try:
-            bootstrap = self.credentials.create_bootstrap()
-        except (OSError, ValueError):
-            self.emit({"event": "pairing_state_failed"})
-            return
-        if bootstrap is None:
-            return
-        payload = {
-            "pairing_schema_version": 1,
-            "meter_id": self.identity.meter_id,
-            "ca_certificate": self.identity.ca_certificate_pem,
-            "pairing_id": bootstrap.pairing_id,
-            "pairing_secret": bootstrap.secret,
-            "expires_at": bootstrap.expires_at,
-            "api_port": 8443,
-        }
-        for attempt in range(3):
-            try:
-                discovery_uuid = self.supervisor.publish(payload)
+
+            state_name = state["state"]
+            still_valid = (
+                state_name == "active"
+                or (
+                    state_name == "pending"
+                    and not _expired(state["pending_expires_at"], current)
+                )
+                or (
+                    state_name == "bootstrap_available"
+                    and state.get("discovery_uuid") is not None
+                    and not _expired(state["bootstrap_expires_at"], current)
+                )
+            )
+            if still_valid:
+                return
+
+            old_uuid = state.get("discovery_uuid")
+            if old_uuid:
                 try:
-                    self.credentials.set_discovery_uuid(discovery_uuid)
+                    self.supervisor.remove(old_uuid)
+                except (HTTPException, OSError, ValueError):
+                    self.emit({"event": "pairing_discovery_failed"})
+                    return
+                try:
+                    self.credentials.set_discovery_uuid(None)
+                    self.emit({"event": "pairing_discovery_removed"})
                 except (OSError, ValueError):
                     self.emit({"event": "pairing_state_failed"})
                     return
-                self.emit({"event": "pairing_discovery_published"})
+            try:
+                bootstrap = self.credentials.create_bootstrap(now=current)
+            except (OSError, ValueError):
+                self.emit({"event": "pairing_state_failed"})
                 return
-            except (HTTPException, OSError, ValueError):
-                if attempt < 2 and not self._stop.wait(2 ** attempt):
-                    continue
-                break
-        self.emit({"event": "pairing_discovery_failed"})
+            if bootstrap is None:
+                return
+            payload = {
+                "pairing_schema_version": 1,
+                "meter_id": self.identity.meter_id,
+                "ca_certificate": self.identity.ca_certificate_pem,
+                "pairing_id": bootstrap.pairing_id,
+                "pairing_secret": bootstrap.secret,
+                "expires_at": bootstrap.expires_at,
+                "api_port": 8443,
+            }
+            for attempt in range(3):
+                try:
+                    discovery_uuid = self.supervisor.publish(payload)
+                    try:
+                        self.credentials.set_discovery_uuid(discovery_uuid)
+                    except (OSError, ValueError):
+                        self.emit({"event": "pairing_state_failed"})
+                        return
+                    self.emit({"event": "pairing_discovery_published"})
+                    return
+                except (HTTPException, OSError, ValueError):
+                    if attempt < 2 and not self._stop.wait(2 ** attempt):
+                        continue
+                    break
+            self.emit({"event": "pairing_discovery_failed"})
 
 
 def _empty_state() -> dict[str, object]:
     return {
-        "schema_version": 1, "state": "unpaired", "active_token_sha256": None,
+        "schema_version": PAIRING_STATE_SCHEMA_VERSION, "state": "unpaired", "active_token_sha256": None,
         "pending_token_sha256": None, "pending_expires_at": None, "pairing_id": None,
         "bootstrap_sha256": None, "bootstrap_expires_at": None,
         "bootstrap_attempts": 0, "discovery_uuid": None,
@@ -427,7 +509,7 @@ def _validate_state(raw: object) -> None:
         not isinstance(raw, dict)
         or set(raw) != expected
         or type(raw["schema_version"]) is not int
-        or raw["schema_version"] != 1
+        or raw["schema_version"] != PAIRING_STATE_SCHEMA_VERSION
     ):
         raise ValueError("invalid pairing state")
     if raw["state"] not in {"unpaired", "bootstrap_available", "pending", "active"}:
@@ -458,16 +540,38 @@ def _validate_state(raw: object) -> None:
         ):
             raise ValueError("incomplete pairing state")
     elif state == "pending":
-        if any(raw[key] is None for key in ("pending_token_sha256", "pending_expires_at")) or any(
-            raw[key] is not None for key in ("pairing_id", "bootstrap_sha256", "bootstrap_expires_at")
-        ) or raw["bootstrap_attempts"] != 0:
-            raise ValueError("incomplete pairing state")
-    elif state == "active":
-        if raw["active_token_sha256"] is None or any(raw[key] is not None for key in (
+        if any(raw[key] is None for key in (
             "pending_token_sha256", "pending_expires_at", "pairing_id",
             "bootstrap_sha256", "bootstrap_expires_at"
         )) or raw["bootstrap_attempts"] != 0:
             raise ValueError("incomplete pairing state")
+    elif state == "active":
+        recovery_values = (
+            raw["pairing_id"], raw["bootstrap_sha256"], raw["bootstrap_expires_at"]
+        )
+        if raw["active_token_sha256"] is None or any(raw[key] is not None for key in (
+            "pending_token_sha256", "pending_expires_at"
+        )) or not (all(value is None for value in recovery_values) or all(
+            value is not None for value in recovery_values
+        )) or raw["bootstrap_attempts"] != 0:
+            raise ValueError("incomplete pairing state")
+
+
+def _matching_pairing_authorization(
+    state: Mapping[str, object], pairing_id: object, secret: object
+) -> bool:
+    if (
+        not isinstance(pairing_id, str)
+        or not PAIRING_ID_PATTERN.fullmatch(pairing_id)
+        or not isinstance(secret, str)
+        or not TOKEN_PATTERN.fullmatch(secret)
+        or not isinstance(state.get("pairing_id"), str)
+        or not isinstance(state.get("bootstrap_sha256"), str)
+    ):
+        return False
+    return hmac.compare_digest(pairing_id, state["pairing_id"]) & hmac.compare_digest(
+        _digest(secret), state["bootstrap_sha256"]
+    )
 
 
 def _authorization_matches(authorization: str | None, verifier: object) -> bool:

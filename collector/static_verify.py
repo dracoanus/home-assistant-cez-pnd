@@ -174,7 +174,7 @@ routes = set(re.findall(r'f"\{API_PREFIX\}(/[^"}]*)"', SOURCE))
 assert routes == {"/health", "/status", "/measurements"}
 assert "hmac.compare_digest" in SOURCE
 assert 'PAIRING_PREFIX = "/pairing/v1"' in PAIRING_SOURCE
-assert PAIRING_SOURCE.count('f"{PAIRING_PREFIX}/') == 2
+assert PAIRING_SOURCE.count('f"{PAIRING_PREFIX}/') == 3
 assert "MAX_PAIRING_BODY_BYTES = 2048" in PAIRING_SOURCE
 assert "MAX_DISCOVERY_BYTES = 16 * 1024" in PAIRING_SOURCE
 assert "BOOTSTRAP_LIFETIME = timedelta(minutes=10)" in PAIRING_SOURCE

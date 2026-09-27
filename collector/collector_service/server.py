@@ -225,7 +225,7 @@ def main() -> int:
                 _emit_pairing_event,
             )
             server.pairing_api = PairingApi(  # type: ignore[attr-defined]
-                credentials, pairing_worker.remove_after_activation, _emit_pairing_event
+                credentials, pairing_worker.finalize, _emit_pairing_event
             )
         server.socket = configuration.tls_context.wrap_socket(
             server.socket,

@@ -60,6 +60,8 @@ def _install_ha_stubs() -> None:
     sys.modules["voluptuous"] = voluptuous
 
     homeassistant = ModuleType("homeassistant")
+    hassio = ModuleType("homeassistant.helpers.service_info.hassio")
+    hassio.HassioServiceInfo = object
     config_entries = ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = object
     config_entries.ConfigFlow = _ConfigFlow
@@ -77,6 +79,8 @@ def _install_ha_stubs() -> None:
     selector.NumberSelectorMode = SimpleNamespace(BOX="box")
     aiohttp_client = ModuleType("homeassistant.helpers.aiohttp_client")
     aiohttp_client.async_get_clientsession = lambda _hass: object()
+    storage = ModuleType("homeassistant.helpers.storage")
+    storage.Store = object
     helpers.selector = selector
     sys.modules.update(
         {
@@ -86,6 +90,11 @@ def _install_ha_stubs() -> None:
             "homeassistant.helpers": helpers,
             "homeassistant.helpers.selector": selector,
             "homeassistant.helpers.aiohttp_client": aiohttp_client,
+            "homeassistant.helpers.storage": storage,
+            "homeassistant.helpers.service_info": ModuleType(
+                "homeassistant.helpers.service_info"
+            ),
+            "homeassistant.helpers.service_info.hassio": hassio,
         }
     )
 
@@ -103,10 +112,16 @@ def _load_options_module():
         "CollectorConnectionError",
         "CollectorError",
         "CollectorTlsError",
+        "PairingRejectedError",
+        "PairingUnavailableError",
     ):
         setattr(client, name, type(name, (Exception,), {}))
     client.CollectorClient = object
+    client.CollectorPairingClient = object
+    client.METER_ID_PATTERN = __import__("re").compile(r"^mtr_[a-f0-9]{32}$")
+    client.TOKEN_PATTERN = __import__("re").compile(r"^[A-Za-z0-9_-]{43,128}$")
     client.create_collector_ssl_context = lambda _value: object()
+    client.normalize_collector_url = lambda value: value
     sys.modules[client.__name__] = client
     name = f"{package_name}.config_flow"
     spec = importlib.util.spec_from_file_location(name, INTEGRATION / "config_flow.py")
@@ -166,14 +181,39 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         homeassistant_const = ModuleType("homeassistant.const")
         homeassistant_const.Platform = SimpleNamespace(SENSOR="sensor")
         sys.modules["homeassistant.const"] = homeassistant_const
+        homeassistant_exceptions = ModuleType("homeassistant.exceptions")
+        homeassistant_exceptions.ConfigEntryAuthFailed = type(
+            "ConfigEntryAuthFailed", (Exception,), {}
+        )
+        homeassistant_exceptions.ConfigEntryNotReady = type(
+            "ConfigEntryNotReady", (Exception,), {}
+        )
+        sys.modules["homeassistant.exceptions"] = homeassistant_exceptions
         client = ModuleType(f"{package_name}.client")
         client.CollectorClient = object
+        client.CollectorPairingClient = object
+        client.CollectorAuthenticationError = type(
+            "CollectorAuthenticationError", (Exception,), {}
+        )
+        client.CollectorError = type("CollectorError", (Exception,), {})
+        client.PairingRejectedError = type("PairingRejectedError", (Exception,), {})
+        client.PairingUnavailableError = type("PairingUnavailableError", (Exception,), {})
         client.create_collector_ssl_context = lambda _value: object()
+        recovery = ModuleType(f"{package_name}.pairing_recovery")
+        recovery.PairingRecoveryError = type("PairingRecoveryError", (Exception,), {})
+        recovery.get_pairing_recovery_manager = lambda _hass: object()
+        recovery.created_this_process = lambda _meter_id: False
+        recovery.finalized_this_process = lambda _meter_id: False
+        recovery.mark_finalized_this_process = lambda _meter_id: None
         coordinator = ModuleType(f"{package_name}.coordinator")
         coordinator.CezPndCoordinator = object
         sys.modules[client.__name__] = client
+        sys.modules[recovery.__name__] = recovery
         sys.modules[coordinator.__name__] = coordinator
         name = f"{package_name}.__init__"
+        sys.modules[f"{name}.client"] = client
+        sys.modules[f"{name}.pairing_recovery"] = recovery
+        sys.modules[f"{name}.coordinator"] = coordinator
         spec = importlib.util.spec_from_file_location(
             name,
             INTEGRATION / "__init__.py",
