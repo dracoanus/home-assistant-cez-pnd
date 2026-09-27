@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import struct
 
 
 ROOT = Path(__file__).resolve().parent
@@ -86,6 +87,15 @@ PHASE2B_EVIDENCE = (
 ).read_text(encoding="utf-8")
 APP_DIRECTORY = REPOSITORY_ROOT / "cez_pnd_collector"
 APP_MANIFEST = (APP_DIRECTORY / "config.yaml").read_text(encoding="utf-8")
+APP_OPTIONS_SECTION, APP_SCHEMA_SECTION = APP_MANIFEST.split("\noptions:\n", 1)[
+    1
+].split("\nschema:\n", 1)
+APP_OPTION_KEYS = set(
+    re.findall(r"^  ([a-z0-9_]+):", APP_OPTIONS_SECTION, re.MULTILINE)
+)
+APP_SCHEMA_KEYS = set(
+    re.findall(r"^  ([a-z0-9_]+):", APP_SCHEMA_SECTION, re.MULTILINE)
+)
 APP_DOCUMENTATION = (APP_DIRECTORY / "DOCS.md").read_text(encoding="utf-8")
 HA_APP_VALIDATION = (
     REPOSITORY_ROOT / "docs" / "phase2b-collector-ha-app.md"
@@ -682,6 +692,14 @@ assert 'api_token_sha256: "match(^[a-f0-9]{64}$)?"' in APP_MANIFEST
 assert 'meter_id: "match(^mtr_[a-f0-9]{32}$)?"' in APP_MANIFEST
 assert "tls_certificate_b64: password?" in APP_MANIFEST
 assert "tls_private_key_b64: password?" in APP_MANIFEST
+LEGACY_IDENTITY_KEYS = {
+    "meter_id",
+    "api_token_sha256",
+    "tls_certificate_b64",
+    "tls_private_key_b64",
+}
+assert LEGACY_IDENTITY_KEYS.isdisjoint(APP_OPTION_KEYS)
+assert LEGACY_IDENTITY_KEYS <= APP_SCHEMA_KEYS
 assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
 assert "  cez_discovery_mode: false" in APP_MANIFEST
@@ -707,6 +725,22 @@ assert "  cez_username: password?" in APP_MANIFEST
 assert "  cez_password: password?" in APP_MANIFEST
 assert "cez_username:" not in APP_MANIFEST.split("schema:", 1)[0]
 assert "cez_password:" not in APP_MANIFEST.split("schema:", 1)[0]
+
+
+def png_dimensions(path: Path) -> tuple[int, int]:
+    """Return dimensions from a minimally validated PNG IHDR."""
+
+    header = path.read_bytes()[:24]
+    assert len(header) == 24
+    assert header[:8] == b"\x89PNG\r\n\x1a\n"
+    assert header[8:12] == b"\x00\x00\x00\r"
+    assert header[12:16] == b"IHDR"
+    return struct.unpack(">II", header[16:24])
+
+
+BRAND_DIRECTORY = REPOSITORY_ROOT / "custom_components" / "cez_pnd" / "brand"
+assert png_dimensions(BRAND_DIRECTORY / "icon.png") == (256, 256)
+assert png_dimensions(BRAND_DIRECTORY / "icon@2x.png") == (512, 512)
 assert "plaintext bearer token" in APP_DOCUMENTATION
 assert (
     "0.2.1 HA OS DEPLOYMENT GATE FAILED CLOSED / RUNTIME BOOTSTRAP"

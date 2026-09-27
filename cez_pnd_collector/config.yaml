@@ -37,10 +37,6 @@ stdin: false
 discovery:
   - cez_pnd
 options:
-  meter_id: null
-  api_token_sha256: null
-  tls_certificate_b64: null
-  tls_private_key_b64: null
   cez_discovery_mode: false
   cez_http_auth_discovery_mode: false
   cez_requests_preauth_compatibility_mode: false
