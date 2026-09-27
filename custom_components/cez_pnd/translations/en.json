@@ -11,6 +11,10 @@
           "ca_certificate": "Collector CA certificate (PEM)"
         }
       },
+      "hassio_confirm": {
+        "title": "Pair with CEZ PND Collector",
+        "description": "CEZ PND Collector was discovered. Home Assistant can securely pair with the local Collector automatically."
+      },
       "reauth_confirm": {
         "title": "Update Collector API credential",
         "description": "Enter a replacement limited Collector API token.",
@@ -24,10 +28,15 @@
       "invalid_auth": "The Collector API token was rejected",
       "invalid_configuration": "The Collector connection settings are invalid",
       "invalid_response": "The Collector returned an invalid response",
-      "invalid_tls": "The Collector TLS certificate could not be verified"
+      "invalid_tls": "The Collector TLS certificate could not be verified",
+      "discovery_expired": "The pairing invitation expired. Wait for the Collector to publish a new invitation.",
+      "pairing_rejected": "The Collector rejected the pairing request",
+      "pairing_unavailable": "The Collector pairing service is temporarily unavailable"
     },
     "abort": {
-      "already_configured": "This meter is already configured"
+      "already_configured": "This meter is already configured",
+      "discovery_invalid": "The Collector supplied invalid discovery information",
+      "discovery_expired": "The Collector pairing invitation has expired"
     }
   },
   "options": {

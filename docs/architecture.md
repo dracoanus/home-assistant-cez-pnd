@@ -37,9 +37,56 @@ The Collector publishes a short-lived, high-entropy bootstrap authorization
 through Supervisor discovery service `cez_pnd`. Supervisor discovery supplies
 the trusted App binding; the payload contains no arbitrary URL or hostname and
 no long-lived API credential. The pairing API accepts only a verifier generated
-by the future HA integration. A PENDING verifier cannot read Collector data and
+by the HA integration. A PENDING verifier cannot read Collector data and
 becomes ACTIVE only after an authenticated activation request.
 
-Home Assistant Ingress is not part of this architecture. The HA-side discovery
-config flow and guided user experience remain incomplete until Phase 5B-B2;
-current manual integrations remain supported.
+Phase 5B-B2 implements the HA `SOURCE_HASSIO` flow. It accepts the exact bounded
+discovery contract, derives `https://<slug-with-hyphens>:8443` only from the
+Supervisor-provided App slug, validates the discovered CA and generates a
+256-bit URL-safe API token inside HA. Only its SHA-256 verifier is sent with the
+short-lived pairing authorization; the pairing ID and secret remain transient.
+
+Before claim, HA atomically writes a private one-record recovery journal through
+the public `homeassistant.helpers.storage.Store` API and verifies it by reading
+it back. The journal contains only the generated API token, opaque meter ID,
+Collector origin, public CA and a bounded onboarding phase. It contains no CEZ
+credential, pairing secret, pairing ID, verifier or private TLS key. A repeated
+claim with the same bootstrap authorization and verifier is idempotent, so a
+crash after claim can resume from the journal.
+Journal ownership decisions are serialized by one Home Assistant-instance
+manager. Confirmation reloads the journal while holding that manager's lock;
+same-Collector flows reuse its token and a different Collector cannot replace
+it.
+
+ConfigEntry setup is not treated as a persistence barrier. Initial setup
+activates and verifies the Collector but retains a non-secret finalize marker,
+the recovery journal and Supervisor discovery. An in-memory, non-secret marker
+prevents finalization for an entry created in the current HA process. When the
+persisted entry is loaded in a later HA process, `POST /pairing/v1/finalize`
+proves possession of the ACTIVE token, removes discovery and clears Collector
+recovery metadata without revoking ACTIVE. HA removes the pending markers but
+intentionally retains the journal. Only another HA process that reconstructs
+the managed entry with those markers durably absent may delete the journal.
+A second in-memory marker records finalization for the rest of that process, so
+setup retries, unload/load and option-triggered reloads cannot delete the
+journal early. This additional restart is a persistence proof; normal operation
+does not wait for journal cleanup. Cleanup acquires the same recovery ownership
+lock as confirmation, reloads the journal under that lock and deletes only an
+exact meter/origin/CA/token match. Temporary finalization or cleanup failure
+leaves operation active and cleanup retryable; no timer or private Core storage
+API is used.
+
+Collector startup reconciles pairing state before changing discovery. It keeps
+the existing discovery for ACTIVE, unexpired PENDING and unexpired bootstrap
+states. Only UNPAIRED or expired bootstrap/PENDING state may publish a fresh
+bootstrap, and stale discovery is removed only after that replacement decision.
+
+At flow entry, the framework-provided `addon` metadata is separated from the
+exact seven-field Collector payload. The short-lived pairing secret is copied
+only into a repr-safe transient object and framework `init_data` is immediately
+replaced with a secret-free `HassioServiceInfo`.
+
+The entry unique ID remains the stable opaque `meter_id`, never the Supervisor
+discovery UUID, so deletion of the consumed discovery message cannot delete the
+working entry. Home Assistant Ingress is not part of this architecture. The
+manual URL/token/CA flow remains supported as an advanced recovery path.

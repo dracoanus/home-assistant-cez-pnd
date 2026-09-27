@@ -11,6 +11,10 @@
           "ca_certificate": "CA certifikát Collectoru (PEM)"
         }
       },
+      "hassio_confirm": {
+        "title": "Spárovat s CEZ PND Collectorem",
+        "description": "Byl nalezen CEZ PND Collector. Home Assistant se může s místním Collectorem bezpečně spárovat automaticky."
+      },
       "reauth_confirm": {
         "title": "Aktualizovat přihlašovací údaj API Collectoru",
         "description": "Zadejte náhradní omezený API token Collectoru.",
@@ -22,9 +26,16 @@
       "invalid_auth": "API token Collectoru byl odmítnut",
       "invalid_configuration": "Nastavení připojení k Collectoru není platné",
       "invalid_response": "Collector vrátil neplatnou odpověď",
-      "invalid_tls": "Certifikát TLS Collectoru nelze ověřit"
+      "invalid_tls": "Certifikát TLS Collectoru nelze ověřit",
+      "discovery_expired": "Pozvánka ke spárování vypršela. Počkejte, až Collector zveřejní novou.",
+      "pairing_rejected": "Collector požadavek na spárování odmítl",
+      "pairing_unavailable": "Služba párování Collectoru je dočasně nedostupná"
     },
-    "abort": {"already_configured": "Toto měřidlo je již nastaveno"}
+    "abort": {
+      "already_configured": "Toto měřidlo je již nastaveno",
+      "discovery_invalid": "Collector poskytl neplatné informace pro automatické nastavení",
+      "discovery_expired": "Pozvánka Collectoru ke spárování vypršela"
+    }
   },
   "options": {
     "step": {

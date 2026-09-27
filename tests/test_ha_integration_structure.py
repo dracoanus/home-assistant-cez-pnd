@@ -61,6 +61,25 @@ class IntegrationStructureTests(unittest.TestCase):
         )
         self.assertNotIn("username", source.lower())
 
+    def test_hassio_pairing_preserves_discovery_cleanup_safety(self) -> None:
+        flow = (INTEGRATION / "config_flow.py").read_text(encoding="utf-8")
+        setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+        recovery = (INTEGRATION / "pairing_recovery.py").read_text(encoding="utf-8")
+        self.assertIn("async_step_hassio", flow)
+        self.assertIn("async_set_unique_id(discovery.meter_id)", flow)
+        self.assertNotIn("async_set_unique_id(discovery_info.uuid)", flow)
+        self.assertIn("CONF_PAIRING_ACTIVATION_PENDING", setup)
+        self.assertIn("CONF_PAIRING_FINALIZE_PENDING", setup)
+        self.assertIn("from homeassistant.helpers.storage import Store", recovery)
+        self.assertIn("private=True", recovery)
+        self.assertIn("atomic_writes=True", recovery)
+        combined = flow + setup + recovery
+        self.assertNotIn("config_entries._store", combined)
+        self.assertNotIn("_async_schedule_save", combined)
+        self.assertNotIn("_data_to_save", combined)
+        self.assertNotIn(".storage/core.config_entries", combined)
+        self.assertIn("async_update_entry", setup)
+
     def test_polling_options_reload_without_collector_permissions(self) -> None:
         flow = (INTEGRATION / "config_flow.py").read_text(encoding="utf-8")
         setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")

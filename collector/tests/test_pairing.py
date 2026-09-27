@@ -61,6 +61,19 @@ class PairingTests(unittest.TestCase):
         self.assertTrue(reloaded.authorize(f"Bearer {self.token}", "status:read"))
         self.assertTrue(self.store.authorize(f"Bearer {self.token}", "health:read"))
         self.assertEqual(self.store.activate(f"Bearer {self.token}", now=NOW), "pairing_activated")
+        self.assertEqual(
+            self.store.claim(bootstrap.pairing_id, bootstrap.secret, self.verifier, now=NOW),
+            "pairing_claimed",
+        )
+        self.assertEqual(
+            self.store.claim(
+                bootstrap.pairing_id,
+                bootstrap.secret,
+                hashlib.sha256(b"different-token").hexdigest(),
+                now=NOW,
+            ),
+            "pairing_verifier_conflict",
+        )
 
     def test_bootstrap_repr_does_not_expose_secret(self) -> None:
         bootstrap = self._bootstrap()
@@ -73,7 +86,9 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(self.store.claim(bootstrap.pairing_id, bootstrap.secret, self.verifier, now=NOW + timedelta(minutes=11)), "pairing_bootstrap_expired")
         fresh = self.store.create_bootstrap(now=NOW + timedelta(minutes=11))
         self.assertEqual(self.store.claim(fresh.pairing_id, fresh.secret, self.verifier, now=NOW + timedelta(minutes=11)), "pairing_claimed")
-        self.assertEqual(self.store.claim(fresh.pairing_id, fresh.secret, self.verifier, now=NOW + timedelta(minutes=11)), "pairing_bootstrap_unavailable")
+        self.assertEqual(self.store.claim(fresh.pairing_id, fresh.secret, self.verifier, now=NOW + timedelta(minutes=11)), "pairing_claimed")
+        other_verifier = hashlib.sha256(b"different-token").hexdigest()
+        self.assertEqual(self.store.claim(fresh.pairing_id, fresh.secret, other_verifier, now=NOW + timedelta(minutes=11)), "pairing_verifier_conflict")
 
     def test_concurrent_claims_create_only_one_pending(self) -> None:
         bootstrap = self._bootstrap()
@@ -83,7 +98,7 @@ class PairingTests(unittest.TestCase):
         threads = [threading.Thread(target=claim) for _ in range(2)]
         for thread in threads: thread.start()
         for thread in threads: thread.join()
-        self.assertCountEqual(results, ["pairing_claimed", "pairing_bootstrap_unavailable"])
+        self.assertEqual(results, ["pairing_claimed", "pairing_claimed"])
 
     def test_attempt_limit_and_pending_expiry_are_bounded(self) -> None:
         bootstrap = self._bootstrap()
@@ -98,6 +113,15 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(
             self.store.activate(f"Bearer {self.token}", now=NOW + timedelta(hours=25)),
             "pairing_pending_unavailable",
+        )
+        self.assertEqual(
+            self.store.claim(
+                replacement.pairing_id,
+                replacement.secret,
+                self.verifier,
+                now=NOW + timedelta(hours=25),
+            ),
+            "pairing_bootstrap_unavailable",
         )
 
     def test_pairing_api_is_bounded_exact_and_secret_free(self) -> None:
@@ -135,6 +159,10 @@ class PairingTests(unittest.TestCase):
             api.handle("POST", "/pairing/v1/activate", headers, b'{"unknown":true}').status,
             400,
         )
+        self.assertEqual(
+            api.handle("POST", "/pairing/v1/finalize", headers, b'{"unknown":true}').status,
+            400,
+        )
 
     def test_claim_rejects_duplicate_boolean_float_and_malformed_schema(self) -> None:
         bootstrap = self._bootstrap()
@@ -152,23 +180,20 @@ class PairingTests(unittest.TestCase):
             (f'{{"pairing_schema_version":1.0,{common}}}').encode(),
             b'{"pairing_schema_version":',
         )
-        for body in bodies:
-            with self.subTest(body=body):
+        for case, body in enumerate(bodies):
+            with self.subTest(case=case):
                 self.assertEqual(
                     api.handle("POST", "/pairing/v1/claim", headers, body).status,
                     400,
                 )
         credentials.claim.assert_not_called()
 
-    def test_incomplete_discovery_cleanup_cannot_fail_successful_activation(self) -> None:
+    def test_activation_does_not_remove_discovery_and_finalize_is_retryable(self) -> None:
         bootstrap = self._bootstrap()
         self.store.claim(bootstrap.pairing_id, bootstrap.secret, self.verifier, now=NOW)
         events: list[dict[str, object]] = []
-        api = pairing.PairingApi(
-            self.store,
-            on_activated=lambda: (_ for _ in ()).throw(IncompleteRead(b"private")),
-            emit=events.append,
-        )
+        finalize = mock.Mock(side_effect=ValueError("private"))
+        api = pairing.PairingApi(self.store, on_finalize=finalize, emit=events.append)
         with mock.patch.object(pairing, "_utc_now", return_value=NOW):
             response = api.handle(
                 "POST",
@@ -179,12 +204,46 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body["status"], "pairing_activated")
         self.assertTrue(self.store.authorize(f"Bearer {self.token}", "health:read"))
-        self.assertEqual(
-            events,
-            [{"event": "pairing_discovery_failed"}, {"event": "pairing_activated"}],
+        self.assertEqual(events, [{"event": "pairing_activated"}])
+        response = api.handle(
+            "POST",
+            "/pairing/v1/finalize",
+            {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"},
+            b"{}",
         )
+        self.assertEqual((response.status, response.body["status"]), (503, "pairing_finalize_unavailable"))
+        self.assertTrue(self.store.authorize(f"Bearer {self.token}", "health:read"))
         self.assertNotIn(self.token, json.dumps(events))
         self.assertNotIn(self.verifier, json.dumps(events))
+
+    def test_finalize_removes_discovery_then_clears_recovery_and_is_idempotent(self) -> None:
+        bootstrap = self._bootstrap()
+        self.store.claim(bootstrap.pairing_id, bootstrap.secret, self.verifier, now=NOW)
+        self.store.set_discovery_uuid("safe_uuid")
+        self.store.activate(f"Bearer {self.token}", now=NOW)
+        supervisor = mock.Mock()
+        events: list[dict[str, object]] = []
+        worker = pairing.PairingDiscoveryWorker(SimpleNamespace(), self.store, supervisor, events.append)
+        api = pairing.PairingApi(self.store, on_finalize=worker.finalize, emit=events.append)
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+        first = api.handle("POST", "/pairing/v1/finalize", headers, b"{}")
+        second = api.handle("POST", "/pairing/v1/finalize", headers, b"{}")
+        self.assertEqual((first.status, second.status), (200, 200))
+        supervisor.remove.assert_called_once_with("safe_uuid")
+        state = self.store._read()
+        self.assertEqual(state["state"], "active")
+        self.assertIsNone(state["discovery_uuid"])
+        self.assertIsNone(state["pairing_id"])
+        self.assertTrue(self.store.authorize(f"Bearer {self.token}", "health:read"))
+
+    def test_finalize_rejects_non_active_token(self) -> None:
+        api = pairing.PairingApi(self.store, on_finalize=mock.Mock())
+        response = api.handle(
+            "POST", "/pairing/v1/finalize",
+            {"Content-Type": "application/json", "Authorization": "Bearer " + self.token}, b"{}"
+        )
+        self.assertEqual((response.status, response.body["status"]), (401, "pairing_active_unauthorized"))
+
 
 
 class SupervisorDiscoveryTests(unittest.TestCase):
@@ -303,7 +362,8 @@ class SupervisorDiscoveryTests(unittest.TestCase):
 
     def test_worker_retry_is_bounded_and_nonfatal(self) -> None:
         credentials = mock.Mock()
-        credentials.discovery_uuid.return_value = None
+        credentials._lock = threading.RLock()
+        credentials._read.return_value = pairing._empty_state()
         credentials.create_bootstrap.return_value = pairing.PairingBootstrap(
             "a" * 32, "b" * 43, "2026-09-12T12:10:00Z"
         )
@@ -323,7 +383,8 @@ class SupervisorDiscoveryTests(unittest.TestCase):
 
     def test_worker_contains_corrupt_local_state_without_reset(self) -> None:
         credentials = mock.Mock()
-        credentials.discovery_uuid.side_effect = ValueError("private state")
+        credentials._lock = threading.RLock()
+        credentials._read.side_effect = ValueError("private state")
         events: list[dict[str, object]] = []
         worker = pairing.PairingDiscoveryWorker(
             SimpleNamespace(), credentials, mock.Mock(), events.append
@@ -331,6 +392,96 @@ class SupervisorDiscoveryTests(unittest.TestCase):
         worker._publish_new()
         self.assertEqual(events, [{"event": "pairing_state_failed"}])
         credentials.create_bootstrap.assert_not_called()
+
+    def test_worker_restart_preserves_active_pending_and_valid_bootstrap_discovery(self) -> None:
+        for state_name in ("active", "pending", "bootstrap_available"):
+            with self.subTest(state=state_name), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "pairing.json"
+                with (
+                    mock.patch.object(pairing, "atomic_write_private", side_effect=lambda target, content, **_: target.write_bytes(content)),
+                    mock.patch.object(pairing, "read_private_file", side_effect=lambda target, **_: target.read_bytes()),
+                ):
+                    credentials = pairing.ManagedCredentialStore(SYNTHETIC_METER_ID, path)
+                    bootstrap = credentials.create_bootstrap(now=NOW)
+                    token = secrets.token_urlsafe(32)
+                    verifier = hashlib.sha256(token.encode("ascii")).hexdigest()
+                    if state_name in {"pending", "active"}:
+                        credentials.claim(bootstrap.pairing_id, bootstrap.secret, verifier, now=NOW)
+                    if state_name == "active":
+                        credentials.activate(f"Bearer {token}", now=NOW)
+                    credentials.set_discovery_uuid("safe_uuid")
+                    supervisor = mock.Mock()
+                    worker = pairing.PairingDiscoveryWorker(
+                        SimpleNamespace(meter_id=SYNTHETIC_METER_ID, ca_certificate_pem=SYNTHETIC_CA),
+                        credentials,
+                        supervisor,
+                        mock.Mock(),
+                    )
+                    with mock.patch.object(pairing, "_utc_now", return_value=NOW):
+                        worker._publish_new()
+                    supervisor.remove.assert_not_called()
+                    supervisor.publish.assert_not_called()
+                    self.assertEqual(credentials.discovery_uuid(), "safe_uuid")
+
+    def test_worker_active_without_uuid_does_not_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "pairing.json"
+            with (
+                mock.patch.object(pairing, "atomic_write_private", side_effect=lambda target, content, **_: target.write_bytes(content)),
+                mock.patch.object(pairing, "read_private_file", side_effect=lambda target, **_: target.read_bytes()),
+            ):
+                credentials = pairing.ManagedCredentialStore(SYNTHETIC_METER_ID, path)
+                bootstrap = credentials.create_bootstrap(now=NOW)
+                token = secrets.token_urlsafe(32)
+                verifier = hashlib.sha256(token.encode("ascii")).hexdigest()
+                credentials.claim(bootstrap.pairing_id, bootstrap.secret, verifier, now=NOW)
+                credentials.activate(f"Bearer {token}", now=NOW)
+                supervisor = mock.Mock()
+                worker = pairing.PairingDiscoveryWorker(SimpleNamespace(), credentials, supervisor, mock.Mock())
+                worker._publish_new()
+                supervisor.publish.assert_not_called()
+
+    def test_valid_bootstrap_without_uuid_is_replaced_and_published(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "pairing.json"
+            with (
+                mock.patch.object(pairing, "atomic_write_private", side_effect=lambda target, content, **_: target.write_bytes(content)),
+                mock.patch.object(pairing, "read_private_file", side_effect=lambda target, **_: target.read_bytes()),
+            ):
+                credentials = pairing.ManagedCredentialStore(SYNTHETIC_METER_ID, path)
+                old = credentials.create_bootstrap(now=NOW)
+                supervisor = mock.Mock()
+                supervisor.publish.return_value = "new_uuid"
+                identity = SimpleNamespace(meter_id=SYNTHETIC_METER_ID, ca_certificate_pem=SYNTHETIC_CA)
+                worker = pairing.PairingDiscoveryWorker(identity, credentials, supervisor, mock.Mock())
+                with mock.patch.object(pairing, "_utc_now", return_value=NOW):
+                    worker._publish_new()
+                supervisor.remove.assert_not_called()
+                supervisor.publish.assert_called_once()
+                self.assertNotEqual(credentials._read()["pairing_id"], old.pairing_id)
+                self.assertEqual(credentials.discovery_uuid(), "new_uuid")
+
+    def test_expired_pending_replaces_old_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "pairing.json"
+            with (
+                mock.patch.object(pairing, "atomic_write_private", side_effect=lambda target, content, **_: target.write_bytes(content)),
+                mock.patch.object(pairing, "read_private_file", side_effect=lambda target, **_: target.read_bytes()),
+            ):
+                credentials = pairing.ManagedCredentialStore(SYNTHETIC_METER_ID, path)
+                bootstrap = credentials.create_bootstrap(now=NOW)
+                verifier = hashlib.sha256(secrets.token_urlsafe(32).encode("ascii")).hexdigest()
+                credentials.claim(bootstrap.pairing_id, bootstrap.secret, verifier, now=NOW)
+                credentials.set_discovery_uuid("old_uuid")
+                supervisor = mock.Mock()
+                supervisor.publish.return_value = "new_uuid"
+                identity = SimpleNamespace(meter_id=SYNTHETIC_METER_ID, ca_certificate_pem=SYNTHETIC_CA)
+                worker = pairing.PairingDiscoveryWorker(identity, credentials, supervisor, mock.Mock())
+                with mock.patch.object(pairing, "_utc_now", return_value=NOW + timedelta(hours=25)):
+                    worker._publish_new()
+                supervisor.remove.assert_called_once_with("old_uuid")
+                supervisor.publish.assert_called_once()
+                self.assertEqual(credentials.discovery_uuid(), "new_uuid")
 
     def test_expired_bootstrap_replaces_old_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -376,10 +527,30 @@ class SupervisorDiscoveryTests(unittest.TestCase):
                 worker = pairing.PairingDiscoveryWorker(
                     SimpleNamespace(), credentials, supervisor, events.append
                 )
-                worker.remove_after_activation()
+                with self.assertRaises(OSError):
+                    worker.finalize()
                 self.assertTrue(credentials.authorize(f"Bearer {token}", "health:read"))
                 self.assertEqual(credentials.discovery_uuid(), "safe_uuid")
-                self.assertEqual(events, [{"event": "pairing_discovery_failed"}])
+                self.assertEqual(events, [])
+
+    def test_supervisor_delete_404_is_idempotent_success(self) -> None:
+        opener = mock.MagicMock()
+        opener.open.side_effect = pairing.HTTPError(
+            "http://supervisor/discovery/safe_uuid", 404, "gone", {}, None
+        )
+        client = pairing.SupervisorDiscoveryClient("platform-token")
+        with mock.patch.object(pairing, "build_opener", return_value=opener):
+            client.remove("safe_uuid")
+
+    def test_supervisor_delete_accepts_successful_null_data_envelope(self) -> None:
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"result":"ok","data":null}'
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        client = pairing.SupervisorDiscoveryClient("platform-token")
+        with mock.patch.object(pairing, "build_opener", return_value=opener):
+            client.remove("safe_uuid")
 
 
 if __name__ == "__main__":

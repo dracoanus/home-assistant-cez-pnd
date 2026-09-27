@@ -90,15 +90,54 @@ replacement.
 Managed credentials have at most one ACTIVE verifier, one PENDING verifier and
 one bootstrap authorization. Bootstrap lifetime is ten minutes with eight
 attempts; PENDING lifetime is 24 hours and survives restart. Only ACTIVE can
-authorize the existing read API. Activation is idempotent, and discovery
-cleanup failure does not revoke a successfully activated token.
+authorize the existing read API. Activation is idempotent and never removes
+discovery. Cleanup is a separate retryable finalize step that never revokes a
+successfully activated token.
 
-The managed-only pairing surface is exactly `POST /pairing/v1/claim` and
-`POST /pairing/v1/activate`. It is separate from the three data routes and does
-not expose credential, browser, file, or arbitrary command functionality.
+The managed-only pairing surface is exactly `POST /pairing/v1/claim`,
+`POST /pairing/v1/activate` and `POST /pairing/v1/finalize`. It is separate from
+the three data routes and does not expose credential, browser, file, or
+arbitrary command functionality.
 
-This foundation is intentionally incomplete: the HA `SOURCE_HASSIO` config
-flow, token generation and durable activation sequence are deferred to Phase
-5B-B2. Do not present managed pairing as a finished installation path until
-that slice passes HA OS validation. Automatic leaf renewal, CA rotation and
-legacy-to-managed rotation are also deferred.
+Phase 5B-B2 supplies the HA `SOURCE_HASSIO` side. The flow removes and validates
+Core's `addon` metadata, then validates the remaining exact seven-field
+Collector payload. It derives the internal HTTPS origin exclusively from the
+strict Supervisor App slug (`_` becomes `-`); it never accepts a discovered URL
+or hostname. The flow immediately replaces framework `init_data` with a
+secret-free `HassioServiceInfo`; its transient dataclass hides the pairing
+secret from repr. HA generates the long-lived random token and durably stores
+it before claim in a private atomic public `Store` journal, together with only
+the meter ID, Collector origin, public CA and bounded phase. It then submits
+only the token's SHA-256 verifier. Pairing ID, pairing secret, expiry, discovery
+UUID and verifier are never ConfigEntry or journal data.
+One HA-instance recovery manager owns the Store and an async lock. Confirmation
+must reload the journal inside that lock and hold ownership through bounded
+claim. Never rely on recovery state cached when discovery first arrived.
+
+The ConfigEntry unique ID must remain `meter_id`, not the Supervisor discovery
+UUID. ConfigEntry setup occurs before Core schedules its persistent save, so
+initial setup must not finalize discovery. It activates and verifies the API,
+then retains the recovery journal, discovery and a non-secret finalize marker.
+An in-memory marker identifies entries created in the current process. Only a
+later process loading the persisted entry calls finalize; after success HA
+removes the pending markers but retains the journal. A further process that
+loads the permanent managed marker with both pending markers absent may remove
+the journal. A process-lifetime finalized marker prevents same-process setup,
+manual reload, unload/load, retry and options reload from being mistaken for
+that further process. This process boundary proves marker persistence and means
+journal cleanup can legitimately require an additional HA restart. Cleanup
+uses the recovery ownership lock, reloads under the lock and deletes only an
+exact meter/origin/CA/token match. Cleanup failure does not block ACTIVE
+operation. Repeated claim with the same authorization and verifier is
+idempotent, covering crashes before ConfigEntry creation. Collector restart
+preserves discovery for ACTIVE, unexpired PENDING and unexpired bootstrap
+state; only expired/unpaired reconciliation may replace it. The meter identity
+prevents discovery deletion from deleting the ConfigEntry. No timer, private
+Core persistence API or `.storage/core.config_entries` access is used.
+Existing manual entries have no markers and never use the journal, activate or
+finalize.
+
+The implementation is ready for security review but still requires live HA OS
+validation before installation documentation presents guided pairing as the
+normal path. Automatic leaf renewal, CA rotation, managed-token rotation and
+legacy-to-managed migration remain deferred.

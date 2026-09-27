@@ -32,6 +32,7 @@ def _load_client_module():
         "ClientSSLError",
         "ServerFingerprintMismatch",
         "ClientConnectionError",
+        "ClientPayloadError",
     ):
         setattr(fake, name, type(name, (_AiohttpError,), {}))
     sys.modules["aiohttp"] = fake
@@ -170,10 +171,23 @@ class _Session:
     def __init__(self, responses: list[_Response]) -> None:
         self.responses = responses
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.post_calls: list[tuple[str, dict[str, object]]] = []
 
     def get(self, url: str, **kwargs: object) -> _Response:
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
+
+    def post(self, url: str, **kwargs: object) -> _Response:
+        self.post_calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
+class _FailingPostSession:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+
+    def post(self, _url: str, **_kwargs: object):
+        raise self.failure
 
 
 class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
@@ -432,6 +446,124 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_context.verify_mode, ssl.CERT_REQUIRED)
         self.assertEqual(fake_context.minimum_version, ssl.TLSVersion.TLSv1_2)
         fake_context.load_verify_locations.assert_called_once()
+
+
+class CollectorPairingClientTests(unittest.IsolatedAsyncioTestCase):
+    def _client(self, responses: list[_Response]):
+        session = _Session(responses)
+        client = client_module.CollectorPairingClient(
+            session,
+            "https://606197c3-cez-pnd-collector:8443",
+            object(),
+        )
+        return client, session
+
+    async def test_claim_sends_exact_verifier_request_without_api_token(self) -> None:
+        client, session = self._client(
+            [_Response(200, {"pairing_schema_version": 1, "status": "pairing_claimed"})]
+        )
+        verifier = "b" * 64
+        secret = "C" * 43
+        await client.async_claim("a" * 32, secret, verifier)
+        url, kwargs = session.post_calls[0]
+        self.assertEqual(url.rsplit(":8443", 1)[1], "/pairing/v1/claim")
+        self.assertEqual(
+            kwargs["json"],
+            {
+                "pairing_schema_version": 1,
+                "pairing_id": "a" * 32,
+                "pairing_secret": secret,
+                "api_token_sha256": verifier,
+            },
+        )
+        self.assertNotIn("Authorization", kwargs["headers"])
+        self.assertNotIn(TOKEN, json.dumps(kwargs["json"]))
+        self.assertFalse(kwargs["allow_redirects"])
+        self.assertIs(kwargs["ssl"], client._ssl_context)
+
+    async def test_claim_inputs_and_timeout_fail_before_secret_exposure(self) -> None:
+        client, session = self._client([])
+        for pairing_id, secret, verifier in (
+            ("invalid", "C" * 43, "b" * 64),
+            ("a" * 32, "short", "b" * 64),
+            ("a" * 32, "C" * 43, "invalid"),
+        ):
+            with self.subTest(pairing_id=pairing_id), self.assertRaises(
+                client_module.CollectorConfigurationError
+            ):
+                await client.async_claim(pairing_id, secret, verifier)
+        self.assertEqual(session.post_calls, [])
+
+        failing = _FailingPostSession(asyncio.TimeoutError("secret-detail"))
+        client = client_module.CollectorPairingClient(
+            failing,
+            "https://606197c3-cez-pnd-collector:8443",
+            object(),
+        )
+        with self.assertRaisesRegex(
+            client_module.CollectorConnectionError, "collector_connection_failed"
+        ) as raised:
+            await client.async_claim("a" * 32, "C" * 43, "b" * 64)
+        self.assertNotIn("secret-detail", str(raised.exception))
+
+    async def test_activation_uses_bearer_and_empty_body(self) -> None:
+        client, session = self._client(
+            [_Response(200, {"pairing_schema_version": 1, "status": "pairing_activated"})]
+        )
+        await client.async_activate(TOKEN)
+        url, kwargs = session.post_calls[0]
+        self.assertEqual(url.rsplit(":8443", 1)[1], "/pairing/v1/activate")
+        self.assertEqual(kwargs["headers"]["Authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(kwargs["data"], b"")
+        self.assertFalse(kwargs["allow_redirects"])
+
+    async def test_finalize_uses_only_fixed_route_bearer_and_empty_body(self) -> None:
+        client, session = self._client(
+            [_Response(200, {"pairing_schema_version": 1, "status": "pairing_finalized"})]
+        )
+        await client.async_finalize(TOKEN)
+        url, kwargs = session.post_calls[0]
+        self.assertEqual(url.rsplit(":8443", 1)[1], "/pairing/v1/finalize")
+        self.assertEqual(kwargs["headers"]["Authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(kwargs["data"], b"")
+        self.assertFalse(kwargs["allow_redirects"])
+
+    async def test_payload_read_failure_is_bounded(self) -> None:
+        failure = client_module.aiohttp.ClientPayloadError("secret-detail")
+        client = client_module.CollectorPairingClient(
+            _FailingPostSession(failure),
+            "https://606197c3-cez-pnd-collector:8443",
+            object(),
+        )
+        with self.assertRaisesRegex(
+            client_module.CollectorConnectionError, "collector_connection_failed"
+        ) as raised:
+            await client.async_finalize(TOKEN)
+        self.assertNotIn("secret-detail", str(raised.exception))
+
+    async def test_pairing_failures_are_bounded_and_explicit(self) -> None:
+        for status, exception in (
+            (401, client_module.PairingRejectedError),
+            (503, client_module.PairingUnavailableError),
+            (302, client_module.PairingUnavailableError),
+        ):
+            with self.subTest(status=status):
+                client, _ = self._client([_Response(status, {})])
+                with self.assertRaises(exception):
+                    await client.async_claim("a" * 32, "C" * 43, "b" * 64)
+
+    async def test_malformed_duplicate_and_oversized_responses_fail(self) -> None:
+        bodies = (
+            b'{"pairing_schema_version":1,"pairing_schema_version":1,"status":"pairing_claimed"}',
+            b'{"pairing_schema_version":true,"status":"pairing_claimed"}',
+            b"{" + b" " * client_module.MAX_PAIRING_RESPONSE_BYTES + b"}",
+        )
+        for body in bodies:
+            with self.subTest(size=len(body)):
+                response = _RawResponse(body)
+                client, _ = self._client([response])
+                with self.assertRaises(client_module.PairingUnavailableError):
+                    await client.async_claim("a" * 32, "C" * 43, "b" * 64)
 
 
 if __name__ == "__main__":
