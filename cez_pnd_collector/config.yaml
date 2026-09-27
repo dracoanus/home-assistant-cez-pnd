@@ -1,5 +1,5 @@
 name: "CEZ PND Collector"
-version: "0.3.33"
+version: "0.3.34"
 slug: cez_pnd_collector
 description: "Secure CEZ PND electricity-data Collector with a local authenticated HTTPS API."
 url: "https://github.com/dracoanus/home-assistant-cez-pnd"
