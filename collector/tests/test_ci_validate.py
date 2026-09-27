@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 import unittest
 
-from ci_validate import validate_content, validate_path
+from ci_validate import validate_brand_image, validate_content, validate_path
 
 
 class PullRequestPolicyTest(unittest.TestCase):
@@ -26,6 +26,22 @@ class PullRequestPolicyTest(unittest.TestCase):
         ):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 validate_path(PurePosixPath(path))
+
+    def test_reviewed_brand_png_is_allowed(self) -> None:
+        validate_brand_image(
+            PurePosixPath("cez_pnd_collector/icon.png"),
+            b"\x89PNG\r\n\x1a\nminimal-test-payload",
+        )
+        with self.assertRaisesRegex(ValueError, "not a PNG"):
+            validate_brand_image(
+                PurePosixPath("cez_pnd_collector/logo.png"),
+                b"not-a-png",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be inspected"):
+            validate_brand_image(
+                PurePosixPath("collector/unreviewed.png"),
+                b"\x89PNG\r\n\x1a\nminimal-test-payload",
+            )
 
     def test_recognizable_secret_values_are_rejected(self) -> None:
         samples = (
