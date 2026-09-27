@@ -28,6 +28,18 @@ FORBIDDEN_CONTENT = {
 }
 FORBIDDEN_SUFFIXES = frozenset({".crt", ".key", ".log", ".p12", ".pem", ".pfx", ".pyc", ".pyo"})
 FORBIDDEN_PARTS = frozenset({".pytest_cache", "__pycache__"})
+ALLOWED_BINARY_BRAND_FILES = frozenset(
+    {
+        PurePosixPath("custom_components/cez_pnd/brand/icon.png"),
+        PurePosixPath("custom_components/cez_pnd/brand/icon@2x.png"),
+        PurePosixPath("custom_components/cez_pnd/brand/logo.png"),
+        PurePosixPath("custom_components/cez_pnd/brand/logo@2x.png"),
+        PurePosixPath("cez_pnd_collector/icon.png"),
+        PurePosixPath("cez_pnd_collector/logo.png"),
+    }
+)
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_BRAND_IMAGE_BYTES = 2 * 1024 * 1024
 
 
 def changed_files(base: str, head: str) -> list[PurePosixPath]:
@@ -62,6 +74,17 @@ def validate_path(path: PurePosixPath) -> None:
         raise ValueError(f"generated or private material changed: {path}")
 
 
+def validate_brand_image(path: PurePosixPath, content: bytes) -> None:
+    """Allow only bounded PNG branding assets at reviewed paths."""
+
+    if path not in ALLOWED_BINARY_BRAND_FILES:
+        raise ValueError(f"non-UTF-8 changed file cannot be inspected: {path}")
+    if not content.startswith(PNG_SIGNATURE):
+        raise ValueError(f"brand image is not a PNG: {path}")
+    if not 0 < len(content) <= MAX_BRAND_IMAGE_BYTES:
+        raise ValueError(f"brand image size is invalid: {path}")
+
+
 def validate_content(path: PurePosixPath, content: str) -> None:
     """Reject recognizable secret values in changed text files."""
 
@@ -90,8 +113,13 @@ def validate(base: str, head: str) -> int:
     for path in paths:
         validate_path(path)
         source = ROOT.joinpath(*path.parts)
+        raw_content = source.read_bytes()
+        if path in ALLOWED_BINARY_BRAND_FILES:
+            validate_brand_image(path, raw_content)
+            validate_content(path, raw_content.decode("latin-1"))
+            continue
         try:
-            content = source.read_text(encoding="utf-8")
+            content = raw_content.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ValueError(f"non-UTF-8 changed file cannot be inspected: {path}") from error
         validate_content(path, content)
