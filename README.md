@@ -11,7 +11,7 @@ by or supported by CEZ.
 ## Status
 
 The current Collector/App release is `0.3.33` and the Home Assistant
-integration is `0.1.9`. Real authenticated CEZ PND collection, normalized
+integration is `0.1.10`. Real authenticated CEZ PND collection, normalized
 SQLite storage, historical backfill, current-day refresh, local HTTPS access,
 Recorder external statistics and Energy Dashboard import/export statistics have
 been validated. See [known limitations](docs/troubleshooting.md#known-limitations)
