@@ -97,6 +97,12 @@ APP_SCHEMA_KEYS = set(
     re.findall(r"^  ([a-z0-9_]+):", APP_SCHEMA_SECTION, re.MULTILINE)
 )
 APP_DOCUMENTATION = (APP_DIRECTORY / "DOCS.md").read_text(encoding="utf-8")
+APP_TRANSLATIONS_EN = (APP_DIRECTORY / "translations" / "en.yaml").read_text(
+    encoding="utf-8"
+)
+APP_TRANSLATIONS_CS = (APP_DIRECTORY / "translations" / "cs.yaml").read_text(
+    encoding="utf-8"
+)
 HA_APP_VALIDATION = (
     REPOSITORY_ROOT / "docs" / "phase2b-collector-ha-app.md"
 ).read_text(encoding="utf-8")
@@ -106,7 +112,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.34"
+assert VERSION == "0.3.35"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -652,7 +658,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.34"',
+    'version: "0.3.35"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
@@ -702,19 +708,20 @@ assert LEGACY_IDENTITY_KEYS.isdisjoint(APP_OPTION_KEYS)
 assert LEGACY_IDENTITY_KEYS <= APP_SCHEMA_KEYS
 assert "tls_certificate_b64" in APP_MANIFEST
 assert "tls_private_key_b64" in APP_MANIFEST
-assert "  cez_discovery_mode: false" in APP_MANIFEST
-assert "  cez_http_auth_discovery_mode: false" in APP_MANIFEST
-assert "  cez_http_auth_discovery_mode: bool" in APP_MANIFEST
-assert "  cez_requests_preauth_compatibility_mode: false" in APP_MANIFEST
-assert "  cez_requests_preauth_compatibility_mode: bool" in APP_MANIFEST
-assert "  cez_data_probe_mode: false" in APP_MANIFEST
-assert "  cez_data_probe_mode: bool" in APP_MANIFEST
+for diagnostic_option in (
+    "cez_discovery_mode",
+    "cez_http_auth_discovery_mode",
+    "cez_requests_preauth_compatibility_mode",
+    "cez_data_probe_mode",
+):
+    assert diagnostic_option not in APP_OPTION_KEYS
+    assert f"  {diagnostic_option}: bool?" in APP_SCHEMA_SECTION
 assert "  cez_sync_enabled: false" in APP_MANIFEST
 assert "  cez_sync_enabled: bool" in APP_MANIFEST
 assert "  cez_history_start: null" in APP_MANIFEST
 assert "  cez_history_start: str?" in APP_MANIFEST
-assert "  cez_data_probe_date: null" in APP_MANIFEST
-assert "  cez_data_probe_date: str?" in APP_MANIFEST
+assert "cez_data_probe_date" not in APP_OPTION_KEYS
+assert "  cez_data_probe_date: str?" in APP_SCHEMA_SECTION
 assert "  cez_ean: null" in APP_MANIFEST
 assert "  cez_ean: password?" in APP_MANIFEST
 assert "  cez_elm: password?" in APP_MANIFEST
@@ -725,6 +732,16 @@ assert "  cez_username: password?" in APP_MANIFEST
 assert "  cez_password: password?" in APP_MANIFEST
 assert "cez_username:" not in APP_MANIFEST.split("schema:", 1)[0]
 assert "cez_password:" not in APP_MANIFEST.split("schema:", 1)[0]
+
+for translations in (APP_TRANSLATIONS_EN, APP_TRANSLATIONS_CS):
+    assert translations.startswith("configuration:\n")
+    for option_key in APP_SCHEMA_KEYS:
+        assert f"\n  {option_key}:\n" in "\n" + translations
+
+assert "Automatic data synchronization" in APP_TRANSLATIONS_EN
+assert "Automatická synchronizace dat" in APP_TRANSLATIONS_CS
+assert "managed pairing" in APP_TRANSLATIONS_EN
+assert "managed" in APP_TRANSLATIONS_CS
 
 
 def png_dimensions(path: Path) -> tuple[int, int]:
