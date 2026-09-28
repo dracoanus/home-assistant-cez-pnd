@@ -70,14 +70,14 @@ before tagging; never rewrite public tags.
 Future work: automated TLS/token lifecycle, safer DNS connection pinning,
 operational monitoring and further CEZ compatibility validation.
 
-## Phase 5B managed pairing foundation
+## Phase 5B managed pairing implementation
 
 Phase 5B-B1 deliberately uses Supervisor discovery instead of Ingress.
 Supervisor binds each discovery message to the requesting App and accepts only
 services declared by that App. The `cez_pnd` payload is bounded and carries a
 short-lived bootstrap secret plus public trust data; it never contains CEZ
 credentials, EAN/ELM, private keys, an arbitrary hostname, or a long-lived API
-token. The future HA flow must derive the internal hostname from the
+token. The HA flow derives the internal hostname from the
 Supervisor-provided App slug.
 
 New installations with none of the four legacy identity options use an atomic

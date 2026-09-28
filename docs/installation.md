@@ -22,11 +22,12 @@ or Selenium during installation.
 
 1. In HACS, add `https://github.com/dracoanus/home-assistant-cez-pnd` as a
    custom integration repository.
-2. Install **CEZ PND Collector**.
+2. Install the **CEZ PND** repository. The installed integration and its
+   discovery card are named **CEZ PND Collector**.
 3. Restart Home Assistant. This is required after updating or first installing
    Python integration code.
-4. Open **Settings → Devices & services → Add integration** and select
-   **CEZ PND Collector**.
+4. Return to **Settings → Devices & services** after the restart. Do not create
+   a manual entry when the discovered Collector card is available.
 
 ## 3. Configure the integration
 

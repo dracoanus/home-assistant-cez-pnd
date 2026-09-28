@@ -7,9 +7,10 @@ intervals in SQLite and exposes a limited local HTTPS API to Home Assistant.
 The three data routes are `GET /api/v1/health`, `GET /api/v1/status` and
 `GET /api/v1/measurements`. All require the scoped bearer token. Managed new
 installations additionally expose the bounded one-time pairing routes
-`POST /pairing/v1/claim` and `POST /pairing/v1/activate`; pending credentials
-cannot authorize data routes. The service does not expose browser, shell, file,
-CEZ-login or arbitrary-URL control.
+`POST /pairing/v1/claim`, `POST /pairing/v1/activate` and
+`POST /pairing/v1/finalize`; pending credentials cannot authorize data routes.
+The service does not expose browser, shell, file, CEZ-login or arbitrary-URL
+control.
 
 Automatic synchronization stores normalized data only; raw CEZ CSV is not
 persisted. Current-day work runs hourly and historical backfill/correction runs
