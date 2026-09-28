@@ -54,6 +54,10 @@ Diagnostic options are intentionally optional. On a clean installation they are
 hidden behind **Show unused optional configuration options** in the App
 configuration screen. Leave them disabled during normal operation.
 
+An installation upgraded from an older App version may still show stored
+`false` or empty diagnostic values. That is expected and does not enable a
+diagnostic mode. New clean installations omit unused diagnostic defaults.
+
 | Option | Purpose |
 | --- | --- |
 | `cez_data_probe_mode` | One bounded collection for `cez_data_probe_date`, then exit. |

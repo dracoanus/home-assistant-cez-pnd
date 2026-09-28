@@ -1,24 +1,20 @@
-# Collector API contract — normalized dataset revision 0.3
+# Collector API contract — normalized dataset
 
-Status: Phase 4C connects validated CEZ CSV exports to the existing local API
-through a normalized transactional SQLite dataset. See the
-[validation evidence](phase2b-collector-service-validation.md) for the earlier
-service/runtime gate. This contract does not expose CEZ credentials or portal
-internals to Home Assistant Core.
+Status: implemented by Collector/App `0.3.35` and consumed by Home Assistant
+integration `0.1.10`. Validated CEZ CSV exports are stored in a normalized
+transactional SQLite dataset and served through this narrow local API. This
+contract does not expose CEZ credentials or portal internals to Home Assistant
+Core. Earlier service/runtime evidence remains in the
+[historical validation document](phase2b-collector-service-validation.md).
 
-## Phase classification
+## Current role
 
-The authoritative specification calls production structure and limited API
-foundations **Phase 2B**. This skeleton is therefore a narrowly scoped Phase 2B
-artifact explicitly requested after acceptance of the relevant offline runtime
-evidence. It is not Phase 2A-2 and it does not start live CEZ feasibility work.
-
-The complete Phase 2A exit condition is not met: CEZ objectives 7–14 remain
-open. The skeleton proceeds only where those unknowns have no effect—offline
-read-only routing, synthetic schemas, fail-closed private configuration, and
-release structure. It must not be promoted to a production Collector until the
-remaining Phase 2B entry conditions relevant to authentication, TLS pairing,
-storage, destination controls, and operational limits are resolved.
+The API is the only data boundary between the Collector App and Home Assistant
+Core. The Collector owns CEZ authentication, collection, parsing,
+synchronization and persistent storage. Home Assistant holds only a limited API
+token, opaque meter ID and public local CA needed for verified HTTPS reads.
+Managed pairing provisions those values for normal installations; the manual
+URL/token/CA configuration remains a legacy/recovery path.
 
 ## Boundary and transport
 
@@ -37,18 +33,12 @@ limited to one opaque meter ID and these read scopes:
 - `measurements:read`
 
 The server stores only the SHA-256 verifier. Verification is constant-time and
-requires a base64url token decoding to at least 256 bits. Production generation,
-pairing, rotation, revocation, certificate provisioning, renewal, and recovery
-remain **OPEN / NEEDS VERIFICATION (O-12)**. The skeleton has no unauthenticated
-network health exception.
-
-The `0.2.2` HA OS diagnostic candidate accepts only the token's lowercase
-SHA-256 verifier through trusted Supervisor-managed App options. The plaintext
-token is never an App option. TLS certificate/private-key options support the
-narrow offline deployment gate; they do not close production pairing,
-certificate lifecycle, backup, recovery, or integration-side pinning. The
-[Collector App validation plan](phase2b-collector-ha-app.md) defines this
-experimental bootstrap and its remaining gates.
+requires a base64url token decoding to at least 256 bits. Managed onboarding
+generates the long-lived token in Home Assistant, sends only its verifier to
+the Collector, and establishes trust in the Collector's generated local CA and
+leaf certificate. There is no unauthenticated network health exception.
+Automatic leaf renewal, CA rotation, managed token rotation/revocation and
+legacy-to-managed migration remain unimplemented lifecycle work.
 
 Startup diagnostics are limited to fixed local codes. They identify the
 failed validation stage without including exception text, Supervisor tokens,
@@ -109,27 +99,19 @@ storage, interruption, or second-channel failure cannot publish a partial new
 revision; the previous committed dataset remains readable. Re-import is
 idempotent and a corrected interval replaces the prior value.
 
-## Explicitly absent functionality
+## Explicitly absent API functionality
 
-The service exposes no CEZ credential, cookie, login, refresh, arbitrary URL,
+The service API exposes no CEZ credential, cookie, login, arbitrary URL,
 browser command, selector, script, shell, file, DOM, screenshot, raw export,
-process-inspection, diagnostics, or administration endpoint. It performs no
-outbound request and does not import Selenium in the service process.
+process-inspection, diagnostics, or general administration endpoint. Outbound
+CEZ work is performed only by the internal scheduled synchronization worker,
+outside the Home Assistant API surface.
 
-## Deferred contract work
+## Deferred lifecycle and operational work
 
-The following remain **OPEN / NEEDS VERIFICATION** before affected production
-behavior:
-
-- O-12 token pairing, lifecycle, TLS identity, and integration-side pinning;
-- O-14 final limits, rate limits, concurrency, retention, and staleness budgets;
-- O-09 long-term meter identity/binding beyond the current single-App opaque ID;
-- remaining live variants of CEZ CSV schema/status semantics outside the
-  validated Phase 4B parser fixtures;
-- the future `POST /api/v1/refresh` contract and worker lifecycle;
-- HA App `/data` permissions and restart/backup behavior;
-- Home Assistant internal DNS identity and end-to-end HTTPS connectivity on the
-  selected target.
-
-These unknowns do not permit plaintext fallback, unauthenticated access, secret
-logging, broader endpoints, or fabricated CEZ behavior.
+The current release does not implement automatic certificate renewal, CA
+rotation, managed token rotation/revocation, legacy-to-managed migration or a
+public refresh endpoint. Long-term retention policy and additional CEZ export
+variants also remain future work. These gaps do not permit plaintext fallback,
+unauthenticated access, secret logging, broader endpoints or fabricated CEZ
+behavior.

@@ -25,13 +25,14 @@ The App runs non-root with AppArmor and without privileged mode, host network,
 Docker socket or broad host mounts. TLS verification, manual redirects,
 reviewed destinations and bounded memory-only cookies remain mandatory.
 
-## Managed onboarding foundation
+## Managed onboarding
 
-Phase 5B-B1 adds a Collector-side foundation for new installations. When all
-four legacy identity options are absent, UID/GID 2000 generates and persists a
-random opaque meter ID, a private local CA, and an exact-hostname server
-certificate under `/data/cez-pnd-identity`. A complete legacy configuration
-continues to take precedence; every partial legacy combination fails closed.
+Managed onboarding is implemented and has been validated end to end on Home
+Assistant OS. When all four legacy identity options are absent, UID/GID 2000
+generates and persists a random opaque meter ID, a private local CA, and an
+exact-hostname server certificate under `/data/cez-pnd-identity`. A complete
+legacy configuration continues to take precedence; every partial legacy
+combination fails closed.
 
 The Collector publishes a short-lived, high-entropy bootstrap authorization
 through Supervisor discovery service `cez_pnd`. Supervisor discovery supplies
@@ -40,7 +41,7 @@ no long-lived API credential. The pairing API accepts only a verifier generated
 by the HA integration. A PENDING verifier cannot read Collector data and
 becomes ACTIVE only after an authenticated activation request.
 
-Phase 5B-B2 implements the HA `SOURCE_HASSIO` flow. It accepts the exact bounded
+The HA `SOURCE_HASSIO` flow accepts the exact bounded
 discovery contract, derives `https://<slug-with-hyphens>:8443` only from the
 Supervisor-provided App slug, validates the discovered CA and generates a
 256-bit URL-safe API token inside HA. Only its SHA-256 verifier is sent with the
@@ -90,3 +91,10 @@ The entry unique ID remains the stable opaque `meter_id`, never the Supervisor
 discovery UUID, so deletion of the consumed discovery message cannot delete the
 working entry. Home Assistant Ingress is not part of this architecture. The
 manual URL/token/CA flow remains supported as an advanced recovery path.
+
+Live validation covered managed identity creation, Supervisor discovery,
+guided claim and activation, ConfigEntry persistence across a Core restart,
+finalization, discovery removal, Collector restart recovery and recovery
+journal cleanup in a following Core process. Certificate renewal, CA rotation,
+managed-token rotation/revocation and legacy-to-managed migration remain
+separate future lifecycle work.

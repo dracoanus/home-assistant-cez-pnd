@@ -4,9 +4,13 @@ Collector App and Home Assistant integration have independent versions.
 
 ## Collector App
 
-1. Update **CEZ PND Collector** in the Home Assistant App Store.
-2. Review configuration notes before starting the updated App.
-3. Confirm safe startup and synchronization events.
+1. Review the App changelog and release notes. Record the installed Collector
+   and integration versions.
+2. Create or retain a usable Home Assistant backup before a significant
+   upgrade.
+3. Update **CEZ PND Collector** in the Home Assistant App Store.
+4. Confirm that the App starts, managed identity remains available and a
+   scheduled synchronization completes without a new fixed error code.
 
 Collector options and normalized data are intended to remain available across
 ordinary updates. Keep Home Assistant backups; do not assume a rollback
@@ -14,12 +18,20 @@ preserves data from a newer schema without checking release notes.
 
 ## HACS integration
 
-1. Update the integration in HACS.
-2. Restart Home Assistant. Python integration code remains loaded until restart.
-3. Check the integration and Energy Dashboard after restart.
+1. Review the integration release notes, then update it through HACS.
+2. Restart Home Assistant when HACS requests it. Python integration code
+   remains loaded until restart.
+3. Check the integration entry, entities, Recorder statistics and Energy
+   Dashboard after restart.
 
 ## Rollback
 
-Use a new release rather than rewriting public tags. Before rollback, record
-versions and create a Home Assistant backup. Do not delete the Collector
-dataset merely to resolve an update issue; inspect safe logs first.
+Published tags and container images must never be moved or overwritten. Before
+rollback, record both installed versions and preserve a Home Assistant backup.
+Use the supported App/HACS version controls or restore a known compatible
+backup when a data or configuration migration requires it.
+
+Do not delete `/data/cez-pnd-dataset/cez-pnd.sqlite3` as a first troubleshooting
+step. It contains the normalized history and synchronization checkpoints.
+Inspect safe event codes and release notes first; restore the dataset only as
+part of a deliberate backup recovery procedure.

@@ -60,8 +60,8 @@ or recovery use. Automatic certificate and token rotation is not implemented.
    install **CEZ PND Collector**.
 2. Configure the normal CEZ and synchronization options, then start the
    Collector App so it publishes managed discovery.
-3. Add this repository as a custom repository in HACS and install
-   **CEZ PND Collector**.
+3. Add this repository as a custom repository in HACS and install **CEZ PND**
+   from it. The installed integration is named **CEZ PND Collector**.
 4. Restart Home Assistant after the HACS installation, then use the discovered
    **CEZ PND Collector** card in **Settings → Devices & services** to complete
    guided pairing.
