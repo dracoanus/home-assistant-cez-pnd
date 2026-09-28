@@ -49,18 +49,22 @@ browserless authentication and CEZ credentials outside Home Assistant Core.
 - Home Assistant OS with the App/Supervisor model, amd64.
 - HACS for installing the custom integration.
 - A CEZ PND account with accessible electricity-meter data.
-- A trusted local TLS certificate and a separately retained Collector API
-  token. Pairing and token rotation are currently manual.
+
+Managed pairing creates the local API identity, TLS trust and scoped API token.
+Manual identity, certificate and token inputs remain available only for legacy
+or recovery use. Automatic certificate and token rotation is not implemented.
 
 ## Install
 
 1. Add this repository in **Settings → Apps → App Store → Repositories** and
    install **CEZ PND Collector**.
-2. Configure and start the Collector App.
+2. Configure the normal CEZ and synchronization options, then start the
+   Collector App so it publishes managed discovery.
 3. Add this repository as a custom repository in HACS and install
    **CEZ PND Collector**.
-4. Restart Home Assistant after the HACS installation, then add the
-   integration in **Settings → Devices & services**.
+4. Restart Home Assistant after the HACS installation, then use the discovered
+   **CEZ PND Collector** card in **Settings → Devices & services** to complete
+   guided pairing.
 
 Follow the detailed [installation guide](docs/installation.md) and
 [configuration guide](docs/configuration.md). The

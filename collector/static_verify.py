@@ -725,7 +725,8 @@ assert "  cez_data_probe_date: str?" in APP_SCHEMA_SECTION
 assert "  cez_ean: null" in APP_MANIFEST
 assert "  cez_ean: password?" in APP_MANIFEST
 assert "  cez_elm: password?" in APP_MANIFEST
-assert "  cez_allowed_origins: []" in APP_MANIFEST
+assert "cez_allowed_origins" not in APP_OPTION_KEYS
+assert "  cez_allowed_origins:\n    - url?" in APP_SCHEMA_SECTION
 assert "  cez_start_url: url?" in APP_MANIFEST
 assert "  cez_auth_origin: url?" in APP_MANIFEST
 assert "  cez_username: password?" in APP_MANIFEST
