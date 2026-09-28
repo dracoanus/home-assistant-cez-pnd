@@ -5,20 +5,29 @@ inside its App boundary. It serves Home Assistant through authenticated local
 HTTPS. See [configuration](../docs/configuration.md) and
 [troubleshooting](../docs/troubleshooting.md).
 
-## Required production settings
+## Normal configuration
 
-Configure `meter_id`, `api_token_sha256`, TLS certificate and private key, CEZ
-username/password, at least one of `cez_ean` or `cez_elm`, and set
-`cez_sync_enabled` to `true`. All credentials, certificates, EAN and ELM are
-private. The plaintext API token is not an App option; retain it only for the
-Home Assistant integration or another trusted API client.
+For normal operation, configure the CEZ username and password, at least one of
+EAN or ELM, choose the history start date, and enable automatic synchronization.
+
+Managed pairing creates the local API identity, TLS trust and Home Assistant API
+token automatically. The legacy meter ID, token verifier, TLS certificate and
+private-key fields should stay empty unless a recovery procedure explicitly
+requires them.
 
 The plaintext bearer token must never be entered in App options, logs, command
-lines or this repository. The App stores only its SHA-256 verifier.
+lines or this repository.
 
 The current Prague day runs hourly. Historical backfill and completed-day
 correction run every six hours. Automatic synchronization writes normalized
 SQLite data and does not retain raw CEZ CSV exports.
+
+## Configuration UI
+
+The App ships Czech configuration labels and descriptions with English fallback.
+Normal operational settings are shown directly. One-shot diagnostics and legacy
+recovery settings are optional and can be revealed with **Show unused optional
+configuration options** when troubleshooting requires them.
 
 ## Security
 

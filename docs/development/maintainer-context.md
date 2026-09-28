@@ -10,7 +10,7 @@ their recorded time and must not override current implementation contracts.
 
 ## Current architecture
 
-Collector/App `0.3.34` uses browserless CEZ HTTP authentication, normalized
+Collector/App `0.3.35` uses browserless CEZ HTTP authentication, normalized
 SQLite and a narrow local HTTPS API. HA integration `0.1.10` reads that API,
 exposes sensors and writes Recorder external statistics. CEZ credentials, EAN
 and ELM stay in Collector configuration; HA has only a limited API token,
@@ -137,7 +137,9 @@ Core persistence API or `.storage/core.config_entries` access is used.
 Existing manual entries have no markers and never use the journal, activate or
 finalize.
 
-The implementation is ready for security review but still requires live HA OS
-validation before installation documentation presents guided pairing as the
-normal path. Automatic leaf renewal, CA rotation, managed-token rotation and
-legacy-to-managed migration remain deferred.
+Live Home Assistant OS validation completed the managed flow end to end:
+identity creation, Supervisor discovery, guided claim and activation,
+ConfigEntry persistence across Core restart, finalize, discovery removal and
+recovery-journal cleanup in the following Core process. Guided pairing is the
+normal installation path. Automatic leaf renewal, CA rotation, managed-token
+rotation and legacy-to-managed migration remain deferred.

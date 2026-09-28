@@ -1,0 +1,84 @@
+configuration:
+  meter_id:
+    name: Legacy meter ID
+    description: >-
+      Manual or recovery configuration only. Leave empty when using automatic
+      managed pairing.
+  api_token_sha256:
+    name: Legacy API token verifier
+    description: >-
+      SHA-256 verifier for a manually managed API token. Leave empty when using
+      automatic managed pairing.
+  tls_certificate_b64:
+    name: Legacy TLS certificate
+    description: >-
+      Base64-encoded TLS certificate for manual or recovery configuration.
+      Leave empty when using automatic managed pairing.
+  tls_private_key_b64:
+    name: Legacy TLS private key
+    description: >-
+      Base64-encoded private key matching the TLS certificate. Use only for
+      manual or recovery configuration.
+  cez_discovery_mode:
+    name: Legacy login diagnostics
+    description: >-
+      Older one-shot Selenium diagnostic mode. Keep disabled during normal
+      operation.
+  cez_http_auth_discovery_mode:
+    name: HTTP login diagnostics
+    description: >-
+      Performs a one-shot browserless CEZ login check. Use only for
+      troubleshooting.
+  cez_requests_preauth_compatibility_mode:
+    name: PREAUTH compatibility diagnostics
+    description: >-
+      Advanced one-shot PREAUTH compatibility diagnostic mode. Use only as part
+      of a troubleshooting procedure.
+  cez_data_probe_mode:
+    name: One-shot data download test
+    description: >-
+      Downloads data only for the selected date and exits afterwards. It cannot
+      run together with automatic synchronization.
+  cez_sync_enabled:
+    name: Automatic data synchronization
+    description: >-
+      Regularly downloads new CEZ PND data and updates historical data.
+  cez_history_start:
+    name: History start date
+    description: >-
+      Date from which the Collector backfills historical data. Use YYYY-MM-DD.
+  cez_data_probe_date:
+    name: Data test date
+    description: >-
+      Date used only by the one-shot data download test. Use YYYY-MM-DD.
+  cez_start_url:
+    name: Legacy diagnostic start URL
+    description: >-
+      Advanced legacy diagnostic option. Leave empty during normal operation.
+  cez_auth_origin:
+    name: Legacy diagnostic auth origin
+    description: >-
+      Advanced legacy diagnostic option. Leave empty during normal operation.
+  cez_allowed_origins:
+    name: Allowed CEZ origins
+    description: >-
+      Advanced list of allowed HTTPS origins for diagnostic modes. Leave empty
+      during normal operation.
+  cez_username:
+    name: CEZ username
+    description: >-
+      Username used to sign in to the CEZ PND portal.
+  cez_password:
+    name: CEZ password
+    description: >-
+      Password used to sign in to the CEZ PND portal. The value is masked in
+      the user interface.
+  cez_ean:
+    name: Supply point EAN
+    description: >-
+      Eighteen-digit EAN identifier of the supply point whose data should be
+      collected.
+  cez_elm:
+    name: Meter number (ELM)
+    description: >-
+      Electricity meter identifier used when retrieving measured CEZ PND data.

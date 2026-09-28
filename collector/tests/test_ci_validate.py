@@ -58,7 +58,7 @@ class PullRequestPolicyTest(unittest.TestCase):
     def test_password_schema_is_allowed_but_values_are_rejected(self) -> None:
         validate_content(
             PurePosixPath("cez_pnd_collector/config.yaml"),
-            "cez_username: password?\ncez_password: password?\n",
+            "cez_username: password?\r\ncez_password: password?\r\n",
         )
         for assignment in (
             "cez_username: owner@example.invalid",

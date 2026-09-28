@@ -88,6 +88,7 @@ def validate_brand_image(path: PurePosixPath, content: bytes) -> None:
 def validate_content(path: PurePosixPath, content: str) -> None:
     """Reject recognizable secret values in changed text files."""
 
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     for label, pattern in FORBIDDEN_CONTENT.items():
         if pattern.search(content):
             raise ValueError(f"{label} detected in {path}")
