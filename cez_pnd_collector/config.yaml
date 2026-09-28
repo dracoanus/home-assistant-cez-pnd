@@ -1,5 +1,5 @@
 name: "CEZ PND Collector"
-version: "0.3.34"
+version: "0.3.35"
 slug: cez_pnd_collector
 description: "Secure CEZ PND electricity-data Collector with a local authenticated HTTPS API."
 url: "https://github.com/dracoanus/home-assistant-cez-pnd"
@@ -37,13 +37,8 @@ stdin: false
 discovery:
   - cez_pnd
 options:
-  cez_discovery_mode: false
-  cez_http_auth_discovery_mode: false
-  cez_requests_preauth_compatibility_mode: false
-  cez_data_probe_mode: false
   cez_sync_enabled: false
   cez_history_start: null
-  cez_data_probe_date: null
   cez_ean: null
   cez_elm: null
   cez_allowed_origins: []
@@ -52,10 +47,10 @@ schema:
   api_token_sha256: "match(^[a-f0-9]{64}$)?"
   tls_certificate_b64: password?
   tls_private_key_b64: password?
-  cez_discovery_mode: bool
-  cez_http_auth_discovery_mode: bool
-  cez_requests_preauth_compatibility_mode: bool
-  cez_data_probe_mode: bool
+  cez_discovery_mode: bool?
+  cez_http_auth_discovery_mode: bool?
+  cez_requests_preauth_compatibility_mode: bool?
+  cez_data_probe_mode: bool?
   cez_sync_enabled: bool
   cez_history_start: str?
   cez_data_probe_date: str?
