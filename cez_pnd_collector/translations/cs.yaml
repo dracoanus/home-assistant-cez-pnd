@@ -1,0 +1,86 @@
+configuration:
+  meter_id:
+    name: Legacy ID měřidla
+    description: >-
+      Pouze pro ruční nebo obnovovací konfiguraci. Při automatickém managed
+      pairingu ponechte nevyplněné.
+  api_token_sha256:
+    name: Legacy ověřovač API tokenu
+    description: >-
+      SHA-256 otisk API tokenu pro ruční nebo obnovovací konfiguraci. Při
+      automatickém managed pairingu ponechte nevyplněné.
+  tls_certificate_b64:
+    name: Legacy TLS certifikát
+    description: >-
+      Base64 kódovaný TLS certifikát pro ruční nebo obnovovací konfiguraci.
+      Při automatickém managed pairingu ponechte nevyplněné.
+  tls_private_key_b64:
+    name: Legacy TLS privátní klíč
+    description: >-
+      Base64 kódovaný privátní klíč k TLS certifikátu. Používejte pouze při
+      ruční nebo obnovovací konfiguraci.
+  cez_discovery_mode:
+    name: Legacy diagnostika přihlášení
+    description: >-
+      Starší jednorázový diagnostický režim se Selenium. Pro běžný provoz
+      ponechte vypnutý.
+  cez_http_auth_discovery_mode:
+    name: Diagnostika HTTP přihlášení
+    description: >-
+      Jednorázově ověří browserless přihlášení k ČEZ. Používejte pouze při
+      řešení problémů.
+  cez_requests_preauth_compatibility_mode:
+    name: Diagnostika PREAUTH kompatibility
+    description: >-
+      Pokročilý jednorázový diagnostický režim kompatibility PREAUTH.
+      Používejte pouze podle postupu pro řešení problémů.
+  cez_data_probe_mode:
+    name: Jednorázový test stažení dat
+    description: >-
+      Stáhne data pouze pro zadané datum a po dokončení skončí. Nelze používat
+      současně s automatickou synchronizací.
+  cez_sync_enabled:
+    name: Automatická synchronizace dat
+    description: >-
+      Pravidelně stahuje nová data z ČEZ PND a aktualizuje historii.
+  cez_history_start:
+    name: Začátek historie
+    description: >-
+      Datum, od kterého Collector doplní historická data. Použijte formát
+      YYYY-MM-DD.
+  cez_data_probe_date:
+    name: Datum testu dat
+    description: >-
+      Datum použité pouze při jednorázovém testu stažení dat. Použijte formát
+      YYYY-MM-DD.
+  cez_start_url:
+    name: Start URL pro legacy diagnostiku
+    description: >-
+      Pokročilá volba starší diagnostiky. Pro běžný provoz ponechte nevyplněné.
+  cez_auth_origin:
+    name: Auth origin pro legacy diagnostiku
+    description: >-
+      Pokročilá volba starší diagnostiky. Pro běžný provoz ponechte nevyplněné.
+  cez_allowed_origins:
+    name: Povolené CEZ adresy
+    description: >-
+      Pokročilý seznam povolených HTTPS adres pro diagnostické režimy. Pro
+      běžný provoz ponechte prázdné.
+  cez_username:
+    name: Uživatelské jméno ČEZ
+    description: >-
+      Přihlašovací jméno používané pro přístup do portálu ČEZ PND.
+  cez_password:
+    name: Heslo ČEZ
+    description: >-
+      Heslo používané pro přístup do portálu ČEZ PND. Hodnota je v rozhraní
+      maskovaná.
+  cez_ean:
+    name: EAN odběrného místa
+    description: >-
+      Osmnáctimístný EAN identifikátor odběrného místa, ze kterého se mají
+      načítat data.
+  cez_elm:
+    name: Číslo elektroměru (ELM)
+    description: >-
+      Identifikátor elektroměru používaný při získávání měřených dat z ČEZ PND.
