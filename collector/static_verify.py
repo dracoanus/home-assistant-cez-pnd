@@ -112,7 +112,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.35"
+assert VERSION == "0.3.36"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -455,7 +455,10 @@ for meter_failure_code in (
     assert meter_failure_code in DATA_PROBE_SOURCE
 assert 'entry.get("ean")' in DATA_PROBE_SOURCE
 assert 'entry.get("elm")' in DATA_PROBE_SOURCE
-assert 'parameters.append(("electrometerId", verified_elm))' in DATA_PROBE_SOURCE
+assert (
+    'parameters.append(("electrometerId", verified_meter.electrometer_id))'
+    in DATA_PROBE_SOURCE
+)
 assert 'parameters.append(("ean"' not in DATA_PROBE_SOURCE
 assert 'extra_headers={"Accept": "*/*"}' in DATA_PROBE_SOURCE
 assert 'extra_headers={"Accept": "application/json"}' not in DATA_PROBE_SOURCE
@@ -483,6 +486,28 @@ for safe_meter_field in (
     "selection_mode",
 ):
     assert safe_meter_field in HTTP_AUTH_SOURCE
+for freshness_diagnostic_field in (
+    "array_length",
+    "array_object_count",
+    "array_object_keys",
+    "selection_mode",
+    "id_device_set_present",
+    "electrometer_id_present",
+    "first_valid_interval_end",
+    "last_valid_interval_end",
+):
+    assert freshness_diagnostic_field in HTTP_AUTH_SOURCE
+for freshness_probe_field in (
+    "array_length",
+    "array_object_count",
+    "array_object_keys",
+    "selection_mode",
+    "id_device_set_present",
+    "electrometer_id_present",
+):
+    assert freshness_probe_field in DATA_PROBE_SOURCE
+assert "_utc_timestamp(min(valid_ends))" in DATA_PROBE_SOURCE
+assert "_utc_timestamp(max(valid_ends))" in DATA_PROBE_SOURCE
 assert "MAX_FILE_BYTES = 5 * 1024 * 1024" in CSV_PARSER_SOURCE
 assert "MAX_ROWS = 10_000" in CSV_PARSER_SOURCE
 assert "MAX_COLUMNS = 50" in CSV_PARSER_SOURCE
@@ -658,7 +683,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.35"',
+    'version: "0.3.36"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

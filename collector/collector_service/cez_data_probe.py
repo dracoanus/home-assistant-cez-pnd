@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 import json
 import os
@@ -37,7 +37,7 @@ from .cez_http_auth import (
     _default_resolver,
     _single_header,
 )
-from .cez_csv_models import ParsedPndData, PndChannel
+from .cez_csv_models import IntervalQuality, ParsedPndData, PndChannel
 from .cez_csv_parser import PndCsvParseError, parse_pnd_csv
 from .dataset_store import NormalizedDatasetStore
 from .runtime_config import DataProbeConfiguration
@@ -72,6 +72,20 @@ class _Metadata:
     meter_collection_present: bool
     usable: bool
     meter_records: tuple[tuple[str | None, str | None], ...]
+
+
+@dataclass(frozen=True)
+class _VerifiedMeter:
+    electrometer_id: str = field(repr=False)
+    selection_mode: str
+
+    def __post_init__(self) -> None:
+        if self.selection_mode not in {
+            "metadata",
+            "meter_api",
+            "configured_elm_fallback",
+        }:
+            raise ValueError("invalid meter selection source")
 
 
 class CezDataProbe:
@@ -121,7 +135,7 @@ class CezDataProbe:
         metadata, observation = self._validate_metadata(metadata_response)
         if metadata.usable:
             self._emit(SafeHttpAuthEvent("dashboard_metadata_verified"))
-        verified_elm = self._verified_electrometer_id(client, metadata, deadline)
+        verified_meter = self._verified_electrometer_id(client, metadata, deadline)
 
         interval_from = f"{self._start_day.strftime('%d.%m.%Y')} 00:00"
         interval_to = f"{self._end_day.strftime('%d.%m.%Y')} 00:00"
@@ -135,7 +149,7 @@ class CezDataProbe:
             "consumption",
             deadline,
             "data_probe_consumption_export_failed",
-            verified_elm,
+            verified_meter,
         )
         self._emit(SafeHttpAuthEvent("consumption_export_received"))
         production = self._export(
@@ -147,7 +161,7 @@ class CezDataProbe:
             "production",
             deadline,
             "data_probe_production_export_failed",
-            verified_elm,
+            verified_meter,
         )
         self._emit(SafeHttpAuthEvent("production_export_received"))
 
@@ -215,11 +229,18 @@ class CezDataProbe:
                 ),
             ))
             raise _AuthFailure(failure_code) from error
+        valid_ends = [
+            interval.interval_end
+            for interval in parsed.intervals
+            if interval.quality is IntervalQuality.VALID
+        ]
         self._emit(SafeHttpAuthEvent(
             f"data_probe_{channel.value}_parsed",
             parsed_observation=DataProbeParsedObservation(
                 channel.value, len(parsed.intervals), parsed.valid_count,
                 parsed.missing_count, parsed.invalid_count, parsed.complete,
+                _utc_timestamp(min(valid_ends)) if valid_ends else None,
+                _utc_timestamp(max(valid_ends)) if valid_ends else None,
             ),
         ))
         return parsed
@@ -334,7 +355,7 @@ class CezDataProbe:
 
     def _verified_electrometer_id(
         self, client: CezHttpAuthClient, metadata: _Metadata, deadline: float
-    ) -> str:
+    ) -> _VerifiedMeter:
         if (
             self._configuration.ean is None
             and self._configuration.electrometer_id is None
@@ -345,7 +366,7 @@ class CezDataProbe:
             self._configuration, list(metadata.meter_records)
         )
         if selected is not None:
-            return selected
+            return _VerifiedMeter(selected, "metadata")
 
         try:
             response = client.request_data_probe(
@@ -354,8 +375,10 @@ class CezDataProbe:
                 deadline,
                 extra_headers={"Accept": "*/*"},
             )
-        except _AuthFailure:
-            return self._meter_lookup_unavailable("request_failed")
+        except _AuthFailure as error:
+            return self._meter_lookup_unavailable(
+                "request_failed", failure_code=error.code
+            )
         if response.status != 200:
             return self._meter_lookup_unavailable("status", response.status)
         try:
@@ -393,23 +416,28 @@ class CezDataProbe:
             raise _AuthFailure(error_code)
         if selected is None:
             raise _AuthFailure("data_probe_meter_not_found")
-        return selected
+        return _VerifiedMeter(selected, "meter_api")
 
     def _meter_lookup_unavailable(
-        self, reason: str, status: int | None = None
-    ) -> str:
+        self,
+        reason: str,
+        status: int | None = None,
+        failure_code: str | None = None,
+    ) -> _VerifiedMeter:
         self._emit(
             SafeHttpAuthEvent(
                 "data_probe_meter_lookup_unavailable",
                 meter_lookup_unavailable_observation=(
-                    DataProbeMeterLookupUnavailableObservation(reason, status)
+                    DataProbeMeterLookupUnavailableObservation(
+                        reason, status, failure_code
+                    )
                 ),
             )
         )
         configured_elm = self._configuration.electrometer_id
         if configured_elm is None:
             raise _AuthFailure("data_probe_meter_lookup_failed")
-        return configured_elm
+        return _VerifiedMeter(configured_elm, "configured_elm_fallback")
 
     def _emit_meter_selection(
         self,
@@ -444,7 +472,7 @@ class CezDataProbe:
         channel: str,
         deadline: float,
         failure_code: str,
-        verified_elm: str,
+        verified_meter: _VerifiedMeter,
     ) -> bytes:
         parameters = [
             ("format", "csv"),
@@ -455,7 +483,7 @@ class CezDataProbe:
         parameters.extend(
             (("intervalFrom", interval_from), ("intervalTo", interval_to))
         )
-        parameters.append(("electrometerId", verified_elm))
+        parameters.append(("electrometerId", verified_meter.electrometer_id))
         url = f"{CEZ_PND_EXPORT_URL}?{urlencode(parameters)}"
         response = self._request(
             client,
@@ -465,7 +493,15 @@ class CezDataProbe:
             failure_code,
             headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL},
         )
-        observation = _export_observation(channel, response)
+        observation = _export_observation(
+            channel,
+            response,
+            start_day=self._start_day,
+            end_day=self._end_day,
+            id_assembly=assembly_id,
+            id_device_set_present=metadata.id_device_set is not None,
+            selection_mode=verified_meter.selection_mode,
+        )
         self._emit(
             SafeHttpAuthEvent(
                 "data_probe_export_response_observed",
@@ -681,6 +717,38 @@ def _metadata_observation(
     collection_types: tuple[tuple[str, str], ...] = ()
     id_present = False
     id_type: str | None = None
+    array_length: int | None = None
+    array_object_count: int | None = None
+    array_keys: set[str] = set()
+    collection_present = {
+        "meters": False,
+        "devices": False,
+        "electrometers": False,
+    }
+    collection_counts = {name: 0 for name in collection_present}
+    collection_counts_valid = {name: True for name in collection_present}
+    id_types: set[str] = set()
+
+    def inspect_mapping(item: dict[object, object], *, collect_keys: bool) -> None:
+        nonlocal id_present
+        if collect_keys:
+            for raw_key in item:
+                key = raw_key if _safe_top_level_key(raw_key) else "[redacted-key]"
+                if len(array_keys) < 50 or key in array_keys:
+                    array_keys.add(key)
+        if "idDeviceSet" in item:
+            id_present = True
+            id_types.add(_json_type(item["idDeviceSet"]))
+        for name in collection_present:
+            if name not in item:
+                continue
+            collection_present[name] = True
+            value = item[name]
+            if isinstance(value, list):
+                collection_counts[name] += len(value)
+            else:
+                collection_counts_valid[name] = False
+
     if isinstance(payload, dict):
         key_count = len(payload)
         keys = tuple(
@@ -698,9 +766,15 @@ def _metadata_observation(
                 if key in payload
             )
         )
-        id_present = "idDeviceSet" in payload
-        if id_present:
-            id_type = _json_type(payload["idDeviceSet"])
+        inspect_mapping(payload, collect_keys=False)
+    elif isinstance(payload, list):
+        array_length = len(payload)
+        objects = [item for item in payload if isinstance(item, dict)]
+        array_object_count = len(objects)
+        for item in objects:
+            inspect_mapping(item, collect_keys=True)
+    if len(id_types) == 1:
+        id_type = next(iter(id_types))
     return DashboardMetadataObservation(
         status=response.status,
         body_bytes=len(response.body),
@@ -712,6 +786,28 @@ def _metadata_observation(
         collection_types=collection_types,
         id_device_set_present=id_present,
         id_device_set_type=id_type,
+        array_length=array_length,
+        array_object_count=array_object_count,
+        array_object_keys=tuple(sorted(array_keys)),
+        array_meter_collection_present=collection_present["meters"],
+        array_meter_collection_count=(
+            collection_counts["meters"]
+            if collection_present["meters"] and collection_counts_valid["meters"]
+            else None
+        ),
+        array_device_collection_present=collection_present["devices"],
+        array_device_collection_count=(
+            collection_counts["devices"]
+            if collection_present["devices"] and collection_counts_valid["devices"]
+            else None
+        ),
+        array_electrometer_collection_present=collection_present["electrometers"],
+        array_electrometer_collection_count=(
+            collection_counts["electrometers"]
+            if collection_present["electrometers"]
+            and collection_counts_valid["electrometers"]
+            else None
+        ),
     )
 
 
@@ -761,7 +857,14 @@ def _header_present(response: HttpResponse, name: str) -> bool:
 
 
 def _export_observation(
-    channel: str, response: HttpResponse
+    channel: str,
+    response: HttpResponse,
+    *,
+    start_day: date,
+    end_day: date,
+    id_assembly: str,
+    id_device_set_present: bool,
+    selection_mode: str,
 ) -> DataProbeExportObservation:
     body_bytes = len(response.body)
     return DataProbeExportObservation(
@@ -778,7 +881,19 @@ def _export_observation(
             response, "content-disposition"
         ),
         content_encoding_present=_header_present(response, "content-encoding"),
+        start_day=start_day.isoformat(),
+        end_day=end_day.isoformat(),
+        id_assembly=id_assembly,
+        id_device_set_present=id_device_set_present,
+        electrometer_id_present=True,
+        selection_mode=selection_mode,
     )
+
+
+def _utc_timestamp(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("UTC timestamp required")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
