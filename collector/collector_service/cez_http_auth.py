@@ -9,6 +9,7 @@ verification as an explicit later gate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from html.parser import HTMLParser
 import ipaddress
@@ -127,6 +128,15 @@ class DashboardMetadataObservation:
     collection_types: tuple[tuple[str, str], ...] = ()
     id_device_set_present: bool = False
     id_device_set_type: str | None = None
+    array_length: int | None = None
+    array_object_count: int | None = None
+    array_object_keys: tuple[str, ...] = ()
+    array_meter_collection_present: bool = False
+    array_meter_collection_count: int | None = None
+    array_device_collection_present: bool = False
+    array_device_collection_count: int | None = None
+    array_electrometer_collection_present: bool = False
+    array_electrometer_collection_count: int | None = None
 
     def __post_init__(self) -> None:
         if self.status != 200 or not 0 <= self.body_bytes <= MAX_RESPONSE_BODY_BYTES:
@@ -165,6 +175,41 @@ class DashboardMetadataObservation:
             _JSON_TYPE_NAMES - {"unknown"}
         ):
             raise ValueError("unsafe dashboard metadata idDeviceSet type")
+        if (self.array_length is None) != (self.array_object_count is None):
+            raise ValueError("incomplete dashboard metadata array evidence")
+        if self.array_length is not None and (
+            self.json_root_type != "array"
+            or type(self.array_length) is not int
+            or type(self.array_object_count) is not int
+            or not 0 <= self.array_object_count <= self.array_length
+            or self.array_length > MAX_RESPONSE_BODY_BYTES
+        ):
+            raise ValueError("unsafe dashboard metadata array evidence")
+        if self.array_object_keys and self.json_root_type != "array":
+            raise ValueError("unexpected dashboard metadata array keys")
+        if len(self.array_object_keys) > 50 or self.array_object_keys != tuple(
+            sorted(set(self.array_object_keys))
+        ):
+            raise ValueError("unsafe dashboard metadata array keys")
+        if any(
+            key != "[redacted-key]" and not _SAFE_METADATA_KEY.fullmatch(key)
+            for key in self.array_object_keys
+        ):
+            raise ValueError("unsafe dashboard metadata array key")
+        for present, count in (
+            (self.array_meter_collection_present, self.array_meter_collection_count),
+            (self.array_device_collection_present, self.array_device_collection_count),
+            (
+                self.array_electrometer_collection_present,
+                self.array_electrometer_collection_count,
+            ),
+        ):
+            if type(present) is not bool or count is not None and (
+                not present
+                or type(count) is not int
+                or not 0 <= count <= MAX_RESPONSE_BODY_BYTES
+            ):
+                raise ValueError("unsafe dashboard metadata collection count")
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -182,6 +227,29 @@ class DashboardMetadataObservation:
             result["collection_types"] = dict(self.collection_types)
         if self.id_device_set_type is not None:
             result["id_device_set_type"] = self.id_device_set_type
+        if self.array_length is not None:
+            result["array_length"] = self.array_length
+            result["array_object_count"] = self.array_object_count
+            result["array_object_keys"] = list(self.array_object_keys)
+        result.update(
+            {
+                "array_meter_collection_present": self.array_meter_collection_present,
+                "array_device_collection_present": self.array_device_collection_present,
+                "array_electrometer_collection_present": (
+                    self.array_electrometer_collection_present
+                ),
+            }
+        )
+        for name, count in (
+            ("array_meter_collection_count", self.array_meter_collection_count),
+            ("array_device_collection_count", self.array_device_collection_count),
+            (
+                "array_electrometer_collection_count",
+                self.array_electrometer_collection_count,
+            ),
+        ):
+            if count is not None:
+                result[name] = count
         return result
 
 
@@ -200,6 +268,12 @@ class DataProbeExportObservation:
     looks_like_json: bool
     content_disposition_present: bool
     content_encoding_present: bool
+    start_day: str
+    end_day: str
+    id_assembly: str
+    id_device_set_present: bool
+    electrometer_id_present: bool
+    selection_mode: str
 
     def __post_init__(self) -> None:
         if self.channel not in {"consumption", "production"}:
@@ -218,6 +292,31 @@ class DataProbeExportObservation:
             self.body_bytes > MAX_RESPONSE_BODY_BYTES
         ):
             raise ValueError("inconsistent data probe export size state")
+        try:
+            start_day = date.fromisoformat(self.start_day)
+            end_day = date.fromisoformat(self.end_day)
+        except (TypeError, ValueError) as error:
+            raise ValueError("unsafe data probe export range") from error
+        if (
+            start_day.isoformat() != self.start_day
+            or end_day.isoformat() != self.end_day
+            or start_day >= end_day
+            or (end_day - start_day).days > 31
+        ):
+            raise ValueError("unsafe data probe export range")
+        expected_assembly = "-1001" if self.channel == "consumption" else "-1002"
+        if self.id_assembly != expected_assembly:
+            raise ValueError("unsafe data probe export assembly")
+        if type(self.id_device_set_present) is not bool or type(
+            self.electrometer_id_present
+        ) is not bool or not self.electrometer_id_present:
+            raise ValueError("unsafe data probe export selector evidence")
+        if self.selection_mode not in {
+            "metadata",
+            "meter_api",
+            "configured_elm_fallback",
+        }:
+            raise ValueError("unsafe data probe export selection mode")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -232,6 +331,12 @@ class DataProbeExportObservation:
             "looks_like_json": self.looks_like_json,
             "content_disposition_present": self.content_disposition_present,
             "content_encoding_present": self.content_encoding_present,
+            "start_day": self.start_day,
+            "end_day": self.end_day,
+            "id_assembly": self.id_assembly,
+            "id_device_set_present": self.id_device_set_present,
+            "electrometer_id_present": self.electrometer_id_present,
+            "selection_mode": self.selection_mode,
         }
 
 
@@ -283,6 +388,7 @@ class DataProbeMeterLookupUnavailableObservation:
 
     reason: str
     status: int | None = None
+    code: str | None = None
 
     def __post_init__(self) -> None:
         if self.reason not in {
@@ -301,11 +407,18 @@ class DataProbeMeterLookupUnavailableObservation:
             raise ValueError("unexpected meter lookup status")
         if self.reason != "request_failed" and self.status is None:
             raise ValueError("missing meter lookup status")
+        if self.reason == "request_failed":
+            if self.code not in SAFE_ERROR_CODES:
+                raise ValueError("unsafe meter lookup failure code")
+        elif self.code is not None:
+            raise ValueError("unexpected meter lookup failure code")
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"reason": self.reason}
         if self.status is not None:
             result["status"] = self.status
+        if self.code is not None:
+            result["code"] = self.code
         return result
 
 
@@ -317,6 +430,8 @@ class DataProbeParsedObservation:
     missing_count: int
     invalid_count: int
     complete: bool
+    first_valid_interval_end: str | None = None
+    last_valid_interval_end: str | None = None
 
     def __post_init__(self) -> None:
         if self.channel not in {"consumption", "production"}:
@@ -331,9 +446,18 @@ class DataProbeParsedObservation:
             )
         ) or self.valid_count + self.missing_count + self.invalid_count != self.interval_count or type(self.complete) is not bool:
             raise ValueError("unsafe parsed counts")
+        timestamps = (self.first_valid_interval_end, self.last_valid_interval_end)
+        if (self.valid_count == 0) != all(value is None for value in timestamps):
+            raise ValueError("inconsistent parsed valid interval evidence")
+        if self.valid_count > 0:
+            if any(
+                value is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value)
+                for value in timestamps
+            ) or self.first_valid_interval_end > self.last_valid_interval_end:
+                raise ValueError("unsafe parsed valid interval evidence")
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "channel": self.channel,
             "interval_count": self.interval_count,
             "valid_count": self.valid_count,
@@ -341,6 +465,10 @@ class DataProbeParsedObservation:
             "invalid_count": self.invalid_count,
             "complete": self.complete,
         }
+        if self.first_valid_interval_end is not None:
+            result["first_valid_interval_end"] = self.first_valid_interval_end
+            result["last_valid_interval_end"] = self.last_valid_interval_end
+        return result
 
 
 @dataclass(frozen=True)

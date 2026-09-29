@@ -355,6 +355,18 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertIn("data_probe_consumption_parsed", names)
         self.assertIn("data_probe_production_parsed", names)
         self.assertIn("data_probe_dataset_committed", names)
+        parsed_events = [
+            event.as_dict()
+            for event in events
+            if event.event in {
+                "data_probe_consumption_parsed",
+                "data_probe_production_parsed",
+            }
+        ]
+        self.assertEqual(len(parsed_events), 2)
+        for event in parsed_events:
+            self.assertEqual(event["first_valid_interval_end"], "2026-09-08T00:15:00Z")
+            self.assertEqual(event["last_valid_interval_end"], "2026-09-08T00:15:00Z")
 
     def test_automatic_collection_does_not_persist_raw_responses(self) -> None:
         session = _successful_session()
@@ -402,6 +414,7 @@ class CezDataProbeTests(unittest.TestCase):
         )
         for start_day, end_day, expected_from, expected_to in cases:
             with self.subTest(start_day=start_day), tempfile.TemporaryDirectory() as temporary:
+                events: list[cez_http_auth.SafeHttpAuthEvent] = []
                 session = _successful_session()
                 transport = requests_preauth.RequestsSessionTransport(
                     resolver=_resolver, session_factory=lambda: session
@@ -432,7 +445,7 @@ class CezDataProbeTests(unittest.TestCase):
                         start_day=start_day,
                         end_day=end_day,
                         now=lambda: next(timestamps),
-                        emit=lambda _event: None,
+                        emit=events.append,
                     )
                 self.assertEqual(
                     result.status, cez_http_auth.AuthStatus.AUTHENTICATED
@@ -444,6 +457,22 @@ class CezDataProbeTests(unittest.TestCase):
                 for query in queries:
                     self.assertEqual(query["intervalFrom"], [expected_from])
                     self.assertEqual(query["intervalTo"], [expected_to])
+                observations = [
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_export_response_observed"
+                ]
+                self.assertEqual(len(observations), 2)
+                self.assertEqual(
+                    {item["id_assembly"] for item in observations},
+                    {"-1001", "-1002"},
+                )
+                for item in observations:
+                    self.assertEqual(item["start_day"], start_day.isoformat())
+                    self.assertEqual(item["end_day"], end_day.isoformat())
+                    self.assertTrue(item["id_device_set_present"])
+                    self.assertTrue(item["electrometer_id_present"])
+                    self.assertEqual(item["selection_mode"], "metadata")
 
     def test_collection_range_is_bounded_to_31_days(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid collection range"):
@@ -541,7 +570,10 @@ class CezDataProbeTests(unittest.TestCase):
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
         client = _ProbeClient(
             [
-                _http_response(200, b'[{"private":"value"}]'),
+                _http_response(
+                    200,
+                    b'[{"idDeviceSet":"private-device","meters":[{"elm":"private"}],"devices":[]},{"electrometers":[],"safeKey":"private-value"}]',
+                ),
                 _http_response(200, b'[{"elm":"secret-elm"}]'),
                 _http_response(200, b"consumption\n", "text/csv"),
                 _http_response(200, b"production\n", "text/csv"),
@@ -556,8 +588,22 @@ class CezDataProbeTests(unittest.TestCase):
                 (output / cez_data_probe.METADATA_SUMMARY_NAME).read_text()
             )
         self.assertFalse(summary["dashboard_json_object"])
-        self.assertFalse(summary["id_device_set_present"])
+        self.assertTrue(summary["id_device_set_present"])
+        self.assertEqual(summary["id_device_set_type"], "string")
         self.assertEqual(summary["json_root_type"], "array")
+        self.assertEqual(summary["array_length"], 2)
+        self.assertEqual(summary["array_object_count"], 2)
+        self.assertEqual(
+            summary["array_object_keys"],
+            ["devices", "electrometers", "idDeviceSet", "meters", "safeKey"],
+        )
+        self.assertFalse(summary["meter_collection_present"])
+        self.assertTrue(summary["array_meter_collection_present"])
+        self.assertEqual(summary["array_meter_collection_count"], 1)
+        self.assertTrue(summary["array_device_collection_present"])
+        self.assertEqual(summary["array_device_collection_count"], 0)
+        self.assertTrue(summary["array_electrometer_collection_present"])
+        self.assertEqual(summary["array_electrometer_collection_count"], 0)
         self.assertIn(
             {
                 "event": "dashboard_metadata_unusable",
@@ -565,6 +611,12 @@ class CezDataProbeTests(unittest.TestCase):
             },
             [event.as_dict() for event in events],
         )
+        metadata_observation = next(
+            event.as_dict()
+            for event in events
+            if event.event == "dashboard_metadata_response_observed"
+        )
+        self.assertTrue(metadata_observation["array_meter_collection_present"])
         self.assertNotIn(
             "dashboard_metadata_verified", [event.event for event in events]
         )
@@ -578,6 +630,18 @@ class CezDataProbeTests(unittest.TestCase):
             [parse_qs(urlsplit(call[0]).query)["idAssembly"] for call in client.calls[2:]],
             [["-1001"], ["-1002"]],
         )
+        export_observations = [
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_export_response_observed"
+        ]
+        self.assertEqual(
+            {event["selection_mode"] for event in export_observations},
+            {"meter_api"},
+        )
+        rendered = json.dumps([event.as_dict() for event in events])
+        for private in ("private-device", "private-value", "secret-elm"):
+            self.assertNotIn(private, rendered)
 
     def test_configured_elm_uses_exact_meters_fallback_without_logging_values(self) -> None:
         events: list[cez_http_auth.SafeHttpAuthEvent] = []
@@ -610,17 +674,23 @@ class CezDataProbeTests(unittest.TestCase):
 
     def test_unavailable_meter_lookup_is_best_effort_with_configured_elm(self) -> None:
         cases: tuple[
-            tuple[cez_http_auth.HttpResponse | BaseException, str, int | None], ...
+            tuple[
+                cez_http_auth.HttpResponse | BaseException,
+                str,
+                int | None,
+                str | None,
+            ],
+            ...,
         ] = (
-            (cez_http_auth._AuthFailure("auth_transport_failed"), "request_failed", None),
-            (cez_http_auth._AuthFailure("auth_operation_timeout"), "request_failed", None),
-            (_http_response(503, b"failure"), "status", 503),
-            (_http_response(200, b"[]", "text/plain"), "content_type", 200),
-            (_http_response(200, b"not-json"), "json", 200),
-            (_http_response(200, b"{}"), "root_type", 200),
-            (_http_response(200, b"[]"), "empty", 200),
+            (cez_http_auth._AuthFailure("auth_transport_failed"), "request_failed", None, "auth_transport_failed"),
+            (cez_http_auth._AuthFailure("auth_operation_timeout"), "request_failed", None, "auth_operation_timeout"),
+            (_http_response(503, b"failure"), "status", 503, None),
+            (_http_response(200, b"[]", "text/plain"), "content_type", 200, None),
+            (_http_response(200, b"not-json"), "json", 200, None),
+            (_http_response(200, b"{}"), "root_type", 200, None),
+            (_http_response(200, b"[]"), "empty", 200, None),
         )
-        for meter_response, reason, status in cases:
+        for meter_response, reason, status, code in cases:
             with self.subTest(reason=reason, response=type(meter_response).__name__):
                 events: list[cez_http_auth.SafeHttpAuthEvent] = []
                 client = _ProbeClient(
@@ -648,12 +718,23 @@ class CezDataProbeTests(unittest.TestCase):
                 }
                 if status is not None:
                     expected["status"] = status
+                if code is not None:
+                    expected["code"] = code
                 self.assertEqual(observed, expected)
                 self.assertIn("consumption_export_received", [event.event for event in events])
                 self.assertIn("production_export_received", [event.event for event in events])
                 for url, _, _ in client.calls[2:]:
                     query = parse_qs(urlsplit(url).query)
                     self.assertEqual(query["electrometerId"], ["secret-elm"])
+                export_observations = [
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_export_response_observed"
+                ]
+                self.assertEqual(
+                    {item["selection_mode"] for item in export_observations},
+                    {"configured_elm_fallback"},
+                )
 
     def test_invalid_utf8_meter_lookup_is_best_effort_with_configured_elm(self) -> None:
         client, events, error = self._run_unavailable_meter_lookup(
@@ -694,9 +775,17 @@ class CezDataProbeTests(unittest.TestCase):
         )
         self.assertEqual(error, "data_probe_meter_lookup_failed")
         self.assertIn(
-            {"event": "data_probe_meter_lookup_unavailable", "reason": "request_failed"},
+            {
+                "event": "data_probe_meter_lookup_unavailable",
+                "reason": "request_failed",
+                "code": "auth_operation_timeout",
+            },
             [event.as_dict() for event in events],
         )
+        with self.assertRaises(ValueError):
+            cez_http_auth.DataProbeMeterLookupUnavailableObservation(
+                "request_failed", code="private-error-detail"
+            )
 
     def _run_unavailable_meter_lookup(
         self,
