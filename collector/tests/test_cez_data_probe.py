@@ -14,7 +14,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from collector_service import (
     cez_data_probe,
@@ -24,6 +24,7 @@ from collector_service import (
     server,
 )
 from collector_service.cez_csv_models import IntervalQuality, IntervalRecord, ParsedPndData, PndChannel
+from collector_service.cez_csv_parser import PndCsvParseError
 from collector_service.dataset_store import NormalizedDatasetStore
 
 
@@ -45,6 +46,27 @@ def _parsed(channel: PndChannel) -> ParsedPndData:
     return ParsedPndData(channel, channel.profile_marker, "utf-8", ";", (
         IntervalRecord(channel, start, start + timedelta(minutes=15), Decimal("1.25"), IntervalQuality.VALID, date(2026, 9, 8)),
     ))
+
+
+def _parsed_at(
+    channel: PndChannel, interval_end: datetime, value: str = "1.25"
+) -> ParsedPndData:
+    return ParsedPndData(
+        channel,
+        channel.profile_marker,
+        "utf-8",
+        ";",
+        (
+            IntervalRecord(
+                channel,
+                interval_end - timedelta(minutes=15),
+                interval_end,
+                Decimal(value),
+                IntervalQuality.VALID,
+                interval_end.date(),
+            ),
+        ),
+    )
 
 
 class _Headers(dict[str, str]):
@@ -642,6 +664,236 @@ class CezDataProbeTests(unittest.TestCase):
         rendered = json.dumps([event.as_dict() for event in events])
         for private in ("private-device", "private-value", "secret-elm"):
             self.assertNotIn(private, rendered)
+
+    def test_current_day_shadow_uses_one_exact_metadata_row_without_changing_normal_export(self) -> None:
+        private_device_ids = (314159, 271828)
+        metadata = json.dumps(
+            [
+                {
+                    "idAssembly": -1001,
+                    "electrometerId": "secret-elm",
+                    "idDeviceSet": private_device_ids[0],
+                },
+                {
+                    "idAssembly": -1002,
+                    "electrometerId": "secret-elm",
+                    "idDeviceSet": private_device_ids[1],
+                },
+            ]
+        ).encode()
+        client = _ProbeClient(
+            [
+                _http_response(200, metadata),
+                cez_http_auth._AuthFailure("auth_transport_failed"),
+                _http_response(200, CONSUMPTION, "text/csv"),
+                _http_response(200, PRODUCTION, "text/csv"),
+                _http_response(200, CONSUMPTION, "text/csv"),
+                _http_response(200, PRODUCTION, "text/csv"),
+            ]
+        )
+        events: list[cez_http_auth.SafeHttpAuthEvent] = []
+        normal_consumption = _parsed_at(
+            PndChannel.CONSUMPTION, datetime(2026, 9, 8, 1, tzinfo=UTC)
+        )
+        normal_production = _parsed_at(
+            PndChannel.PRODUCTION, datetime(2026, 9, 8, 1, tzinfo=UTC)
+        )
+        shadow_consumption = _parsed_at(
+            PndChannel.CONSUMPTION, datetime(2026, 9, 8, 2, tzinfo=UTC)
+        )
+        shadow_production = _parsed_at(
+            PndChannel.PRODUCTION, datetime(2026, 9, 8, 2, tzinfo=UTC)
+        )
+        store = mock.Mock()
+        store.commit_dataset.return_value = SimpleNamespace(state="partial")
+        with mock.patch.object(
+            cez_data_probe,
+            "parse_pnd_csv",
+            side_effect=[
+                normal_consumption,
+                normal_production,
+                shadow_consumption,
+                shadow_production,
+            ],
+        ):
+            cez_data_probe.CezDataProbe(
+                _configuration(),
+                dataset_store=store,
+                persist_raw_outputs=False,
+                current_day_shadow=True,
+                emit=events.append,
+            ).collect(client)  # type: ignore[arg-type]
+
+        normal_queries = [parse_qsl(urlsplit(call[0]).query) for call in client.calls[2:4]]
+        self.assertEqual(
+            normal_queries,
+            [
+                [
+                    ("format", "csv"),
+                    ("idAssembly", "-1001"),
+                    ("intervalFrom", "08.09.2026 00:00"),
+                    ("intervalTo", "09.09.2026 00:00"),
+                    ("electrometerId", "secret-elm"),
+                ],
+                [
+                    ("format", "csv"),
+                    ("idAssembly", "-1002"),
+                    ("intervalFrom", "08.09.2026 00:00"),
+                    ("intervalTo", "09.09.2026 00:00"),
+                    ("electrometerId", "secret-elm"),
+                ],
+            ],
+        )
+        shadow_queries = [parse_qs(urlsplit(call[0]).query) for call in client.calls[4:]]
+        self.assertEqual(len(shadow_queries), 2)
+        self.assertEqual(
+            [query["idDeviceSet"] for query in shadow_queries],
+            [[str(private_device_ids[0])], [str(private_device_ids[1])]],
+        )
+        committed = store.commit_dataset.call_args.args
+        self.assertIs(committed[0], normal_consumption)
+        self.assertIs(committed[1], normal_production)
+        comparisons = [
+            event.as_dict()
+            for event in events
+            if event.event == "data_probe_shadow_comparison"
+        ]
+        self.assertEqual(len(comparisons), 2)
+        self.assertTrue(all(item["shadow_executed"] for item in comparisons))
+        self.assertTrue(all(item["selection_result"] == "matched" for item in comparisons))
+        self.assertTrue(all(item["shadow_has_newer_data"] for item in comparisons))
+        rendered = json.dumps(comparisons)
+        self.assertNotIn("secret-elm", rendered)
+        for private_id in private_device_ids:
+            self.assertNotIn(str(private_id), rendered)
+
+    def test_current_day_shadow_skips_zero_ambiguous_and_invalid_matches(self) -> None:
+        cases = {
+            "no_matching_row": [
+                {"idAssembly": -1001, "electrometerId": "other-elm", "idDeviceSet": 10},
+                {"idAssembly": -1002, "electrometerId": "other-elm", "idDeviceSet": 11},
+            ],
+            "ambiguous_matching_rows": [
+                {"idAssembly": assembly, "electrometerId": "secret-elm", "idDeviceSet": device}
+                for assembly in (-1001, -1002)
+                for device in (10, 11)
+            ],
+            "invalid_id_device_set": [
+                {"idAssembly": -1001, "electrometerId": "secret-elm", "idDeviceSet": "private"},
+                {"idAssembly": -1002, "electrometerId": "secret-elm", "idDeviceSet": False},
+            ],
+        }
+        for expected, rows in cases.items():
+            with self.subTest(expected=expected):
+                client = _ProbeClient(
+                    [
+                        _http_response(200, json.dumps(rows).encode()),
+                        cez_http_auth._AuthFailure("auth_transport_failed"),
+                        _http_response(200, CONSUMPTION, "text/csv"),
+                        _http_response(200, PRODUCTION, "text/csv"),
+                    ]
+                )
+                events: list[cez_http_auth.SafeHttpAuthEvent] = []
+                store = mock.Mock()
+                store.commit_dataset.return_value = SimpleNamespace(state="partial")
+                with mock.patch.object(
+                    cez_data_probe,
+                    "parse_pnd_csv",
+                    side_effect=[
+                        _parsed(PndChannel.CONSUMPTION),
+                        _parsed(PndChannel.PRODUCTION),
+                    ],
+                ):
+                    cez_data_probe.CezDataProbe(
+                        _configuration(),
+                        dataset_store=store,
+                        persist_raw_outputs=False,
+                        current_day_shadow=True,
+                        emit=events.append,
+                    ).collect(client)  # type: ignore[arg-type]
+                self.assertEqual(len(client.calls), 4)
+                comparisons = [
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_shadow_comparison"
+                ]
+                self.assertEqual(len(comparisons), 2)
+                self.assertEqual(
+                    {item["selection_result"] for item in comparisons}, {expected}
+                )
+                self.assertTrue(
+                    all(not item["shadow_executed"] for item in comparisons)
+                )
+
+    def test_shadow_request_and_parser_failures_do_not_affect_normal_commit(self) -> None:
+        metadata = json.dumps(
+            [
+                {"idAssembly": -1001, "electrometerId": "secret-elm", "idDeviceSet": 10},
+                {"idAssembly": -1002, "electrometerId": "secret-elm", "idDeviceSet": 11},
+            ]
+        ).encode()
+        cases = (
+            (
+                [
+                    cez_http_auth._AuthFailure("auth_transport_failed"),
+                    cez_http_auth._AuthFailure("auth_operation_timeout"),
+                ],
+                [],
+                "shadow_request_failed",
+            ),
+            (
+                [
+                    _http_response(200, CONSUMPTION, "text/csv"),
+                    _http_response(200, PRODUCTION, "text/csv"),
+                ],
+                [
+                    PndCsvParseError("csv_schema_invalid"),
+                    PndCsvParseError("csv_schema_invalid"),
+                ],
+                "shadow_parse_failed",
+            ),
+        )
+        for shadow_responses, shadow_parses, expected in cases:
+            with self.subTest(expected=expected):
+                client = _ProbeClient(
+                    [
+                        _http_response(200, metadata),
+                        cez_http_auth._AuthFailure("auth_transport_failed"),
+                        _http_response(200, CONSUMPTION, "text/csv"),
+                        _http_response(200, PRODUCTION, "text/csv"),
+                        *shadow_responses,
+                    ]
+                )
+                normal = [
+                    _parsed(PndChannel.CONSUMPTION),
+                    _parsed(PndChannel.PRODUCTION),
+                ]
+                store = mock.Mock()
+                store.commit_dataset.return_value = SimpleNamespace(state="partial")
+                events: list[cez_http_auth.SafeHttpAuthEvent] = []
+                with mock.patch.object(
+                    cez_data_probe,
+                    "parse_pnd_csv",
+                    side_effect=[*normal, *shadow_parses],
+                ):
+                    cez_data_probe.CezDataProbe(
+                        _configuration(),
+                        dataset_store=store,
+                        persist_raw_outputs=False,
+                        current_day_shadow=True,
+                        emit=events.append,
+                    ).collect(client)  # type: ignore[arg-type]
+                committed = store.commit_dataset.call_args.args
+                self.assertEqual(committed[:2], tuple(normal))
+                comparisons = [
+                    event.as_dict()
+                    for event in events
+                    if event.event == "data_probe_shadow_comparison"
+                ]
+                self.assertEqual(
+                    {item["selection_result"] for item in comparisons}, {expected}
+                )
+                self.assertTrue(all(item["shadow_executed"] for item in comparisons))
 
     def test_configured_elm_uses_exact_meters_fallback_without_logging_values(self) -> None:
         events: list[cez_http_auth.SafeHttpAuthEvent] = []

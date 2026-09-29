@@ -221,6 +221,7 @@ def run_sync_cycle(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     transport_factory: Callable[[], RequestsSessionTransport] = RequestsSessionTransport,
     emit_auth: Callable[[SafeHttpAuthEvent], None] = emit_http_auth_event,
+    current_day_shadow: bool = False,
 ) -> SyncCycleOutcome:
     """Reuse the proven collection path without persisting raw CEZ responses."""
 
@@ -243,6 +244,7 @@ def run_sync_cycle(
         end_day=end_day,
         now=now,
         emit=capture,
+        current_day_shadow=current_day_shadow,
     )
     if result.status is not AuthStatus.AUTHENTICATED:
         return SyncCycleOutcome(False, code=result.code)
@@ -315,7 +317,11 @@ class SyncWorker:
         self, configuration: SyncConfiguration, start_day: date, end_day: date
     ) -> SyncCycleOutcome:
         return run_sync_cycle(
-            configuration, start_day, end_day, store=self._store
+            configuration,
+            start_day,
+            end_day,
+            store=self._store,
+            current_day_shadow=True,
         )
 
     def _scheduled_current_day(self, current_day: date) -> SyncCycleOutcome:

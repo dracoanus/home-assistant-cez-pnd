@@ -28,6 +28,7 @@ from .cez_http_auth import (
     DataProbeMeterLookupUnavailableObservation,
     DataProbeMeterSelectionObservation,
     DataProbeParsedObservation,
+    DataProbeShadowComparisonObservation,
     HttpResponse,
     HttpTransport,
     MAX_RESPONSE_BODY_BYTES,
@@ -64,6 +65,15 @@ CSV_CONTENT_TYPES = frozenset(
     }
 )
 MAX_COLLECTION_RANGE_DAYS = 31
+MAX_SHADOW_ID_DEVICE_SET = (1 << 63) - 1
+
+
+@dataclass(frozen=True)
+class _ShadowMetadataRow:
+    assembly_id: int | None
+    electrometer_id: str | None = field(repr=False)
+    id_device_set: int | None = field(repr=False)
+    id_device_set_valid: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,8 @@ class _Metadata:
     meter_collection_present: bool
     usable: bool
     meter_records: tuple[tuple[str | None, str | None], ...]
+    shadow_array: bool = False
+    shadow_rows: tuple[_ShadowMetadataRow, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -103,6 +115,7 @@ class CezDataProbe:
         collected_at: datetime | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         emit: Callable[[SafeHttpAuthEvent], None] | None = None,
+        current_day_shadow: bool = False,
     ) -> None:
         self._configuration = configuration
         self._output_directory = output_directory
@@ -119,6 +132,7 @@ class CezDataProbe:
         self._collected_at = collected_at
         self._now = now
         self._emit = emit or (lambda _event: None)
+        self._current_day_shadow = current_day_shadow
 
     def collect(self, client: CezHttpAuthClient) -> None:
         """Run after authentication and before its mandatory session cleanup."""
@@ -210,6 +224,29 @@ class CezDataProbe:
                     status.state,
                 ),
             ))
+            if self._current_day_shadow:
+                self._run_shadow_comparison(
+                    client,
+                    metadata,
+                    verified_meter,
+                    interval_from,
+                    interval_to,
+                    "-1001",
+                    PndChannel.CONSUMPTION,
+                    parsed_consumption,
+                    deadline,
+                )
+                self._run_shadow_comparison(
+                    client,
+                    metadata,
+                    verified_meter,
+                    interval_from,
+                    interval_to,
+                    "-1002",
+                    PndChannel.PRODUCTION,
+                    parsed_production,
+                    deadline,
+                )
         self._emit(SafeHttpAuthEvent("data_probe_complete"))
 
     def _parse(
@@ -229,21 +266,144 @@ class CezDataProbe:
                 ),
             ))
             raise _AuthFailure(failure_code) from error
-        valid_ends = [
-            interval.interval_end
-            for interval in parsed.intervals
-            if interval.quality is IntervalQuality.VALID
-        ]
+        first_valid, last_valid = _valid_interval_bounds(parsed)
         self._emit(SafeHttpAuthEvent(
             f"data_probe_{channel.value}_parsed",
             parsed_observation=DataProbeParsedObservation(
                 channel.value, len(parsed.intervals), parsed.valid_count,
                 parsed.missing_count, parsed.invalid_count, parsed.complete,
-                _utc_timestamp(min(valid_ends)) if valid_ends else None,
-                _utc_timestamp(max(valid_ends)) if valid_ends else None,
+                first_valid,
+                last_valid,
             ),
         ))
         return parsed
+
+    def _run_shadow_comparison(
+        self,
+        client: CezHttpAuthClient,
+        metadata: _Metadata,
+        verified_meter: _VerifiedMeter,
+        interval_from: str,
+        interval_to: str,
+        assembly_id: str,
+        channel: PndChannel,
+        normal: ParsedPndData,
+        deadline: float,
+    ) -> None:
+        selection_result, id_device_set = _select_shadow_id_device_set(
+            metadata, verified_meter, assembly_id
+        )
+        if id_device_set is None:
+            self._emit_shadow_observation(
+                channel, normal, False, selection_result
+            )
+            return
+        parameters = [
+            ("format", "csv"),
+            ("idAssembly", assembly_id),
+            ("idDeviceSet", str(id_device_set)),
+            ("intervalFrom", interval_from),
+            ("intervalTo", interval_to),
+            ("electrometerId", verified_meter.electrometer_id),
+        ]
+        try:
+            response = client.request_data_probe(
+                f"{CEZ_PND_EXPORT_URL}?{urlencode(parameters)}",
+                AuthState.DATA_PROBE_EXPORT,
+                deadline,
+                extra_headers={"Accept": "*/*", "Referer": CEZ_PND_START_URL},
+            )
+            observation = _export_observation(
+                channel.value,
+                response,
+                start_day=self._start_day,
+                end_day=self._end_day,
+                id_assembly=assembly_id,
+                id_device_set_present=True,
+                selection_mode=verified_meter.selection_mode,
+            )
+            if (
+                response.status != 200
+                or not response.body
+                or len(response.body) > MAX_RESPONSE_BODY_BYTES
+                or observation.looks_like_html
+                or observation.looks_like_login
+                or observation.content_type_base not in CSV_CONTENT_TYPES
+            ):
+                raise _AuthFailure("data_probe_shadow_request_failed")
+        except Exception:
+            self._emit_shadow_observation(
+                channel, normal, True, "shadow_request_failed"
+            )
+            return
+        try:
+            shadow = parse_pnd_csv(
+                response.body,
+                channel=channel,
+                source_timezone="Europe/Prague",
+            )
+        except Exception:
+            self._emit_shadow_observation(
+                channel, normal, True, "shadow_parse_failed"
+            )
+            return
+        self._emit_shadow_observation(
+            channel, normal, True, "matched", shadow
+        )
+
+    def _emit_shadow_observation(
+        self,
+        channel: PndChannel,
+        normal: ParsedPndData,
+        shadow_executed: bool,
+        selection_result: str,
+        shadow: ParsedPndData | None = None,
+    ) -> None:
+        normal_first, normal_last = _valid_interval_bounds(normal)
+        shadow_first, shadow_last = (
+            _valid_interval_bounds(shadow) if shadow is not None else (None, None)
+        )
+        same_result = None
+        shadow_has_newer_data = None
+        if shadow is not None:
+            same_result = (
+                normal.valid_count,
+                normal.missing_count,
+                normal.invalid_count,
+                normal_first,
+                normal_last,
+            ) == (
+                shadow.valid_count,
+                shadow.missing_count,
+                shadow.invalid_count,
+                shadow_first,
+                shadow_last,
+            )
+            shadow_has_newer_data = shadow_last is not None and (
+                normal_last is None or shadow_last > normal_last
+            )
+        self._emit(
+            SafeHttpAuthEvent(
+                "data_probe_shadow_comparison",
+                shadow_comparison_observation=DataProbeShadowComparisonObservation(
+                    channel=channel.value,
+                    shadow_executed=shadow_executed,
+                    selection_result=selection_result,
+                    normal_valid_count=normal.valid_count,
+                    normal_missing_count=normal.missing_count,
+                    normal_invalid_count=normal.invalid_count,
+                    normal_first_valid_interval_end=normal_first,
+                    normal_last_valid_interval_end=normal_last,
+                    shadow_valid_count=(shadow.valid_count if shadow else None),
+                    shadow_missing_count=(shadow.missing_count if shadow else None),
+                    shadow_invalid_count=(shadow.invalid_count if shadow else None),
+                    shadow_first_valid_interval_end=shadow_first,
+                    shadow_last_valid_interval_end=shadow_last,
+                    same_result=same_result,
+                    shadow_has_newer_data=shadow_has_newer_data,
+                ),
+            )
+        )
 
     def _request(
         self,
@@ -321,7 +481,14 @@ class CezDataProbe:
                     "dashboard_metadata_unusable", json_root_type=root_type
                 )
             )
-            return _Metadata(None, False, False, ()), observation
+            return _Metadata(
+                None,
+                False,
+                False,
+                (),
+                shadow_array=isinstance(payload, list),
+                shadow_rows=_shadow_metadata_rows(payload),
+            ), observation
 
         raw_id = payload.get("idDeviceSet")
         id_device_set = None
@@ -563,6 +730,7 @@ def run_data_probe(
     end_day: date | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     emit: Callable[[SafeHttpAuthEvent], None] | None = None,
+    current_day_shadow: bool = False,
 ) -> AuthResult:
     """Authenticate and probe through the same transport/session, then clean up."""
 
@@ -577,7 +745,8 @@ def run_data_probe(
     probe = CezDataProbe(
         configuration, output_directory=output_directory, dataset_store=store,
         persist_raw_outputs=persist_raw_outputs, start_day=start_day,
-        end_day=end_day, now=now, emit=safe_emit
+        end_day=end_day, now=now, emit=safe_emit,
+        current_day_shadow=current_day_shadow,
     )
     result = CezHttpAuthClient(
         configuration,
@@ -702,6 +871,76 @@ def _is_valid_elm(value: object) -> bool:
     return len(encoded) <= 128 and not any(
         unicodedata.category(character).startswith("C") for character in value
     )
+
+
+def _shadow_metadata_rows(payload: object) -> tuple[_ShadowMetadataRow, ...]:
+    if not isinstance(payload, list) or len(payload) > MAX_RESPONSE_BODY_BYTES:
+        return ()
+    rows: list[_ShadowMetadataRow] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        raw_assembly = item.get("idAssembly")
+        assembly_id = None
+        if type(raw_assembly) is int and raw_assembly in {-1001, -1002}:
+            assembly_id = raw_assembly
+        elif isinstance(raw_assembly, str) and raw_assembly in {"-1001", "-1002"}:
+            assembly_id = int(raw_assembly)
+        raw_electrometer = item.get("electrometerId")
+        electrometer_id = raw_electrometer if _is_valid_elm(raw_electrometer) else None
+        raw_id_device_set = item.get("idDeviceSet")
+        id_device_set_valid = (
+            type(raw_id_device_set) is int
+            and 1 <= raw_id_device_set <= MAX_SHADOW_ID_DEVICE_SET
+        )
+        rows.append(
+            _ShadowMetadataRow(
+                assembly_id=assembly_id,
+                electrometer_id=electrometer_id,
+                id_device_set=(raw_id_device_set if id_device_set_valid else None),
+                id_device_set_valid=id_device_set_valid,
+            )
+        )
+    return tuple(rows)
+
+
+def _select_shadow_id_device_set(
+    metadata: _Metadata,
+    verified_meter: _VerifiedMeter,
+    assembly_id: str,
+) -> tuple[str, int | None]:
+    if not metadata.shadow_array:
+        return "metadata_not_array", None
+    if verified_meter.selection_mode != "configured_elm_fallback":
+        return "normal_selection_not_configured_fallback", None
+    expected_assembly = int(assembly_id)
+    matching = [
+        row
+        for row in metadata.shadow_rows
+        if row.assembly_id == expected_assembly
+        and row.electrometer_id == verified_meter.electrometer_id
+    ]
+    if not matching:
+        return "no_matching_row", None
+    if len(matching) != 1:
+        return "ambiguous_matching_rows", None
+    selected = matching[0]
+    if not selected.id_device_set_valid or selected.id_device_set is None:
+        return "invalid_id_device_set", None
+    return "matched", selected.id_device_set
+
+
+def _valid_interval_bounds(
+    parsed: ParsedPndData,
+) -> tuple[str | None, str | None]:
+    valid_ends = [
+        interval.interval_end
+        for interval in parsed.intervals
+        if interval.quality is IntervalQuality.VALID
+    ]
+    if not valid_ends:
+        return None, None
+    return _utc_timestamp(min(valid_ends)), _utc_timestamp(max(valid_ends))
 
 
 def _metadata_observation(

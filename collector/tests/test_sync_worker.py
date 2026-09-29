@@ -82,6 +82,7 @@ class SyncWorkerTests(unittest.TestCase):
             self.assertEqual(kwargs["end_day"], date(2026, 9, 11))
             self.assertIs(supplied_transport, transport)
             self.assertFalse(kwargs["persist_raw_outputs"])
+            self.assertFalse(kwargs["current_day_shadow"])
             kwargs["emit"](
                 SafeHttpAuthEvent(
                     "data_probe_dataset_committed",
@@ -208,6 +209,20 @@ class SyncWorkerTests(unittest.TestCase):
             )
         self.assertTrue(outcome.succeeded)
         self.assertNotIn("require_complete_days", cycle.call_args.kwargs)
+        self.assertTrue(cycle.call_args.kwargs["current_day_shadow"])
+
+    def test_historical_default_cycle_does_not_enable_current_day_shadow(self) -> None:
+        with mock.patch.object(
+            sync_worker,
+            "run_sync_cycle",
+            return_value=sync_worker.SyncCycleOutcome(True, committed=_committed()),
+        ) as cycle:
+            worker = sync_worker.SyncWorker(_configuration(), store=mock.Mock())
+            outcome = worker._default_cycle(
+                _configuration(), date(2026, 9, 8), date(2026, 9, 11)
+            )
+        self.assertTrue(outcome.succeeded)
+        self.assertNotIn("current_day_shadow", cycle.call_args.kwargs)
 
     def test_current_day_events_are_bounded_and_secret_free(self) -> None:
         event = sync_worker.SafeSyncEvent(

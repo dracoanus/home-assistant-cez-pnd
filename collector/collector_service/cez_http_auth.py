@@ -84,6 +84,7 @@ SAFE_HTTP_AUTH_EVENTS = frozenset(
         "consumption_export_received",
         "production_export_received",
         "data_probe_export_response_observed",
+        "data_probe_shadow_comparison",
         "data_probe_meter_selection_observed",
         "data_probe_meter_lookup_unavailable",
         "data_probe_consumption_parsed",
@@ -471,6 +472,130 @@ class DataProbeParsedObservation:
         return result
 
 
+_SHADOW_SELECTION_RESULTS = frozenset(
+    {
+        "matched",
+        "metadata_not_array",
+        "no_matching_row",
+        "ambiguous_matching_rows",
+        "invalid_id_device_set",
+        "normal_selection_not_configured_fallback",
+        "shadow_request_failed",
+        "shadow_parse_failed",
+    }
+)
+
+
+@dataclass(frozen=True)
+class DataProbeShadowComparisonObservation:
+    """Secret-free aggregate comparison of normal and diagnostic exports."""
+
+    channel: str
+    shadow_executed: bool
+    selection_result: str
+    normal_valid_count: int
+    normal_missing_count: int
+    normal_invalid_count: int
+    normal_first_valid_interval_end: str | None
+    normal_last_valid_interval_end: str | None
+    shadow_valid_count: int | None = None
+    shadow_missing_count: int | None = None
+    shadow_invalid_count: int | None = None
+    shadow_first_valid_interval_end: str | None = None
+    shadow_last_valid_interval_end: str | None = None
+    same_result: bool | None = None
+    shadow_has_newer_data: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.channel not in {"consumption", "production"}:
+            raise ValueError("unsafe shadow comparison channel")
+        if type(self.shadow_executed) is not bool:
+            raise ValueError("unsafe shadow execution state")
+        if self.selection_result not in _SHADOW_SELECTION_RESULTS:
+            raise ValueError("unsafe shadow selection result")
+        normal_counts = (
+            self.normal_valid_count,
+            self.normal_missing_count,
+            self.normal_invalid_count,
+        )
+        if any(type(value) is not int or not 0 <= value <= 10_000 for value in normal_counts):
+            raise ValueError("unsafe normal shadow-comparison counts")
+        _validate_interval_evidence(
+            self.normal_valid_count,
+            self.normal_first_valid_interval_end,
+            self.normal_last_valid_interval_end,
+        )
+        shadow_counts = (
+            self.shadow_valid_count,
+            self.shadow_missing_count,
+            self.shadow_invalid_count,
+        )
+        comparison_fields = (self.same_result, self.shadow_has_newer_data)
+        if self.selection_result == "matched":
+            if not self.shadow_executed or any(
+                type(value) is not int or not 0 <= value <= 10_000
+                for value in shadow_counts
+            ) or any(type(value) is not bool for value in comparison_fields):
+                raise ValueError("incomplete successful shadow comparison")
+            _validate_interval_evidence(
+                self.shadow_valid_count,
+                self.shadow_first_valid_interval_end,
+                self.shadow_last_valid_interval_end,
+            )
+        elif any(value is not None for value in (*shadow_counts, *comparison_fields)) or any(
+            value is not None
+            for value in (
+                self.shadow_first_valid_interval_end,
+                self.shadow_last_valid_interval_end,
+            )
+        ):
+            raise ValueError("unexpected failed shadow comparison data")
+
+    def as_dict(self) -> dict[str, object]:
+        result = {
+            "channel": self.channel,
+            "shadow_executed": self.shadow_executed,
+            "selection_result": self.selection_result,
+            "normal_valid_count": self.normal_valid_count,
+            "normal_missing_count": self.normal_missing_count,
+            "normal_invalid_count": self.normal_invalid_count,
+        }
+        for name in (
+            "normal_first_valid_interval_end",
+            "normal_last_valid_interval_end",
+            "shadow_valid_count",
+            "shadow_missing_count",
+            "shadow_invalid_count",
+            "shadow_first_valid_interval_end",
+            "shadow_last_valid_interval_end",
+            "same_result",
+            "shadow_has_newer_data",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                result[name] = value
+        return result
+
+
+def _validate_interval_evidence(
+    valid_count: int,
+    first_valid_interval_end: str | None,
+    last_valid_interval_end: str | None,
+) -> None:
+    timestamps = (first_valid_interval_end, last_valid_interval_end)
+    if (valid_count == 0) != all(value is None for value in timestamps):
+        raise ValueError("inconsistent interval evidence")
+    if valid_count > 0 and (
+        any(
+            value is None
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value)
+            for value in timestamps
+        )
+        or first_valid_interval_end > last_valid_interval_end
+    ):
+        raise ValueError("unsafe interval evidence")
+
+
 @dataclass(frozen=True)
 class DataProbeCsvParseFailureObservation:
     channel: str
@@ -542,6 +667,9 @@ class SafeHttpAuthEvent:
         DataProbeMeterLookupUnavailableObservation | None
     ) = field(default=None, repr=False)
     parsed_observation: DataProbeParsedObservation | None = field(default=None, repr=False)
+    shadow_comparison_observation: DataProbeShadowComparisonObservation | None = field(
+        default=None, repr=False
+    )
     csv_parse_failure_observation: DataProbeCsvParseFailureObservation | None = field(
         default=None, repr=False
     )
@@ -554,7 +682,27 @@ class SafeHttpAuthEvent:
             raise ValueError("unsafe HTTP authentication event")
         if self.hostname is not None and self.hostname not in REVIEWED_HOSTNAMES:
             raise ValueError("unsafe HTTP authentication hostname")
-        if self.event == "data_probe_csv_parse_failed":
+        if self.event == "data_probe_shadow_comparison":
+            if self.shadow_comparison_observation is None or any(
+                value is not None
+                for value in (
+                    self.hostname,
+                    self.status,
+                    self.code,
+                    self.metadata_observation,
+                    self.json_root_type,
+                    self.export_observation,
+                    self.meter_selection_observation,
+                    self.meter_lookup_unavailable_observation,
+                    self.parsed_observation,
+                    self.csv_parse_failure_observation,
+                    self.dataset_committed_observation,
+                )
+            ):
+                raise ValueError("invalid shadow comparison event")
+        elif self.shadow_comparison_observation is not None:
+            raise ValueError("unexpected shadow comparison observation")
+        elif self.event == "data_probe_csv_parse_failed":
             if self.csv_parse_failure_observation is None or any(
                 value is not None for value in (
                     self.hostname, self.status, self.code, self.metadata_observation,
@@ -684,6 +832,8 @@ class SafeHttpAuthEvent:
             result.update(self.meter_lookup_unavailable_observation.as_dict())
         if self.parsed_observation is not None:
             result.update(self.parsed_observation.as_dict())
+        if self.shadow_comparison_observation is not None:
+            result.update(self.shadow_comparison_observation.as_dict())
         if self.csv_parse_failure_observation is not None:
             result.update(self.csv_parse_failure_observation.as_dict())
         if self.dataset_committed_observation is not None:
