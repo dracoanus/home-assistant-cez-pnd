@@ -112,7 +112,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.36"
+assert VERSION == "0.3.37"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -438,7 +438,8 @@ assert 'CEZ_PND_METERS_URL = (' in DATA_PROBE_SOURCE
 assert '"https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"' in DATA_PROBE_SOURCE
 assert "AuthState.DATA_PROBE_METERS" in HTTP_AUTH_SOURCE
 assert "AuthState.DATA_PROBE_METERS" in DATA_PROBE_SOURCE
-assert "return _Metadata(None, False, False, ()), observation" in DATA_PROBE_SOURCE
+assert "shadow_array=isinstance(payload, list)" in DATA_PROBE_SOURCE
+assert "shadow_rows=_shadow_metadata_rows(payload)" in DATA_PROBE_SOURCE
 assert '"data_probe_metadata_root_invalid"' in HTTP_AUTH_SOURCE
 assert '"data_probe_meter_selection_observed"' in HTTP_AUTH_SOURCE
 assert "class DataProbeMeterSelectionObservation" in HTTP_AUTH_SOURCE
@@ -506,8 +507,23 @@ for freshness_probe_field in (
     "electrometer_id_present",
 ):
     assert freshness_probe_field in DATA_PROBE_SOURCE
-assert "_utc_timestamp(min(valid_ends))" in DATA_PROBE_SOURCE
-assert "_utc_timestamp(max(valid_ends))" in DATA_PROBE_SOURCE
+assert "return _utc_timestamp(min(valid_ends)), _utc_timestamp(max(valid_ends))" in DATA_PROBE_SOURCE
+assert '"data_probe_shadow_comparison"' in HTTP_AUTH_SOURCE
+assert "class DataProbeShadowComparisonObservation" in HTTP_AUTH_SOURCE
+for shadow_result in (
+    "matched",
+    "metadata_not_array",
+    "no_matching_row",
+    "ambiguous_matching_rows",
+    "invalid_id_device_set",
+    "shadow_request_failed",
+    "shadow_parse_failed",
+):
+    assert f'"{shadow_result}"' in HTTP_AUTH_SOURCE
+    assert f'"{shadow_result}"' in DATA_PROBE_SOURCE
+assert "current_day_shadow=True" in SYNC_WORKER_SOURCE
+assert "current_day_shadow=current_day_shadow" in SYNC_WORKER_SOURCE
+assert 'parameters.append(("idDeviceSet", metadata.id_device_set))' in DATA_PROBE_SOURCE
 assert "MAX_FILE_BYTES = 5 * 1024 * 1024" in CSV_PARSER_SOURCE
 assert "MAX_ROWS = 10_000" in CSV_PARSER_SOURCE
 assert "MAX_COLUMNS = 50" in CSV_PARSER_SOURCE
@@ -683,7 +699,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.36"',
+    'version: "0.3.37"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',

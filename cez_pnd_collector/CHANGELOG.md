@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.37
+
+- Added a diagnostic current-day A/B export comparison using metadata-provided idDeviceSet.
+- Shadow export results are parsed only in memory and never affect the production dataset.
+- Added safe comparison diagnostics for determining whether idDeviceSet affects current-day data freshness.
+- No production CEZ request, storage, API, pairing, statistics, or Home Assistant behavior changes.
+
 ## 0.3.36
 
 - Added secret-safe diagnostics for CEZ current-day synchronization.

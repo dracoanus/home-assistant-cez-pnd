@@ -10,7 +10,7 @@ their recorded time and must not override current implementation contracts.
 
 ## Current architecture
 
-Collector/App `0.3.36` uses browserless CEZ HTTP authentication, normalized
+Collector/App `0.3.37` uses browserless CEZ HTTP authentication, normalized
 SQLite and a narrow local HTTPS API. HA integration `0.1.10` reads that API,
 exposes sensors and writes Recorder external statistics. CEZ credentials, EAN
 and ELM stay in Collector configuration; HA has only a limited API token,
