@@ -73,7 +73,26 @@ class _ShadowMetadataRow:
     assembly_id: int | None
     electrometer_id: str | None = field(repr=False)
     id_device_set: int | None = field(repr=False)
+    raw_electrometer_string: str | None = field(default=None, repr=False)
+    electrometer_type: str = "other"
     id_device_set_valid: bool = False
+
+
+@dataclass(frozen=True)
+class _ShadowMatcherDiagnostics:
+    metadata_object_count: int
+    accepted_assembly_count: int
+    matching_assembly_count: int
+    electrometer_type_string_count: int
+    electrometer_type_number_count: int
+    electrometer_type_null_count: int
+    electrometer_type_other_count: int
+    valid_electrometer_string_count: int
+    exact_electrometer_match_count: int
+    trimmed_electrometer_match_count: int
+    valid_id_device_set_count: int
+    matching_row_count: int
+    matching_row_with_valid_id_device_set_count: int
 
 
 @dataclass(frozen=True)
@@ -290,12 +309,12 @@ class CezDataProbe:
         normal: ParsedPndData,
         deadline: float,
     ) -> None:
-        selection_result, id_device_set = _select_shadow_id_device_set(
-            metadata, verified_meter, assembly_id
+        selection_result, id_device_set, matcher_diagnostics = (
+            _select_shadow_id_device_set(metadata, verified_meter, assembly_id)
         )
         if id_device_set is None:
             self._emit_shadow_observation(
-                channel, normal, False, selection_result
+                channel, normal, False, selection_result, matcher_diagnostics
             )
             return
         parameters = [
@@ -333,7 +352,7 @@ class CezDataProbe:
                 raise _AuthFailure("data_probe_shadow_request_failed")
         except Exception:
             self._emit_shadow_observation(
-                channel, normal, True, "shadow_request_failed"
+                channel, normal, True, "shadow_request_failed", matcher_diagnostics
             )
             return
         try:
@@ -344,11 +363,11 @@ class CezDataProbe:
             )
         except Exception:
             self._emit_shadow_observation(
-                channel, normal, True, "shadow_parse_failed"
+                channel, normal, True, "shadow_parse_failed", matcher_diagnostics
             )
             return
         self._emit_shadow_observation(
-            channel, normal, True, "matched", shadow
+            channel, normal, True, "matched", matcher_diagnostics, shadow
         )
 
     def _emit_shadow_observation(
@@ -357,6 +376,7 @@ class CezDataProbe:
         normal: ParsedPndData,
         shadow_executed: bool,
         selection_result: str,
+        matcher_diagnostics: _ShadowMatcherDiagnostics,
         shadow: ParsedPndData | None = None,
     ) -> None:
         normal_first, normal_last = _valid_interval_bounds(normal)
@@ -401,6 +421,43 @@ class CezDataProbe:
                     shadow_last_valid_interval_end=shadow_last,
                     same_result=same_result,
                     shadow_has_newer_data=shadow_has_newer_data,
+                    metadata_object_count=(
+                        matcher_diagnostics.metadata_object_count
+                    ),
+                    accepted_assembly_count=(
+                        matcher_diagnostics.accepted_assembly_count
+                    ),
+                    matching_assembly_count=(
+                        matcher_diagnostics.matching_assembly_count
+                    ),
+                    electrometer_type_string_count=(
+                        matcher_diagnostics.electrometer_type_string_count
+                    ),
+                    electrometer_type_number_count=(
+                        matcher_diagnostics.electrometer_type_number_count
+                    ),
+                    electrometer_type_null_count=(
+                        matcher_diagnostics.electrometer_type_null_count
+                    ),
+                    electrometer_type_other_count=(
+                        matcher_diagnostics.electrometer_type_other_count
+                    ),
+                    valid_electrometer_string_count=(
+                        matcher_diagnostics.valid_electrometer_string_count
+                    ),
+                    exact_electrometer_match_count=(
+                        matcher_diagnostics.exact_electrometer_match_count
+                    ),
+                    trimmed_electrometer_match_count=(
+                        matcher_diagnostics.trimmed_electrometer_match_count
+                    ),
+                    valid_id_device_set_count=(
+                        matcher_diagnostics.valid_id_device_set_count
+                    ),
+                    matching_row_count=matcher_diagnostics.matching_row_count,
+                    matching_row_with_valid_id_device_set_count=(
+                        matcher_diagnostics.matching_row_with_valid_id_device_set_count
+                    ),
                 ),
             )
         )
@@ -888,6 +945,14 @@ def _shadow_metadata_rows(payload: object) -> tuple[_ShadowMetadataRow, ...]:
             assembly_id = int(raw_assembly)
         raw_electrometer = item.get("electrometerId")
         electrometer_id = raw_electrometer if _is_valid_elm(raw_electrometer) else None
+        if isinstance(raw_electrometer, str):
+            electrometer_type = "string"
+        elif raw_electrometer is None:
+            electrometer_type = "null"
+        elif type(raw_electrometer) in {int, float}:
+            electrometer_type = "number"
+        else:
+            electrometer_type = "other"
         raw_id_device_set = item.get("idDeviceSet")
         id_device_set_valid = (
             type(raw_id_device_set) is int
@@ -897,6 +962,10 @@ def _shadow_metadata_rows(payload: object) -> tuple[_ShadowMetadataRow, ...]:
             _ShadowMetadataRow(
                 assembly_id=assembly_id,
                 electrometer_id=electrometer_id,
+                raw_electrometer_string=(
+                    raw_electrometer if isinstance(raw_electrometer, str) else None
+                ),
+                electrometer_type=electrometer_type,
                 id_device_set=(raw_id_device_set if id_device_set_valid else None),
                 id_device_set_valid=id_device_set_valid,
             )
@@ -908,26 +977,62 @@ def _select_shadow_id_device_set(
     metadata: _Metadata,
     verified_meter: _VerifiedMeter,
     assembly_id: str,
-) -> tuple[str, int | None]:
-    if not metadata.shadow_array:
-        return "metadata_not_array", None
-    if verified_meter.selection_mode != "configured_elm_fallback":
-        return "normal_selection_not_configured_fallback", None
+) -> tuple[str, int | None, _ShadowMatcherDiagnostics]:
     expected_assembly = int(assembly_id)
+    rows = metadata.shadow_rows
+    assembly_rows = [row for row in rows if row.assembly_id == expected_assembly]
     matching = [
         row
-        for row in metadata.shadow_rows
-        if row.assembly_id == expected_assembly
-        and row.electrometer_id == verified_meter.electrometer_id
+        for row in assembly_rows
+        if row.electrometer_id == verified_meter.electrometer_id
     ]
+    diagnostics = _ShadowMatcherDiagnostics(
+        metadata_object_count=len(rows),
+        accepted_assembly_count=sum(row.assembly_id is not None for row in rows),
+        matching_assembly_count=len(assembly_rows),
+        electrometer_type_string_count=sum(
+            row.electrometer_type == "string" for row in rows
+        ),
+        electrometer_type_number_count=sum(
+            row.electrometer_type == "number" for row in rows
+        ),
+        electrometer_type_null_count=sum(
+            row.electrometer_type == "null" for row in rows
+        ),
+        electrometer_type_other_count=sum(
+            row.electrometer_type == "other" for row in rows
+        ),
+        valid_electrometer_string_count=sum(
+            row.electrometer_id is not None for row in assembly_rows
+        ),
+        exact_electrometer_match_count=sum(
+            row.electrometer_id == verified_meter.electrometer_id
+            for row in assembly_rows
+        ),
+        trimmed_electrometer_match_count=sum(
+            row.raw_electrometer_string is not None
+            and row.raw_electrometer_string != verified_meter.electrometer_id
+            and row.raw_electrometer_string.strip() == verified_meter.electrometer_id
+            for row in assembly_rows
+        ),
+        valid_id_device_set_count=sum(row.id_device_set_valid for row in rows),
+        matching_row_count=len(matching),
+        matching_row_with_valid_id_device_set_count=sum(
+            row.id_device_set_valid for row in matching
+        ),
+    )
+    if not metadata.shadow_array:
+        return "metadata_not_array", None, diagnostics
+    if verified_meter.selection_mode != "configured_elm_fallback":
+        return "normal_selection_not_configured_fallback", None, diagnostics
     if not matching:
-        return "no_matching_row", None
+        return "no_matching_row", None, diagnostics
     if len(matching) != 1:
-        return "ambiguous_matching_rows", None
+        return "ambiguous_matching_rows", None, diagnostics
     selected = matching[0]
     if not selected.id_device_set_valid or selected.id_device_set is None:
-        return "invalid_id_device_set", None
-    return "matched", selected.id_device_set
+        return "invalid_id_device_set", None, diagnostics
+    return "matched", selected.id_device_set, diagnostics
 
 
 def _valid_interval_bounds(

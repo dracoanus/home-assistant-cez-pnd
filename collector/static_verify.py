@@ -112,7 +112,7 @@ EXPECTED_BASE = (
     "@sha256:e0fefbfa049a1843ab4ef6711665168445789776bb25ff03c2e318b933f033fc"
 )
 assert EXPECTED_BASE in DOCKERFILE
-assert VERSION == "0.3.37"
+assert VERSION == "0.3.38"
 assert f'__version__ = "{VERSION}"' in SOURCE
 assert 'datetime.now(timezone.utc)' in STRUCTURED_LOGGING_SOURCE
 assert 'strftime("%Y-%m-%dT%H:%M:%SZ")' in STRUCTURED_LOGGING_SOURCE
@@ -510,6 +510,23 @@ for freshness_probe_field in (
 assert "return _utc_timestamp(min(valid_ends)), _utc_timestamp(max(valid_ends))" in DATA_PROBE_SOURCE
 assert '"data_probe_shadow_comparison"' in HTTP_AUTH_SOURCE
 assert "class DataProbeShadowComparisonObservation" in HTTP_AUTH_SOURCE
+for shadow_diagnostic_field in (
+    "metadata_object_count",
+    "accepted_assembly_count",
+    "matching_assembly_count",
+    "electrometer_type_string_count",
+    "electrometer_type_number_count",
+    "electrometer_type_null_count",
+    "electrometer_type_other_count",
+    "valid_electrometer_string_count",
+    "exact_electrometer_match_count",
+    "trimmed_electrometer_match_count",
+    "valid_id_device_set_count",
+    "matching_row_count",
+    "matching_row_with_valid_id_device_set_count",
+):
+    assert shadow_diagnostic_field in HTTP_AUTH_SOURCE
+    assert shadow_diagnostic_field in DATA_PROBE_SOURCE
 for shadow_result in (
     "matched",
     "metadata_not_array",
@@ -699,7 +716,7 @@ manifest_keys = set(re.findall(r"^([a-z_]+):", APP_MANIFEST, re.MULTILINE))
 assert manifest_keys == expected_manifest_keys
 for required in (
     'name: "CEZ PND Collector"',
-    'version: "0.3.37"',
+    'version: "0.3.38"',
     "slug: cez_pnd_collector",
     "  - amd64",
     'image: "ghcr.io/dracoanus/home-assistant-cez-pnd-collector"',
