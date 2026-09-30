@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.38
+
+- Added secret-safe aggregate diagnostics for current-day shadow metadata matching.
+- Added counters for assembly matching, electrometerId type/validation matching, and idDeviceSet candidate validation.
+- No matcher, production request, shadow request, storage, API, pairing, statistics, or Home Assistant behavior changes.
+
 ## 0.3.37
 
 - Added a diagnostic current-day A/B export comparison using metadata-provided idDeviceSet.

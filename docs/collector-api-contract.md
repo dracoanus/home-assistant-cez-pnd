@@ -1,6 +1,6 @@
 # Collector API contract — normalized dataset
 
-Status: implemented by Collector/App `0.3.37` and consumed by Home Assistant
+Status: implemented by Collector/App `0.3.38` and consumed by Home Assistant
 integration `0.1.10`. Validated CEZ CSV exports are stored in a normalized
 transactional SQLite dataset and served through this narrow local API. This
 contract does not expose CEZ credentials or portal internals to Home Assistant

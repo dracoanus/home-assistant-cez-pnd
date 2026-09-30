@@ -762,10 +762,138 @@ class CezDataProbeTests(unittest.TestCase):
         self.assertTrue(all(item["shadow_executed"] for item in comparisons))
         self.assertTrue(all(item["selection_result"] == "matched" for item in comparisons))
         self.assertTrue(all(item["shadow_has_newer_data"] for item in comparisons))
+        for item in comparisons:
+            self.assertEqual(item["metadata_object_count"], 2)
+            self.assertEqual(item["accepted_assembly_count"], 2)
+            self.assertEqual(item["matching_assembly_count"], 1)
+            self.assertEqual(item["electrometer_type_string_count"], 2)
+            self.assertEqual(item["valid_electrometer_string_count"], 1)
+            self.assertEqual(item["exact_electrometer_match_count"], 1)
+            self.assertEqual(item["trimmed_electrometer_match_count"], 0)
+            self.assertEqual(item["valid_id_device_set_count"], 2)
+            self.assertEqual(item["matching_row_count"], 1)
+            self.assertEqual(
+                item["matching_row_with_valid_id_device_set_count"], 1
+            )
         rendered = json.dumps(comparisons)
         self.assertNotIn("secret-elm", rendered)
         for private_id in private_device_ids:
             self.assertNotIn(str(private_id), rendered)
+
+    def test_shadow_matcher_reports_only_bounded_aggregate_stage_counts(self) -> None:
+        private_elm = "secret-elm"
+        private_device_ids = (101, 102, 103, 104, 105)
+        payload = [
+            {
+                "idAssembly": -1001,
+                "electrometerId": private_elm,
+                "idDeviceSet": private_device_ids[0],
+            },
+            {
+                "idAssembly": "-1001",
+                "electrometerId": f" {private_elm} ",
+                "idDeviceSet": private_device_ids[1],
+            },
+            {
+                "idAssembly": -1002,
+                "electrometerId": private_elm,
+                "idDeviceSet": private_device_ids[2],
+            },
+            {
+                "idAssembly": -9999,
+                "electrometerId": 42,
+                "idDeviceSet": private_device_ids[3],
+            },
+            {"idAssembly": -1001, "electrometerId": 1.5, "idDeviceSet": True},
+            {"idAssembly": -1001, "electrometerId": True, "idDeviceSet": 0},
+            {"idAssembly": -1001, "electrometerId": None, "idDeviceSet": "private"},
+            {
+                "idAssembly": -1001,
+                "electrometerId": ["private"],
+                "idDeviceSet": private_device_ids[4],
+            },
+            "not-an-object",
+        ]
+        metadata = cez_data_probe._Metadata(
+            None,
+            False,
+            False,
+            (),
+            shadow_array=True,
+            shadow_rows=cez_data_probe._shadow_metadata_rows(payload),
+        )
+        result, selected, diagnostics = (
+            cez_data_probe._select_shadow_id_device_set(
+                metadata,
+                cez_data_probe._VerifiedMeter(
+                    private_elm, "configured_elm_fallback"
+                ),
+                "-1001",
+            )
+        )
+
+        self.assertEqual(result, "matched")
+        self.assertEqual(selected, private_device_ids[0])
+        self.assertEqual(
+            diagnostics.__dict__,
+            {
+                "metadata_object_count": 8,
+                "accepted_assembly_count": 7,
+                "matching_assembly_count": 6,
+                "electrometer_type_string_count": 3,
+                "electrometer_type_number_count": 2,
+                "electrometer_type_null_count": 1,
+                "electrometer_type_other_count": 2,
+                "valid_electrometer_string_count": 1,
+                "exact_electrometer_match_count": 1,
+                "trimmed_electrometer_match_count": 1,
+                "valid_id_device_set_count": 5,
+                "matching_row_count": 1,
+                "matching_row_with_valid_id_device_set_count": 1,
+            },
+        )
+        rendered = repr(diagnostics)
+        self.assertNotIn(private_elm, rendered)
+        for private_id in private_device_ids:
+            self.assertNotIn(str(private_id), rendered)
+
+    def test_trimmed_electrometer_match_is_diagnostic_only(self) -> None:
+        private_elm = "secret-elm"
+        metadata = cez_data_probe._Metadata(
+            None,
+            False,
+            False,
+            (),
+            shadow_array=True,
+            shadow_rows=cez_data_probe._shadow_metadata_rows(
+                [
+                    {
+                        "idAssembly": -1001,
+                        "electrometerId": f" {private_elm} ",
+                        "idDeviceSet": 123,
+                    }
+                ]
+            ),
+        )
+        result, selected, diagnostics = (
+            cez_data_probe._select_shadow_id_device_set(
+                metadata,
+                cez_data_probe._VerifiedMeter(
+                    private_elm, "configured_elm_fallback"
+                ),
+                "-1001",
+            )
+        )
+
+        self.assertEqual(result, "no_matching_row")
+        self.assertIsNone(selected)
+        self.assertEqual(diagnostics.trimmed_electrometer_match_count, 1)
+        self.assertEqual(diagnostics.valid_electrometer_string_count, 0)
+        self.assertEqual(diagnostics.exact_electrometer_match_count, 0)
+        self.assertEqual(diagnostics.matching_row_count, 0)
+        self.assertEqual(
+            diagnostics.matching_row_with_valid_id_device_set_count, 0
+        )
 
     def test_current_day_shadow_skips_zero_ambiguous_and_invalid_matches(self) -> None:
         cases = {

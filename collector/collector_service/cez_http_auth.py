@@ -498,6 +498,19 @@ class DataProbeShadowComparisonObservation:
     normal_invalid_count: int
     normal_first_valid_interval_end: str | None
     normal_last_valid_interval_end: str | None
+    metadata_object_count: int
+    accepted_assembly_count: int
+    matching_assembly_count: int
+    electrometer_type_string_count: int
+    electrometer_type_number_count: int
+    electrometer_type_null_count: int
+    electrometer_type_other_count: int
+    valid_electrometer_string_count: int
+    exact_electrometer_match_count: int
+    trimmed_electrometer_match_count: int
+    valid_id_device_set_count: int
+    matching_row_count: int
+    matching_row_with_valid_id_device_set_count: int
     shadow_valid_count: int | None = None
     shadow_missing_count: int | None = None
     shadow_invalid_count: int | None = None
@@ -525,6 +538,46 @@ class DataProbeShadowComparisonObservation:
             self.normal_first_valid_interval_end,
             self.normal_last_valid_interval_end,
         )
+        diagnostic_counts = (
+            self.metadata_object_count,
+            self.accepted_assembly_count,
+            self.matching_assembly_count,
+            self.electrometer_type_string_count,
+            self.electrometer_type_number_count,
+            self.electrometer_type_null_count,
+            self.electrometer_type_other_count,
+            self.valid_electrometer_string_count,
+            self.exact_electrometer_match_count,
+            self.trimmed_electrometer_match_count,
+            self.valid_id_device_set_count,
+            self.matching_row_count,
+            self.matching_row_with_valid_id_device_set_count,
+        )
+        if any(
+            type(value) is not int or not 0 <= value <= MAX_RESPONSE_BODY_BYTES
+            for value in diagnostic_counts
+        ):
+            raise ValueError("unsafe shadow matcher diagnostic counts")
+        if (
+            self.electrometer_type_string_count
+            + self.electrometer_type_number_count
+            + self.electrometer_type_null_count
+            + self.electrometer_type_other_count
+            != self.metadata_object_count
+            or self.accepted_assembly_count > self.metadata_object_count
+            or self.matching_assembly_count > self.accepted_assembly_count
+            or self.valid_electrometer_string_count > self.matching_assembly_count
+            or self.exact_electrometer_match_count
+            > self.valid_electrometer_string_count
+            or self.trimmed_electrometer_match_count
+            > self.electrometer_type_string_count
+            or self.valid_id_device_set_count > self.metadata_object_count
+            or self.matching_row_count > self.matching_assembly_count
+            or self.matching_row_count > self.exact_electrometer_match_count
+            or self.matching_row_with_valid_id_device_set_count
+            > self.matching_row_count
+        ):
+            raise ValueError("inconsistent shadow matcher diagnostic counts")
         shadow_counts = (
             self.shadow_valid_count,
             self.shadow_missing_count,
@@ -559,6 +612,21 @@ class DataProbeShadowComparisonObservation:
             "normal_valid_count": self.normal_valid_count,
             "normal_missing_count": self.normal_missing_count,
             "normal_invalid_count": self.normal_invalid_count,
+            "metadata_object_count": self.metadata_object_count,
+            "accepted_assembly_count": self.accepted_assembly_count,
+            "matching_assembly_count": self.matching_assembly_count,
+            "electrometer_type_string_count": self.electrometer_type_string_count,
+            "electrometer_type_number_count": self.electrometer_type_number_count,
+            "electrometer_type_null_count": self.electrometer_type_null_count,
+            "electrometer_type_other_count": self.electrometer_type_other_count,
+            "valid_electrometer_string_count": self.valid_electrometer_string_count,
+            "exact_electrometer_match_count": self.exact_electrometer_match_count,
+            "trimmed_electrometer_match_count": self.trimmed_electrometer_match_count,
+            "valid_id_device_set_count": self.valid_id_device_set_count,
+            "matching_row_count": self.matching_row_count,
+            "matching_row_with_valid_id_device_set_count": (
+                self.matching_row_with_valid_id_device_set_count
+            ),
         }
         for name in (
             "normal_first_valid_interval_end",
