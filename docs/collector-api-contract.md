@@ -184,7 +184,8 @@ cannot extend the deadline. All components receive STOP before joins; cooperativ
 cleanup shares one eight-second monotonic deadline. Successful cleanup returns
 normally with status 0; the guard remains armed through process finalization.
 This is best-effort graceful cleanup plus forced termination, not requests/DNS
-cancellation. The target App stop grace is 15 seconds; the development manifest
-retains 162 until Linux process tests prove the bound. Windows-only results are
-insufficient. See [configuration shutdown details](configuration.md#shutdown-budget).
+cancellation. The App stop timeout is 15 seconds: the 10-second internal watchdog
+plus a five-second Supervisor operational margin. Phase 2B Linux validation passed
+on GitHub Actions ubuntu-latest; Windows-only results are insufficient. See
+[configuration shutdown details](configuration.md#shutdown-budget).
 The event broker remains disconnected from synchronization; HA polling is unchanged.

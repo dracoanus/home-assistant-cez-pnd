@@ -119,10 +119,11 @@ it does not cancel the blocked requests operation cooperatively. The bound assum
 a functioning OS scheduler and that blocked calls release the GIL; it is not a
 hard real-time guarantee against kernel stalls or arbitrary GIL-holding native code.
 
-The target App timeout is **15 seconds**, leaving five seconds after the internal
-guard. The manifest retains the temporary **162 seconds** until real Linux/POSIX
-subprocess tests demonstrate the 10-second forced exit and normal cooperative
-shutdown. Windows skips cannot prove that gate; HA OS stop validation remains open.
+The App stop timeout is **15 seconds**, leaving a **5-second Supervisor operational
+margin** after the **10-second internal watchdog**. Cooperative cleanup shares an
+**8-second budget**. Phase 2B Linux validation passed on GitHub Actions ubuntu-latest;
+Windows skips alone do not establish the process bound. HA OS stop validation
+remains open.
 
 SQLite network waits remain outside transactions. SQLite alone recovers its
 journal/WAL after interruption; startup never deletes those files. Tests interrupt
