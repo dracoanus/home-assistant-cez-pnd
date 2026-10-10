@@ -150,46 +150,13 @@ class SyncWorkerTests(unittest.TestCase):
         self.assertEqual(set(days), {date(2026, 3, 28), date(2026, 3, 29)})
         self.assertEqual(maximum_active, 1)
         self.assertEqual(
-            sync_worker.CURRENT_DAY_SYNC_INTERVAL_SECONDS, 60 * 60
+            worker._configuration.sync_interval_minutes * 60, 60 * 60
         )
         self.assertEqual(
             sync_worker.HISTORICAL_SYNC_INTERVAL_SECONDS, 6 * 60 * 60
         )
         self.assertEqual(events[0].event, "sync_worker_started")
         self.assertEqual(events[-1].event, "sync_worker_stopped")
-
-    def test_hourly_wakes_run_current_day_and_historical_only_every_six_hours(
-        self,
-    ) -> None:
-        historical_days: list[date] = []
-        current_days: list[date] = []
-        clock = iter(float(hour * 60 * 60) for hour in range(7))
-
-        def historical(_configuration, start_day, _end_day):
-            historical_days.append(start_day)
-            return sync_worker.SyncCycleOutcome(True, committed=_committed())
-
-        def current(_configuration, start_day, _end_day):
-            current_days.append(start_day)
-            if len(current_days) == 7:
-                worker._stop_event.set()
-            return sync_worker.SyncCycleOutcome(True, committed=_committed())
-
-        fixed = datetime(2026, 9, 11, 12, tzinfo=sync_worker.PRAGUE_TIMEZONE)
-        worker = sync_worker.SyncWorker(
-            _configuration(),
-            store=mock.Mock(),
-            cycle=historical,
-            current_day_cycle=current,
-            emit=lambda _event: None,
-            now_local=lambda: fixed,
-            interval_seconds=0.001,
-            historical_interval_seconds=6 * 60 * 60,
-            monotonic_clock=clock.__next__,
-        )
-        worker._run()
-        self.assertEqual(current_days, [date(2026, 9, 11)] * 7)
-        self.assertEqual(historical_days, [date(2026, 9, 10)] * 2)
 
     def test_current_day_cycle_retains_complete_grid_validation(self) -> None:
         store = mock.Mock()

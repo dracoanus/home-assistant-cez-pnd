@@ -25,7 +25,7 @@ from .runtime_config import (
     DiscoveryConfiguration,
     HttpAuthDiscoveryConfiguration,
 )
-from .structured_logging import structured_event_json
+from .structured_logging import structured_event_json, write_json_line
 
 
 CEZ_PND_START_URL = (
@@ -1832,4 +1832,4 @@ def _failure_event(code: str) -> str:
 def emit_json_event(event: SafeHttpAuthEvent) -> None:
     """Emit one allowlisted event without URLs, queries, or secret values."""
 
-    print(structured_event_json(event.as_dict()), flush=True)
+    write_json_line(structured_event_json(event.as_dict()), flush=True)

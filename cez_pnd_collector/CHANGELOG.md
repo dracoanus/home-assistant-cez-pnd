@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.39
+
+- Added configurable current-day synchronization cadence with independent historical scheduling and bounded recovery.
+- Added the authenticated, bounded `/api/v1/events` long-poll endpoint with one `sync_finished` notification after each completed synchronization attempt.
+- Added bounded concurrent HTTPS request handling.
+- Added bounded shutdown with an internal watchdog and a 15-second App stop timeout.
+
 ## 0.3.38
 
 - Added secret-safe aggregate diagnostics for current-day shadow metadata matching.

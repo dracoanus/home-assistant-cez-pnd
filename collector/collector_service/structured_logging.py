@@ -4,7 +4,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import sys
+import threading
+from typing import TextIO
 from typing import Mapping
+
+
+_WRITE_LOCK = threading.Lock()
+
+
+def write_json_line(line: str, *, file: TextIO | None = None, flush: bool = False) -> None:
+    """Write a complete previously validated JSON line under one shared lock."""
+
+    stream = file if file is not None else sys.stdout
+    with _WRITE_LOCK:
+        stream.write(line + "\n")
+        if flush:
+            stream.flush()
 
 
 def utc_timestamp(now: datetime | None = None) -> str:

@@ -380,6 +380,8 @@ class Phase3ADiscoveryTests(unittest.TestCase):
         self.assertTrue(outcome.cleanup_verified)
 
     def test_normal_server_start_does_not_run_discovery(self) -> None:
+        watchdog = mock.Mock(deadline=None, cleanup_deadline=123.0)
+        watchdog.remaining.return_value = 8.0
         fake_server = mock.Mock()
         fake_server.socket = object()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
@@ -391,7 +393,7 @@ class Phase3ADiscoveryTests(unittest.TestCase):
             source="test",
             discovery=None,
         )
-        with mock.patch.object(
+        with mock.patch.object(server, "ShutdownWatchdog", return_value=watchdog), mock.patch.object(
             server.os, "geteuid", return_value=2000, create=True
         ), mock.patch.object(
             server.os, "getegid", return_value=2000, create=True
@@ -405,6 +407,7 @@ class Phase3ADiscoveryTests(unittest.TestCase):
             server.signal, "signal"
         ), mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(server.main(), 0)
+        watchdog.arm.assert_called_once_with()
         discovery.assert_not_called()
 
     def test_discovery_configuration_error_log_is_fixed_and_non_secret(self) -> None:

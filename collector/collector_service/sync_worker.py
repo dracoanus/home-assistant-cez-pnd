@@ -18,19 +18,37 @@ from .cez_http_auth import (
     emit_json_event as emit_http_auth_event,
 )
 from .dataset_store import NormalizedDatasetStore
+from .event_broker import EventBrokerError, SyncEvent
 from .requests_preauth import RequestsSessionTransport
 from .runtime_config import SyncConfiguration
-from .structured_logging import structured_event_json
+from .structured_logging import structured_event_json, write_json_line
+from .shutdown import COOPERATIVE_STOP_SECONDS
 
 
 PRAGUE_TIMEZONE = ZoneInfo("Europe/Prague")
-CURRENT_DAY_SYNC_INTERVAL_SECONDS = 60 * 60
 HISTORICAL_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 BACKFILL_CHUNK_DAYS = 31
 BACKFILL_MAX_CHUNKS_PER_CYCLE = 2
 CORRECTION_OVERLAP_DAYS = 3
 INITIAL_SYNC_DELAY_SECONDS = 0.0
-WORKER_STOP_TIMEOUT_SECONDS = 65.0
+WORKER_STOP_TIMEOUT_SECONDS = COOPERATIVE_STOP_SECONDS
+TRANSIENT_RETRY_SECONDS = (5 * 60, 15 * 60, 30 * 60, 60 * 60)
+CONSERVATIVE_RETRY_SECONDS = 60 * 60
+
+
+def retry_category(code: str | None) -> str:
+    """Use fixed proven categories; never infer from exception text."""
+    if code in {"auth_connect_failed", "auth_operation_timeout"}:
+        return "transient"
+    if code == "data_probe_auth_failed" or (code or "").startswith("auth_"):
+        return "authentication_security"
+    return "deterministic_or_unclassified"
+
+
+def retry_delay(code: str | None, failures: int) -> float:
+    if retry_category(code) == "transient":
+        return TRANSIENT_RETRY_SECONDS[min(max(failures - 1, 0), 3)]
+    return CONSERVATIVE_RETRY_SECONDS
 SYNC_EVENTS = frozenset(
     {
         "sync_worker_started",
@@ -46,6 +64,7 @@ SYNC_EVENTS = frozenset(
         "current_day_sync_started",
         "current_day_sync_succeeded",
         "current_day_sync_failed",
+        "sync_notification_failed",
     }
 )
 SYNC_FAILURE_CODES = SAFE_ERROR_CODES | frozenset(
@@ -209,7 +228,7 @@ class SafeSyncEvent:
 
 
 def emit_sync_event(event: SafeSyncEvent) -> None:
-    print(structured_event_json(event.as_dict()), flush=True)
+    write_json_line(structured_event_json(event.as_dict()), flush=True)
 
 
 def run_sync_cycle(
@@ -268,10 +287,12 @@ class SyncWorker:
         | None = None,
         emit: Callable[[SafeSyncEvent], None] = emit_sync_event,
         now_local: Callable[[], datetime] = lambda: datetime.now(PRAGUE_TIMEZONE),
-        interval_seconds: float = CURRENT_DAY_SYNC_INTERVAL_SECONDS,
+        interval_seconds: float | None = None,
         historical_interval_seconds: float = HISTORICAL_SYNC_INTERVAL_SECONDS,
         initial_delay_seconds: float = INITIAL_SYNC_DELAY_SECONDS,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        wait: Callable[[float], bool] | None = None,
+        publish: Callable[[SyncEvent], None] | None = None,
     ) -> None:
         self._configuration = configuration
         self._store = store
@@ -280,12 +301,16 @@ class SyncWorker:
             current_day_cycle or cycle or self._default_current_day_cycle
         )
         self._emit = emit
+        self._publish = publish
         self._now_local = now_local
-        self._interval_seconds = interval_seconds
+        self._interval_seconds = (configuration.sync_interval_minutes * 60
+                                  if interval_seconds is None else interval_seconds)
         self._historical_interval_seconds = historical_interval_seconds
         self._initial_delay_seconds = initial_delay_seconds
         self._monotonic_clock = monotonic_clock
         self._stop_event = threading.Event()
+        self._wait = wait or self._stop_event.wait
+        self._next_current_at = float("inf")
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -298,8 +323,11 @@ class SyncWorker:
         )
         self._thread.start()
 
-    def stop(self, timeout: float = WORKER_STOP_TIMEOUT_SECONDS) -> bool:
+    def request_stop(self) -> None:
         self._stop_event.set()
+
+    def stop(self, timeout: float = WORKER_STOP_TIMEOUT_SECONDS) -> bool:
+        self.request_stop()
         thread = self._thread
         if thread is None:
             return True
@@ -328,14 +356,12 @@ class SyncWorker:
         self._emit(
             SafeSyncEvent("current_day_sync_started", local_day=current_day)
         )
-        try:
-            outcome = self._current_day_cycle(
-                self._configuration,
-                current_day,
-                current_day + timedelta(days=1),
-            )
-        except Exception:
-            outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        if self._stop_event.is_set():
+            return SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        outcome = self._attempt(
+            self._current_day_cycle, current_day,
+            current_day + timedelta(days=1), "current_day",
+        )
         if outcome.succeeded:
             self._emit(
                 SafeSyncEvent(
@@ -354,13 +380,49 @@ class SyncWorker:
             )
         return outcome
 
+    def _attempt(
+        self, cycle: Callable[[SyncConfiguration, date, date], SyncCycleOutcome],
+        start_day: date, end_day: date, kind: str,
+    ) -> SyncCycleOutcome:
+        """Publish once after collection completes, before checkpoint bookkeeping."""
+        if self._stop_event.is_set():
+            return SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        try:
+            outcome = cycle(self._configuration, start_day, end_day)
+        except Exception:
+            outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        self._notify_completion(kind, outcome)
+        return outcome
+
+    def _notify_completion(self, kind: str, outcome: SyncCycleOutcome) -> None:
+        if self._publish is None or self._stop_event.is_set():
+            return
+        try:
+            status = self._store.read_status()
+            event = SyncEvent(
+                kind, "succeeded" if outcome.succeeded else "failed",
+                None if status is None else status.revision,
+            )
+            self._publish(event)
+            return
+        except EventBrokerError as error:
+            if error.code == "event_broker_stopping":
+                return
+        except Exception:
+            pass  # Notification failure cannot change a completed collection outcome.
+        try:
+            self._emit(SafeSyncEvent("sync_notification_failed"))
+        except Exception:
+            pass  # A diagnostic sink failure is also isolated from collection.
+
     def _scheduled_cycle(self, latest_completed_day: date) -> SyncCycleOutcome:
         history_start = self._configuration.history_start
         if history_start is None:
-            return self._cycle(
-                self._configuration,
+            return self._attempt(
+                self._cycle,
                 latest_completed_day,
                 latest_completed_day + timedelta(days=1),
+                "historical_correction",
             )
 
         state = self._store.prepare_sync_state(
@@ -373,10 +435,11 @@ class SyncWorker:
             )
             if overlap_start > latest_completed_day:
                 overlap_start = latest_completed_day
-            return self._cycle(
-                self._configuration,
+            return self._attempt(
+                self._cycle,
                 overlap_start,
                 latest_completed_day + timedelta(days=1),
+                "historical_correction",
             )
 
         self._emit(
@@ -384,6 +447,8 @@ class SyncWorker:
         )
         last_outcome: SyncCycleOutcome | None = None
         for _chunk in range(BACKFILL_MAX_CHUNKS_PER_CYCLE):
+            if self._stop_event.is_set():
+                break
             start_day = state.backfill_next_day
             end_day = min(
                 start_day + timedelta(days=BACKFILL_CHUNK_DAYS),
@@ -396,10 +461,7 @@ class SyncWorker:
                     end_day=end_day,
                 )
             )
-            try:
-                outcome = self._cycle(self._configuration, start_day, end_day)
-            except Exception:
-                outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+            outcome = self._attempt(self._cycle, start_day, end_day, "historical_backfill")
             if not outcome.succeeded:
                 self._emit(
                     SafeSyncEvent(
@@ -437,49 +499,57 @@ class SyncWorker:
             if state.backfill_complete:
                 self._emit(SafeSyncEvent("backfill_complete"))
                 break
+            if self._monotonic_clock() >= self._next_current_at:
+                break
         if last_outcome is None:
             return SyncCycleOutcome(False, code="sync_cycle_internal_failed")
         return last_outcome
 
     def _run(self) -> None:
         self._emit(SafeSyncEvent("sync_worker_started"))
-        next_historical_at: float | None = None
+        self._next_current_at = self._monotonic_clock()
+        next_historical_at = self._next_current_at
+        retry_kind: str | None = None
+        retry_at = 0.0
+        failures = 0
         try:
-            if self._stop_event.wait(self._initial_delay_seconds):
+            if self._initial_delay_seconds and self._wait(self._initial_delay_seconds):
                 return
             while not self._stop_event.is_set():
+                current_time = self._monotonic_clock()
+                if retry_kind is not None:
+                    deadline = retry_at
+                    kind = retry_kind
+                else:
+                    deadline = min(self._next_current_at, next_historical_at)
+                    kind = "current" if self._next_current_at <= current_time else "historical"
+                if current_time < deadline:
+                    if self._wait(deadline - current_time):
+                        break
+                    continue
                 current_day = self._now_local().astimezone(PRAGUE_TIMEZONE).date()
-                latest_completed_day = current_day - timedelta(days=1)
                 self._emit(SafeSyncEvent("sync_cycle_started"))
-                wake_started = self._monotonic_clock()
-                historical_outcome: SyncCycleOutcome | None = None
-                if next_historical_at is None or wake_started >= next_historical_at:
-                    next_historical_at = (
-                        wake_started + self._historical_interval_seconds
-                    )
-                    try:
-                        historical_outcome = self._scheduled_cycle(
-                            latest_completed_day
-                        )
-                    except Exception:
-                        historical_outcome = SyncCycleOutcome(
-                            False, code="sync_cycle_internal_failed"
-                        )
-                current_outcome = self._scheduled_current_day(current_day)
-                outcome = (
-                    current_outcome
-                    if historical_outcome is None or historical_outcome.succeeded
-                    else historical_outcome
-                )
+                if self._stop_event.is_set():
+                    break
+                try:
+                    outcome = (self._scheduled_current_day(current_day) if kind == "current"
+                               else self._scheduled_cycle(current_day - timedelta(days=1)))
+                except Exception:
+                    outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+                completed = self._monotonic_clock()
                 if outcome.succeeded:
-                    self._emit(
-                        SafeSyncEvent(
-                            "sync_cycle_succeeded", committed=outcome.committed
-                        )
-                    )
+                    self._emit(SafeSyncEvent("sync_cycle_succeeded", committed=outcome.committed))
+                    failures = 0
+                    retry_kind = None
+                    if kind == "current":
+                        self._next_current_at = completed + self._interval_seconds
+                    else:
+                        next_historical_at = completed + self._historical_interval_seconds
                 else:
                     self._emit(SafeSyncEvent("sync_cycle_failed", code=outcome.code))
-                if self._stop_event.wait(self._interval_seconds):
-                    break
+                    failures += 1
+                    retry_kind = kind
+                    # One recovery attempt and a shared cooldown for both schedules.
+                    retry_at = completed + retry_delay(outcome.code, failures)
         finally:
             self._emit(SafeSyncEvent("sync_worker_stopped"))

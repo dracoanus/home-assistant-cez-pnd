@@ -16,6 +16,7 @@ configuration procedure.
 
 | Option | Required | Purpose | Notes |
 | --- | --- | --- | --- |
+| `sync_interval_minutes` | Optional | Current-day check interval in minutes. | Default 60; exact integer 15–720. |
 | `cez_sync_enabled` | Yes for automation | Enables scheduled CEZ synchronization. | Keep enabled for normal operation. |
 | `cez_history_start` | Recommended | First date to backfill. | Use `YYYY-MM-DD`; moving it later does not purge stored data. |
 | `cez_username` | Yes for collection | CEZ PND username. | Private and masked; Collector only. |
@@ -40,7 +41,9 @@ backwards compatibility. They are optional and are not normal user settings.
 ## Synchronization and data quality
 
 The Collector uses `Europe/Prague` calendar days. Current-day refresh runs
-hourly; historical backfill and completed-day correction run every six hours.
+immediately at worker startup and then `sync_interval_minutes` after successful
+completion; historical backfill and completed-day correction have an independent
+six-hour monotonic deadline. Current day has priority when both are due.
 Backfill is chunked and resumable. Normal, spring-DST and autumn-DST days have
 96, 92 and 100 quarter-hour intervals.
 
@@ -70,3 +73,66 @@ diagnostic mode. New clean installations omit unused diagnostic defaults.
 All diagnostic modes are mutually exclusive with scheduled synchronization.
 They must never be used to bypass TLS, redirect, hostname or credential
 protections.
+
+## Development: Phase 2 scheduling (not released)
+
+Changing `sync_interval_minutes` requires restarting the Collector; existing saved
+options without it default to 60. Current-day and historical operations remain
+serial. Missed deadlines coalesce; no catch-up burst is queued. A historical
+transaction already running finishes before current-day work; between committed
+backfill chunks the worker checks whether current-day work is due. Chunk size,
+two-chunk maximum, correction overlap and persistent checkpoints remain unchanged.
+History is scheduled six hours after completion, independently of the 15–720 minute
+current-day cadence. Retry timing is internal, not another user setting.
+
+Only `auth_connect_failed` and `auth_operation_timeout` are proven transient codes:
+recovery waits progress through 5, 15, 30 and then 60 minutes (capped). Every other
+fixed failure waits at least 60 minutes. Authentication/security failures and
+unclassified transport errors are not treated as proven transient. The existing
+collection path maps authentication errors to `data_probe_auth_failed`, and often
+maps export HTTP/timeout/validation failures to one export code. Thus real failures
+that lose this distinction receive the conservative hourly retry; HTTP 5xx is not
+inferred from a generic code. No authentication/export error mapping is changed.
+
+One recovery deadline blocks both schedules until the failed kind is retried,
+preventing an immediate equivalent login by the other kind. Success clears the
+shared recovery state and resumes that kind's normal cadence from completion;
+the other independent deadline is reevaluated. Retry waits, normal waits and history
+waits all use the stop event and monotonic clock. Stop prevents the next operation
+or backfill chunk; it never interrupts a SQLite transaction already running.
+
+### Shutdown budget
+
+The development shutdown design is best-effort graceful cleanup followed by
+bounded forced process termination. A prestarted daemon watchdog is armed on the
+first SIGTERM observation: its immutable monotonic deadline is 10 seconds.
+Repeated SIGTERM cannot extend it. Sync and pairing receive STOP before any join;
+the broker wakes event waiters and HTTPS admission/sockets close. All joins share
+one absolute 8-second deadline from that same first observation. No new blocking
+cleanup or logging starts after that deadline.
+
+If cleanup completes, the service returns normally with status 0. If cleanup or
+Python finalization remains blocked, the guard invokes `os._exit(70)` without
+logging, locks shared with application workers, flushing, filesystem/database
+access or cleanup callbacks. This intentionally bypasses finally/atexit handlers;
+it does not cancel the blocked requests operation cooperatively. The bound assumes
+a functioning OS scheduler and that blocked calls release the GIL; it is not a
+hard real-time guarantee against kernel stalls or arbitrary GIL-holding native code.
+
+The App stop timeout is **15 seconds**, leaving a **5-second Supervisor operational
+margin** after the **10-second internal watchdog**. Cooperative cleanup shares an
+**8-second budget**. Phase 2B Linux validation passed on GitHub Actions ubuntu-latest;
+Windows skips alone do not establish the process bound. HA OS stop validation
+remains open.
+
+SQLite network waits remain outside transactions. SQLite alone recovers its
+journal/WAL after interruption; startup never deletes those files. Tests interrupt
+before BEGIN, during writes and after COMMIT and inspect the actual journal mode.
+Startup removes only regular UID-2000 private orphan files matching
+`.pairing-state.json.<32 lowercase hex>.tmp` in the verified 0700 managed identity
+directory, with at most 64 directory entries examined. Unknown files and SQLite
+sidecars remain untouched. Interrupted TLS identity-generation evidence retains
+its existing fail-closed behavior and requires operator recovery rather than
+silently generating a new identity. TLS loading temp files are removed before
+worker startup. Diagnostic raw-export files retain their existing private paths;
+this change does not introduce broad filesystem cleanup.

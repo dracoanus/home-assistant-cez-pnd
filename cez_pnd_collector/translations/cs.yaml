@@ -39,6 +39,10 @@ configuration:
     description: >-
       Stáhne data pouze pro zadané datum a po dokončení skončí. Nelze používat
       současně s automatickou synchronizací.
+  sync_interval_minutes:
+    name: Interval synchronizace ČEZ PND
+    description: >-
+      Určuje, jak často Collector kontroluje ČEZ PND, zda jsou dostupná nová data. Výchozí hodnota je 60 minut; povolený rozsah je 15 až 720 minut.
   cez_sync_enabled:
     name: Automatická synchronizace dat
     description: >-
