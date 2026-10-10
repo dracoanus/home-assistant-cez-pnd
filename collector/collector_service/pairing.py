@@ -366,10 +366,15 @@ class PairingDiscoveryWorker:
         self._thread = threading.Thread(target=self._run, name="pairing-discovery", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
         self._stop.set()
+
+    def stop(self, timeout: float = 6.0) -> bool:
+        self.request_stop()
         if self._thread is not None:
-            self._thread.join(timeout=6.0)
+            self._thread.join(timeout=timeout)
+            return not self._thread.is_alive()
+        return True
 
     def finalize(self) -> None:
         """Remove discovery and clear recovery state without revoking ACTIVE."""
@@ -382,6 +387,8 @@ class PairingDiscoveryWorker:
             self.credentials.complete_finalize()
 
     def _run(self) -> None:
+        if self._stop.is_set():
+            return
         self._publish_new()
         while not self._stop.wait(60.0):
             try:

@@ -29,8 +29,9 @@ API.
 - SQLite UPSERT is idempotent; later valid data replaces missing placeholders.
 - `data_timestamp` is the maximum valid interval end, never a future missing
   interval.
-- Current day runs hourly; backfill and correction run every six hours in one
-  serialized worker.
+- Development Phase 2: current day runs immediately, then after a configurable
+  15–720 minute completion-relative interval (default 60). History has its own
+  six-hour completion-relative deadline; one worker serializes both schedules.
 
 ## Statistics trap
 
@@ -143,3 +144,16 @@ ConfigEntry persistence across Core restart, finalize, discovery removal and
 recovery-journal cleanup in the following Core process. Guided pairing is the
 normal installation path. Automatic leaf renewal, CA rotation, managed-token
 rotation and legacy-to-managed migration remain deferred.
+
+### Unreleased Phase 2B shutdown guard
+
+The accepted shutdown strategy preserves requests authentication and uses a
+prestarted daemon fail-stop guard: first SIGTERM fixes a 10-second monotonic hard
+deadline and a shared 8-second cooperative deadline. Forced termination calls
+`os._exit(70)` silently; normal cleanup returns 0. It is not cooperative transport
+cancellation. Verify real Linux process tests before reducing the temporary App
+timeout from 162 to the target 15 seconds; Windows skips do not establish the bound.
+SQLite journal recovery belongs to SQLite. Startup cleanup is restricted to verified
+private pairing-state atomic-write leftovers in the managed directory; interrupted
+identity generation retains existing fail-closed handling. No event producer is
+attached to synchronization in Phase 2B.
