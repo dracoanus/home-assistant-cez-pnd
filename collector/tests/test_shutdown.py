@@ -22,6 +22,7 @@ from unittest import mock
 
 from collector_service import shutdown, server, security_files
 from collector_service.dataset_store import NormalizedDatasetStore
+from collector_service.event_broker import EventBroker, EventBrokerError
 from collector_service.sync_worker import SyncWorker, SyncCycleOutcome
 from collector.tests.test_sync_worker import _configuration, _committed
 from collector.tests.test_dataset_store import _parsed, START
@@ -35,6 +36,15 @@ def _ready(directory: Path) -> None:
         "pid": os.getpid(), "parent_pid": os.getppid(),
         "session_id": os.getsid(0), "process_group": os.getpgrp(),
     }), encoding="ascii")
+
+
+def _wait_for_broker_shutdown(broker, cursor, completed) -> None:
+    try:
+        broker.wait(cursor)
+    except EventBrokerError as error:
+        if error.code != "event_broker_stopping":
+            raise
+    completed.set()
 
 
 def _child(mode: str, directory: Path) -> int:
@@ -147,6 +157,8 @@ def _child(mode: str, directory: Path) -> int:
     config = SimpleNamespace(sync=None if mode in {"idle", "event", "handler", "finalize"} else _configuration(),
         source="test", managed_identity=None)
     event_waiting = threading.Event()
+    event_completed = threading.Event()
+    event_thread = None
     if config.sync is None:
         if mode == "event":
             broker = api_server.event_broker
@@ -156,7 +168,11 @@ def _child(mode: str, directory: Path) -> int:
                 event_waiting.set()
                 return original_wait_for(predicate, timeout)
             broker._condition.wait_for = wait_for
-            threading.Thread(target=lambda: broker.wait(cursor), daemon=True).start()
+            event_thread = threading.Thread(
+                target=_wait_for_broker_shutdown,
+                args=(broker, cursor, event_completed), daemon=True,
+            )
+            event_thread.start()
         elif mode == "handler":
             # A request blocked on headers is interrupted by server shutdown.
             client, accepted = socket.socketpair()
@@ -172,7 +188,12 @@ def _child(mode: str, directory: Path) -> int:
             return original_serve(**kwargs)
         api_server.serve_forever = serve
     with mock.patch("collector_service.sync_worker.SyncWorker", return_value=worker):
-        return server._serve(config, api_server, None, None, guard)
+        result = server._serve(config, api_server, None, None, guard)
+    if event_thread is not None:
+        event_thread.join(timeout=2)
+        if event_thread.is_alive() or not event_completed.is_set():
+            raise RuntimeError("event waiter did not complete shutdown")
+    return result
 
 
 @unittest.skipUnless(os.name == "posix", "requires Linux/POSIX SIGTERM process execution")
@@ -292,6 +313,38 @@ class ShutdownProcessTests(unittest.TestCase):
 
 
 class ShutdownUnitTests(unittest.TestCase):
+    def test_synthetic_event_waiter_completes_when_broker_closes(self):
+        broker = EventBroker()
+        cursor = broker.wait(None).cursor
+        entered, completed = threading.Event(), threading.Event()
+        original_wait = broker._condition.wait_for
+        def wait_for(predicate, timeout):
+            entered.set()
+            return original_wait(predicate, timeout)
+        with mock.patch.object(broker._condition, "wait_for", side_effect=wait_for):
+            waiter = threading.Thread(target=_wait_for_broker_shutdown,
+                args=(broker, cursor, completed), daemon=True)
+            waiter.start()
+            try:
+                self.assertTrue(entered.wait(2))
+            finally:
+                broker.close()
+                waiter.join(2)
+        self.assertFalse(waiter.is_alive())
+        self.assertTrue(completed.is_set())
+
+    def test_synthetic_event_waiter_does_not_swallow_other_errors(self):
+        for error in (EventBrokerError("invalid_event_cursor"),
+                      EventBrokerError("event_waiter_limit"), RuntimeError("synthetic")):
+            with self.subTest(error=type(error).__name__):
+                completed = threading.Event()
+                broker = mock.Mock()
+                broker.wait.side_effect = error
+                with self.assertRaises(type(error)) as raised:
+                    _wait_for_broker_shutdown(broker, "synthetic", completed)
+                self.assertIs(raised.exception, error)
+                self.assertFalse(completed.is_set())
+
     def test_earlier_startup_test_cannot_terminate_later_runner_tests(self):
         # Reproduce the complete parent-runner lifetime in a disposable process.
         # Before the fix, its real leaked watchdog exited 70 during the second test.
