@@ -9,6 +9,8 @@ on:
       - "README.md"
       - "cez_pnd_collector/**"
       - "collector/**"
+      - "custom_components/cez_pnd/**"
+      - "tests/**"
       - "docs/**"
       - "poc/collector-runtime/**"
       - "poc/phase2a-runtime/**"
@@ -64,6 +66,8 @@ jobs:
           collector/tests
           collector/smoke/smoke_client.py
           collector/ci_validate.py
+          custom_components/cez_pnd
+          tests
 
       - name: Run Collector unit and regression tests
         env:
@@ -72,3 +76,6 @@ jobs:
 
       - name: Run static security verification
         run: python3 collector/static_verify.py
+
+      - name: Run offline Home Assistant integration regressions
+        run: python3 -m unittest discover -s tests -v

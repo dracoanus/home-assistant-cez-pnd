@@ -202,6 +202,96 @@ class CollectorClientTests(unittest.IsolatedAsyncioTestCase):
         )
         return client, session
 
+    async def test_events_exact_schema_timeout_auth_tls_and_204(self):
+        cursor = "ev1_" + "a" * 32 + "_0"
+        client, session = self._client([
+            _Response(200, {"schema_version": 1, "event": "state_reset", "cursor": cursor}),
+            _Response(204, None, ""),
+            _Response(200, {"schema_version": 1, "event": "sync_finished", "cursor": cursor[:-1] + "1",
+                "sync_kind": "current_day", "sync_result": "failed", "dataset_revision": "ds_" + "b" * 32}),
+        ])
+        first = await client.async_events()
+        self.assertEqual(first.cursor, cursor)
+        self.assertIsNone(await client.async_events(cursor))
+        event = await client.async_events(cursor)
+        self.assertEqual(event.dataset_revision, "ds_" + "b" * 32)
+        for _url, options in session.calls:
+            self.assertEqual(options["timeout"].values, {"total": 35, "connect": 5, "sock_read": 30})
+            self.assertIs(options["ssl"], client._ssl_context)
+            self.assertFalse(options["allow_redirects"])
+            self.assertEqual(options["headers"]["Authorization"], "Bearer " + TOKEN)
+        self.assertNotIn("cursor", session.calls[0][1]["params"])
+        self.assertEqual(session.calls[1][1]["params"]["cursor"], cursor)
+
+    async def test_events_reject_invalid_fields_types_cursor_and_revision(self):
+        good = {"schema_version": 1, "event": "sync_finished", "cursor": "ev1_" + "a" * 32 + "_1",
+                "sync_kind": "historical_correction", "sync_result": "succeeded", "dataset_revision": "ds_" + "b" * 32}
+        invalid = [dict(good, extra="secret"), {k: v for k, v in good.items() if k != "sync_result"}]
+        for field, values in {
+            "schema_version": [True, "1", 2], "event": ["other", None],
+            "cursor": ["ev1_bad", "ev1_" + "a" * 32 + "_01", "ev1_" + "a" * 32 + "_9223372036854775808"],
+            "sync_kind": ["other", []], "sync_result": ["other", True],
+            "dataset_revision": [1, True, "bad", "ds_" + "a" * 78],
+        }.items():
+            invalid.extend(dict(good, **{field: value}) for value in values)
+        for payload in invalid:
+            with self.subTest(field=list(payload)):
+                client, _ = self._client([_Response(200, payload)])
+                with self.assertRaises(client_module.CollectorProtocolError):
+                    await client.async_events()
+        for revision in (None, "ds_" + "a" * 32):
+            client, _ = self._client([_Response(200, dict(good, dataset_revision=revision))])
+            self.assertEqual((await client.async_events()).dataset_revision, revision)
+
+    async def test_event_errors_and_body_limit_are_bounded(self):
+        for status, exception in ((401, client_module.CollectorAuthenticationError),
+            (403, client_module.CollectorAuthenticationError), (404, client_module.CollectorUpdateRequired),
+            (302, client_module.CollectorProtocolError), (503, client_module.CollectorHttpError)):
+            client, _ = self._client([_Response(status, {})])
+            with self.assertRaises(exception):
+                await client.async_events()
+        client, _ = self._client([_Response(200, {"padding": "x" * 4096})])
+        with self.assertRaises(client_module.CollectorProtocolError):
+            await client.async_events()
+        client, session = self._client([])
+        with self.assertRaises(client_module.CollectorProtocolError):
+            await client.async_events("invalid")
+        self.assertEqual(session.calls, [])
+
+    async def test_exact_dataset_unavailable_is_distinct_from_storage_failure(self):
+        payload = {"schema_version": "1.0", "error": {"code": "dataset_unavailable",
+            "retryable": True, "request_id": "a" * 16}}
+        client, _ = self._client([_Response(503, payload)])
+        with self.assertRaises(client_module.CollectorDatasetUnavailable):
+            await client.async_status()
+        for bad in (dict(payload, extra=True), {"schema_version": "1.0", "error": {
+            **payload["error"], "code": "dataset_storage_unavailable"}},
+            {"schema_version": "1.0", "error": {**payload["error"], "retryable": 1}}):
+            client, _ = self._client([_Response(503, bad)])
+            with self.assertRaises(client_module.CollectorHttpError):
+                await client.async_status()
+
+    async def test_event_duplicate_json_keys_and_cancellation(self):
+        raw = b'{"schema_version":1,"schema_version":1,"event":"state_reset","cursor":"x"}'
+        response = _RawResponse(raw)
+        client, _ = self._client([response])
+        with self.assertRaises(client_module.CollectorProtocolError):
+            await client.async_events()
+        class Session:
+            def get(self, *args, **kwargs):
+                raise asyncio.CancelledError
+        client._session = Session()
+        with self.assertRaises(asyncio.CancelledError):
+            await client.async_events()
+
+    async def test_event_payload_transport_failure_is_reconnectable(self):
+        class Response(_Response):
+            async def __aenter__(self):
+                raise client_module.aiohttp.ClientPayloadError("synthetic-private-data")
+        client, _ = self._client([Response(200, {})])
+        with self.assertRaisesRegex(client_module.CollectorConnectionError, "^collector_connection_failed$"):
+            await client.async_events()
+
     async def test_request_is_bounded_authenticated_and_does_not_redirect(self) -> None:
         client, session = self._client(
             [_Response(200, {"schema_version": "1.0", "service_status": "ok"})]

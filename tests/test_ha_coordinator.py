@@ -26,6 +26,10 @@ class _CollectorProtocolError(_CollectorError):
     pass
 
 
+class _CollectorDatasetUnavailable(_CollectorError):
+    pass
+
+
 class _ConfigEntryAuthFailed(Exception):
     pass
 
@@ -51,6 +55,7 @@ def _load_coordinator_module():
     client = ModuleType(f"{package_name}.client")
     client.CollectorAuthenticationError = _CollectorAuthenticationError
     client.CollectorClient = object
+    client.CollectorDatasetUnavailable = _CollectorDatasetUnavailable
     client.CollectorError = _CollectorError
     client.CollectorMeasurements = object
     client.CollectorProtocolError = _CollectorProtocolError
@@ -138,7 +143,10 @@ class _Client:
 
     async def async_status(self):
         self.calls.append("status")
-        return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        result = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     async def async_health(self):
         self.calls.append("health")
@@ -321,14 +329,35 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             2,
         )
 
-    def test_coordinator_uses_default_and_configured_intervals(self):
+    def test_coordinator_has_no_scheduled_polling(self):
         client = _Client(_status())
         default = coordinator_module.CezPndCoordinator(object(), _entry(), client)
         configured = coordinator_module.CezPndCoordinator(
             object(), _entry(30), client
         )
-        self.assertEqual(default.update_interval.total_seconds(), 60)
-        self.assertEqual(configured.update_interval.total_seconds(), 30)
+        self.assertIsNone(default.update_interval)
+        self.assertIsNone(configured.update_interval)
+
+    async def test_no_dataset_health_only_and_first_dataset_recovers(self):
+        status = _status()
+        client = _Client(status)
+        client.statuses = [_CollectorDatasetUnavailable("dataset_unavailable"), status]
+        coordinator = coordinator_module.CezPndCoordinator(object(), _entry(), client)
+        first = await coordinator._async_update_data()
+        self.assertEqual(first.health, "ok")
+        self.assertIsNone(first.status)
+        self.assertIsNone(first.measurements)
+        self.assertEqual(client.calls, ["status", "health"])
+        second = await coordinator._async_update_data()
+        self.assertIs(second.status, status)
+        self.assertIsNotNone(second.measurements)
+
+    async def test_storage_unavailable_remains_update_failure(self):
+        client = _Client(_status())
+        client.statuses = [_CollectorError("dataset_storage_unavailable")]
+        coordinator = coordinator_module.CezPndCoordinator(object(), _entry(), client)
+        with self.assertRaises(_UpdateFailed):
+            await coordinator._async_update_data()
 
     def test_synthetic_ranges_are_removed(self):
         source = "\n".join(

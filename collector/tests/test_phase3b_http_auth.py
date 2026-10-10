@@ -683,6 +683,8 @@ class Phase3BHttpAuthTests(unittest.TestCase):
         self.assertEqual(rejected.code, "auth_transport_policy_invalid")
 
     def test_normal_collector_start_does_not_authenticate(self) -> None:
+        watchdog = mock.Mock(deadline=None, cleanup_deadline=123.0)
+        watchdog.remaining.return_value = 8.0
         fake_server = mock.Mock()
         fake_server.socket = object()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
@@ -693,7 +695,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             source="test",
             discovery=None,
         )
-        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+        with mock.patch.object(server, "ShutdownWatchdog", return_value=watchdog), mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
             server.os, "getegid", return_value=2000, create=True
         ), mock.patch.object(
             server, "load_runtime_configuration", return_value=configuration
@@ -705,6 +707,7 @@ class Phase3BHttpAuthTests(unittest.TestCase):
             server.signal, "signal"
         ), mock.patch("sys.stdout", output):
             self.assertEqual(server.main(), 0)
+        watchdog.arm.assert_called_once_with()
         authenticate.assert_not_called()
         payloads = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(

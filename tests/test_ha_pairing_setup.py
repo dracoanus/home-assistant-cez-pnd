@@ -7,7 +7,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).parents[1]
 INTEGRATION = ROOT / "custom_components" / "cez_pnd"
@@ -19,16 +19,23 @@ CA = "public-ca"
 
 class _CollectorError(Exception): pass
 class _CollectorAuthenticationError(_CollectorError): pass
+class _CollectorDatasetUnavailable(_CollectorError): pass
+class _CollectorProtocolError(_CollectorError): pass
+class _CollectorUpdateRequired(_CollectorError): pass
 class _PairingRejectedError(_CollectorError): pass
 class _PairingUnavailableError(_CollectorError): pass
 class _PairingRecoveryError(Exception): pass
 class _ConfigEntryAuthFailed(Exception): pass
-class _ConfigEntryNotReady(Exception): pass
+class _ConfigEntryNotReady(Exception):
+    def __init__(self, message, **kwargs):
+        super().__init__(message)
 
 
 class _CollectorClient:
     instances = []
     failure: Exception | None = None
+    event_failure: Exception | None = None
+    dataset_missing = False
     def __init__(self, *args):
         self.health_calls = self.status_calls = 0
         self.instances.append(self)
@@ -38,7 +45,13 @@ class _CollectorClient:
         return "ok"
     async def async_status(self):
         self.status_calls += 1
+        if self.dataset_missing:
+            raise _CollectorDatasetUnavailable("dataset_unavailable")
         return object()
+    async def async_events(self, cursor=None):
+        if self.event_failure is not None:
+            raise self.event_failure
+        return SimpleNamespace(event="state_reset", cursor="ev1_" + "a" * 32 + "_0")
 
 
 class _PairingClient:
@@ -83,14 +96,29 @@ FINALIZED_THIS_PROCESS = False
 
 class _Coordinator:
     failure: Exception | None = None
-    def __init__(self, hass, entry, client): self.data = SimpleNamespace(status=object())
+    def __init__(self, hass, entry, client):
+        self.data = SimpleNamespace(status=None if client.dataset_missing else object())
     async def async_config_entry_first_refresh(self):
         if self.failure is not None: raise self.failure
-    def async_add_listener(self, callback): return callback
+    def async_add_listener(self, callback):
+        self.listener_callback = callback
+        return lambda: None
 
 
 class _StatisticsManager:
-    def __init__(self, *args): self.schedule = Mock()
+    instances = []
+    def __init__(self, *args):
+        self.schedule = Mock()
+        self.instances.append(self)
+
+
+class _EventListener:
+    instances = []
+    def __init__(self, hass, entry, client, coordinator, cursor):
+        self.cursor = cursor
+        self.start = Mock()
+        self.async_stop = AsyncMock()
+        self.instances.append(self)
 
 
 def _load_module():
@@ -118,6 +146,9 @@ def _load_module():
     for name, value in {
         "CollectorAuthenticationError": _CollectorAuthenticationError,
         "CollectorClient": _CollectorClient, "CollectorError": _CollectorError,
+        "CollectorDatasetUnavailable": _CollectorDatasetUnavailable,
+        "CollectorProtocolError": _CollectorProtocolError,
+        "CollectorUpdateRequired": _CollectorUpdateRequired,
         "CollectorPairingClient": _PairingClient,
         "PairingRejectedError": _PairingRejectedError,
         "PairingUnavailableError": _PairingUnavailableError,
@@ -136,8 +167,11 @@ def _load_module():
     coordinator.CezPndCoordinator = _Coordinator
     statistics = ModuleType(f"{package_name}.statistics")
     statistics.CezPndStatisticsManager = _StatisticsManager
+    events = ModuleType(f"{package_name}.event_listener")
+    events.CollectorEventListener = _EventListener
     sys.modules.update({client.__name__: client, recovery.__name__: recovery,
-                        coordinator.__name__: coordinator, statistics.__name__: statistics})
+                        coordinator.__name__: coordinator, statistics.__name__: statistics,
+                        events.__name__: events})
     spec = importlib.util.spec_from_file_location(
         package_name, INTEGRATION / "__init__.py",
         submodule_search_locations=[str(INTEGRATION)],
@@ -157,14 +191,22 @@ class _ConfigEntries:
         self.async_forward_entry_setups = AsyncMock()
         self.async_unload_platforms = AsyncMock(return_value=True)
         self.async_reload = AsyncMock()
-    def async_update_entry(self, entry, *, data):
-        self.updates.append(dict(data))
-        entry.data = dict(data)
+    def async_update_entry(self, entry, *, data=None, options=None, minor_version=None):
+        if data is not None:
+            self.updates.append(dict(data))
+            entry.data = dict(data)
+        if options is not None:
+            self.updates.append(dict(options))
+            entry.options = dict(options)
+        if minor_version is not None:
+            entry.minor_version = minor_version
 
 
 class _Entry:
     def __init__(self, *, managed=True):
         self.entry_id = "entry-id"
+        self.version, self.minor_version = 1, 1
+        self.options = {}
         self.data = {"collector_url": URL, "meter_id": METER_ID,
                      "api_token": TOKEN, "ca_certificate": CA}
         if managed:
@@ -185,6 +227,10 @@ class PairingSetupTests(unittest.IsolatedAsyncioTestCase):
         _CollectorClient.instances.clear()
         _PairingClient.instances.clear()
         _CollectorClient.failure = None
+        _CollectorClient.event_failure = None
+        _CollectorClient.dataset_missing = False
+        _EventListener.instances.clear()
+        _StatisticsManager.instances.clear()
         _Coordinator.failure = None
         _PairingClient.activate_failure = _PairingClient.finalize_failure = None
         _Journal.record, _Journal.remove_calls, _Journal.remove_failure = _Recovery(), 0, None
@@ -302,11 +348,11 @@ class PairingSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_Journal.remove_calls, 0)
         self.assertNotIn("pairing_finalize_pending", reconstructed.data)
 
-    async def test_unload_and_options_reload_after_finalize_retain_journal(self):
+    async def test_unload_and_manual_reload_after_finalize_retain_journal(self):
         entry = _Entry()
         self.assertTrue(await module.async_setup_entry(self.hass, entry))
         self.assertTrue(await module.async_unload_entry(self.hass, entry))
-        await module._async_update_listener(self.hass, entry)
+        _EventListener.instances[0].async_stop.assert_awaited_once()
         self.assertTrue(await module.async_setup_entry(self.hass, entry))
         self.assertEqual(_Journal.remove_calls, 0)
 
@@ -351,6 +397,46 @@ class PairingSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_PairingClient.instances, [])
         self.assertEqual(_Journal.remove_calls, 0)
         self.assertEqual(self.hass.config_entries.updates, [])
+
+    async def test_event_handshake_starts_one_listener_after_pairing(self):
+        entry = _Entry()
+        self.assertTrue(await module.async_setup_entry(self.hass, entry))
+        self.assertEqual(len(_EventListener.instances), 1)
+        self.assertEqual(_EventListener.instances[0].cursor, "ev1_" + "a" * 32 + "_0")
+        _EventListener.instances[0].start.assert_called_once()
+        self.assertEqual(_PairingClient.instances[0].finalizations, [TOKEN])
+
+    async def test_old_collector_fails_setup_without_polling(self):
+        _CollectorClient.event_failure = _CollectorUpdateRequired("collector_update_required")
+        with self.assertRaisesRegex(_ConfigEntryNotReady, "collector_update_required"):
+            await module.async_setup_entry(self.hass, _Entry(managed=False))
+        self.assertEqual(_EventListener.instances, [])
+
+    async def test_event_handshake_auth_failure_is_not_update_required(self):
+        _CollectorClient.event_failure = _CollectorAuthenticationError("fixed")
+        with self.assertRaises(_ConfigEntryAuthFailed):
+            await module.async_setup_entry(self.hass, _Entry(managed=False))
+        self.assertEqual(_EventListener.instances, [])
+
+    async def test_event_handshake_requires_initial_state_reset(self):
+        for response in (None, SimpleNamespace(event="sync_finished", cursor="synthetic")):
+            with patch.object(_CollectorClient, "async_events", new=AsyncMock(return_value=response)):
+                with self.assertRaisesRegex(_ConfigEntryNotReady, "collector_events_unavailable"):
+                    await module.async_setup_entry(self.hass, _Entry(managed=False))
+        self.assertEqual(_EventListener.instances, [])
+
+    async def test_no_dataset_setup_pairing_and_statistics_recover_without_reload(self):
+        _CollectorClient.dataset_missing = True
+        entry = _Entry()
+        self.assertTrue(await module.async_setup_entry(self.hass, entry))
+        statistics = _StatisticsManager.instances[0]
+        statistics.schedule.assert_not_called()
+        entry.runtime_data.listener_callback()
+        statistics.schedule.assert_not_called()
+        status = object()
+        entry.runtime_data.data.status = status
+        entry.runtime_data.listener_callback()
+        statistics.schedule.assert_called_once_with(status)
 
 
 if __name__ == "__main__":

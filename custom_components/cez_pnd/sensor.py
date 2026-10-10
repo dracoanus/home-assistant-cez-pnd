@@ -136,13 +136,24 @@ class CezPndSensor(CoordinatorEntity[CezPndCoordinator], SensorEntity):
     def native_value(self) -> str | int | Decimal | datetime | None:
         """Return a validated value; missing data remains unknown."""
 
+        if not self.available:
+            return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def available(self) -> bool:
+        if not super().available or self.coordinator.data is None:
+            return False
+        return self.entity_description.key == "collector_health" or (
+            self.coordinator.data.status is not None
+            and self.coordinator.data.measurements is not None
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Expose bounded interval metadata for the latest measurement."""
 
-        if self.entity_description.key != "grid_import":
+        if self.entity_description.key != "grid_import" or not self.available:
             return None
         measurement = self.coordinator.data.measurements.latest_valid_grid_import
         if measurement is None:

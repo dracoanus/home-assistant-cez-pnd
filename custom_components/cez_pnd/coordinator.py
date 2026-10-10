@@ -1,4 +1,4 @@
-"""Coordinated polling for CEZ PND Collector."""
+"""Authoritative event-triggered reconciliation for CEZ PND Collector."""
 
 from __future__ import annotations
 
@@ -14,28 +14,24 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .client import (
     CollectorAuthenticationError,
     CollectorClient,
+    CollectorDatasetUnavailable,
     CollectorError,
     CollectorMeasurements,
     CollectorProtocolError,
     CollectorStatus,
 )
-from .const import (
-    CONF_POLL_INTERVAL_SECONDS,
-    DEFAULT_POLL_INTERVAL_SECONDS,
-    DOMAIN,
-    validate_poll_interval_seconds,
-)
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class CollectorSnapshot:
-    """One internally consistent Collector polling result."""
+    """One internally consistent result, or health without an initial dataset."""
 
     health: str
-    status: CollectorStatus
-    measurements: CollectorMeasurements
+    status: CollectorStatus | None
+    measurements: CollectorMeasurements | None
 
 
 class CezPndCoordinator(DataUpdateCoordinator[CollectorSnapshot]):
@@ -52,14 +48,7 @@ class CezPndCoordinator(DataUpdateCoordinator[CollectorSnapshot]):
             logger=_LOGGER,
             name=DOMAIN,
             config_entry=config_entry,
-            update_interval=timedelta(
-                seconds=validate_poll_interval_seconds(
-                    getattr(config_entry, "options", {}).get(
-                        CONF_POLL_INTERVAL_SECONDS,
-                        DEFAULT_POLL_INTERVAL_SECONDS,
-                    )
-                )
-            ),
+            update_interval=None,
             always_update=False,
         )
         self._client = client
@@ -67,7 +56,12 @@ class CezPndCoordinator(DataUpdateCoordinator[CollectorSnapshot]):
 
     async def _async_update_data(self) -> CollectorSnapshot:
         try:
-            status = await self._client.async_status()
+            try:
+                status = await self._client.async_status()
+            except CollectorDatasetUnavailable:
+                health = await self._client.async_health()
+                self._measurements = None
+                return CollectorSnapshot(health, None, None)
             if status.data_timestamp is None or status.last_success is None:
                 raise UpdateFailed("collector_dataset_unavailable")
             health = await self._client.async_health()

@@ -29,8 +29,9 @@ API.
 - SQLite UPSERT is idempotent; later valid data replaces missing placeholders.
 - `data_timestamp` is the maximum valid interval end, never a future missing
   interval.
-- Current day runs hourly; backfill and correction run every six hours in one
-  serialized worker.
+- Development Phase 2: current day runs immediately, then after a configurable
+  15–720 minute completion-relative interval (default 60). History has its own
+  six-hour completion-relative deadline; one worker serializes both schedules.
 
 ## Statistics trap
 
@@ -143,3 +144,40 @@ ConfigEntry persistence across Core restart, finalize, discovery removal and
 recovery-journal cleanup in the following Core process. Guided pairing is the
 normal installation path. Automatic leaf renewal, CA rotation, managed-token
 rotation and legacy-to-managed migration remain deferred.
+
+### Unreleased Phase 2B shutdown guard
+
+The accepted shutdown strategy preserves requests authentication and uses a
+prestarted daemon fail-stop guard: first SIGTERM fixes a 10-second monotonic hard
+deadline and a shared 8-second cooperative deadline. Forced termination calls
+`os._exit(70)` silently; normal cleanup returns 0. It is not cooperative transport
+cancellation. The App stop timeout is 15 seconds, providing a five-second
+Supervisor operational margin after the 10-second watchdog. Phase 2B Linux
+validation passed on GitHub Actions ubuntu-latest; Windows skips alone do not
+establish the process bound. Repeat Linux validation after shutdown changes.
+SQLite journal recovery belongs to SQLite. Startup cleanup is restricted to verified
+private pairing-state atomic-write leftovers in the managed directory; interrupted
+identity generation retains existing fail-closed handling.
+
+### Unreleased Phase 3 synchronization notifications
+
+SyncWorker now receives the existing server EventBroker publication callable.
+It publishes `sync_finished` after every completed collection invocation, using
+`current_day`, `historical_backfill` or `historical_correction`. Two backfill chunks
+produce two sequential publications; checkpoint advancement and structured log
+events do not add notifications. Dataset revision comes from authoritative store
+status after the attempt, unchanged on failed collection and null only without a
+dataset. Read/publication failures are isolated from collection; broker stopping
+is expected, other failures use only `sync_notification_failed`. STOP starts no
+new notification work. Broker coalescing and non-durability remain unchanged.
+Phase 4 now connects the HA consumer (integration version still 0.1.10): one
+ConfigEntry-owned authenticated long poll plus a fixed 300-second reconciliation
+watchdog, both cancelled on unload. Events are only triggers for the public
+coordinator refresh; API snapshots remain authoritative and unchanged revisions
+reuse measurements. No configured polling remains. ConfigEntry minor migration
+1.2 removes only the old interval option, preserving private data and pairing.
+The initial capability handshake requires state_reset; event endpoint 404 means
+collector_update_required, not authentication failure or a polling fallback.
+Healthy dataset-unavailable startup is supported, with no fabricated energy and
+statistics deferred until an authoritative dataset exists. Phase 4 still requires
+Linux and manual HA lifecycle validation; do not infer it from local stub tests.

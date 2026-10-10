@@ -187,7 +187,7 @@ for forbidden in (
     assert forbidden not in SOURCE
 
 routes = set(re.findall(r'f"\{API_PREFIX\}(/[^"}]*)"', SOURCE))
-assert routes == {"/health", "/status", "/measurements"}
+assert routes == {"/health", "/status", "/measurements", "/events"}
 assert "hmac.compare_digest" in SOURCE
 assert 'PAIRING_PREFIX = "/pairing/v1"' in PAIRING_SOURCE
 assert PAIRING_SOURCE.count('f"{PAIRING_PREFIX}/') == 3
@@ -215,8 +215,9 @@ assert "BIND_ADDRESS = \"0.0.0.0\"" in SOURCE
 assert "BIND_PORT = 8443" in SOURCE
 assert "ssl.PROTOCOL_TLS_SERVER" in SOURCE
 assert "do_handshake_on_connect=False" in SERVER_SOURCE
-assert "connection.settimeout(5.0)" in SERVER_SOURCE
-assert "connection.do_handshake()" in SERVER_SOURCE
+assert "SOCKET_TIMEOUT_SECONDS = 5.0" in SERVER_SOURCE
+assert "connection.settimeout(SOCKET_TIMEOUT_SECONDS)" in SERVER_SOURCE
+assert "request.do_handshake()" in SERVER_SOURCE
 assert 'context.set_alpn_protocols(["http/1.1"])' in STRICT_TRANSPORT_SOURCE
 assert "os.O_NOFOLLOW" in SOURCE
 assert "os.fstat" in SOURCE
@@ -400,8 +401,11 @@ assert "os.replace" in DATA_PROBE_SOURCE
 assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
-assert "SyncWorker(sync_configuration, store=dataset_store)" in SERVER_SOURCE
-assert "CURRENT_DAY_SYNC_INTERVAL_SECONDS = 60 * 60" in SYNC_WORKER_SOURCE
+assert "store=dataset_store, publish=server.event_broker.publish" in SERVER_SOURCE
+assert "configuration.sync_interval_minutes * 60" in SYNC_WORKER_SOURCE
+assert "type(value) is not int or not 15 <= value <= 720" in RUNTIME_CONFIG_SOURCE
+assert "  sync_interval_minutes: 60" in APP_OPTIONS_SECTION
+assert "  sync_interval_minutes: int(15,720)" in APP_SCHEMA_SECTION
 assert "HISTORICAL_SYNC_INTERVAL_SECONDS = 6 * 60 * 60" in SYNC_WORKER_SOURCE
 assert "BACKFILL_CHUNK_DAYS = 31" in SYNC_WORKER_SOURCE
 assert "BACKFILL_MAX_CHUNKS_PER_CYCLE = 2" in SYNC_WORKER_SOURCE
@@ -841,7 +845,7 @@ ast.parse(ENTRYPOINT_SOURCE, filename=str(ROOT / "collector_entrypoint.py"))
 print("PASS: immutable validated Debian runtime base")
 print("PASS: root-owned mode-0555 source is set atomically by COPY")
 print("PASS: root-only storage bootstrap drops permanently to UID/GID 2000:2000")
-print("PASS: exactly three versioned read-only API routes")
+print("PASS: exactly four versioned read-only API routes")
 print("PASS: TLS and constant-time bearer verifier required")
 print("PASS: CEZ hosts exist only in reviewed authentication/data-probe code")
 print("PASS: missing measurement is null, never synthesized zero")
@@ -857,3 +861,77 @@ print("PASS: active requests auth validates every hop before its documented seco
 print("PASS: one-shot authenticated data probe is bounded, exact-destination, and private")
 print("PASS: export observations and failure codes expose only bounded structural metadata")
 print("PASS: CEZ CSV parsing is bounded, decimal-exact, DST-aware, and MIT-attributed")
+
+EVENT_SOURCE = (ROOT / "collector_service" / "event_broker.py").read_text(encoding="utf-8")
+assert "MAX_ACTIVE_HANDLERS = 8" in SERVER_SOURCE
+assert "REQUEST_DEADLINE_SECONDS = 35.0" in SERVER_SOURCE
+assert "HANDLER_STOP_BUDGET_SECONDS = 5.0" in SERVER_SOURCE
+assert "len(self._handlers) >= MAX_ACTIVE_HANDLERS" in SERVER_SOURCE
+assert "MAX_EVENT_WAITERS = 2" in EVENT_SOURCE
+assert "MAX_EVENT_WAIT_SECONDS = 25.0" in EVENT_SOURCE
+assert "MAX_EVENT_RESPONSE_BYTES = 4096" in EVENT_SOURCE
+assert "threading.Condition()" in EVENT_SOURCE and "notify_all()" in EVENT_SOURCE
+assert 'f"{API_PREFIX}/events": "status:read"' in API_SOURCE
+assert 'self._verifier.authorize(_header(headers, "Authorization"), "status:read")' in API_SOURCE
+SYNC_SOURCE = (ROOT / "collector_service" / "sync_worker.py").read_text(encoding="utf-8")
+assert "from .event_broker import EventBrokerError, SyncEvent" in SYNC_SOURCE
+assert "status = self._store.read_status()" in SYNC_SOURCE
+assert "None if status is None else status.revision" in SYNC_SOURCE
+assert 'error.code == "event_broker_stopping"' in SYNC_SOURCE
+assert '"historical_backfill"' in SYNC_SOURCE and '"historical_correction"' in SYNC_SOURCE
+assert "dataset_changed" not in SYNC_SOURCE
+print("PASS: bounded authenticated event API; per-attempt authoritative sync notifications")
+
+assert 'from .dataset_revision import REVISION_PATTERN' in API_SOURCE
+assert 'from .dataset_revision import REVISION_PATTERN' in EVENT_SOURCE
+assert 'dataset_revision: str | None' in EVENT_SOURCE
+assert 'REVISION_PATTERN.fullmatch(self.dataset_revision)' in EVENT_SOURCE
+assert 'REVISION_PATTERN = ' not in API_SOURCE and 'REVISION_PATTERN = ' not in EVENT_SOURCE
+print("PASS: event revision reuses the opaque dataset API string contract")
+
+HA_ROOT = ROOT.parent / "custom_components" / "cez_pnd"
+HA_CLIENT = (HA_ROOT / "client.py").read_text(encoding="utf-8")
+HA_COORDINATOR = (HA_ROOT / "coordinator.py").read_text(encoding="utf-8")
+HA_LISTENER = (HA_ROOT / "event_listener.py").read_text(encoding="utf-8")
+HA_SETUP = (HA_ROOT / "__init__.py").read_text(encoding="utf-8")
+HA_FLOW = (HA_ROOT / "config_flow.py").read_text(encoding="utf-8")
+assert "EVENT_TIMEOUT = aiohttp.ClientTimeout(total=35, connect=5, sock_read=30)" in HA_CLIENT
+assert "MAX_EVENT_RESPONSE_BYTES = 4096" in HA_CLIENT
+assert "allow_redirects=False" in HA_CLIENT and "ssl=self._ssl_context" in HA_CLIENT
+assert 'REVISION_PATTERN.fullmatch(revision)' in HA_CLIENT
+assert "update_interval=None" in HA_COORDINATOR
+assert "RECONCILIATION_SECONDS = 300" in HA_LISTENER
+assert "RECONNECT_SECONDS = (1, 2, 5, 10, 30, 60)" in HA_LISTENER
+assert "async_create_background_task" in HA_LISTENER
+assert "async_request_refresh()" in HA_LISTENER
+assert "async_start_reauth" in HA_LISTENER and "async_schedule_reload" in HA_LISTENER
+assert "await entry.runtime_data.event_listener.async_stop()" in HA_SETUP
+assert 'options.pop("poll_interval_seconds", None)' in HA_SETUP
+assert "MINOR_VERSION = 2" in HA_FLOW
+assert "OptionsFlow" not in HA_FLOW and "add_update_listener" not in HA_SETUP
+assert '"iot_class":  "local_push"' in (HA_ROOT / "manifest.json").read_text(encoding="utf-8")
+print("PASS: HA event-only triggers, bounded TLS long polls and ConfigEntry-owned recovery")
+
+assert "retry_kind: str | None = None" in SYNC_WORKER_SOURCE
+assert "TRANSIENT_RETRY_SECONDS = (5 * 60, 15 * 60, 30 * 60, 60 * 60)" in SYNC_WORKER_SOURCE
+assert "completed + self._historical_interval_seconds" in SYNC_WORKER_SOURCE
+assert "completed + self._interval_seconds" in SYNC_WORKER_SOURCE
+assert "self._wait(deadline - current_time)" in SYNC_WORKER_SOURCE
+assert "WORKER_STOP_TIMEOUT_SECONDS = COOPERATIVE_STOP_SECONDS" in SYNC_WORKER_SOURCE
+assert re.search(r"^timeout: 15$", APP_MANIFEST, re.MULTILINE)
+assert "sync_worker.request_stop()" in SERVER_SOURCE
+assert "deadline=watchdog.cleanup_deadline" in SERVER_SOURCE
+assert "pairing_worker.request_stop()" in SERVER_SOURCE
+SHUTDOWN_SOURCE = (ROOT / "collector_service" / "shutdown.py").read_text(encoding="utf-8")
+assert "HARD_STOP_SECONDS = 10.0" in SHUTDOWN_SOURCE
+assert "COOPERATIVE_STOP_SECONDS = 8.0" in SHUTDOWN_SOURCE
+assert "FORCED_EXIT_STATUS = 70" in SHUTDOWN_SOURCE
+assert "terminate(status)" in SHUTDOWN_SOURCE
+assert "daemon=True" in SHUTDOWN_SOURCE
+assert "if self.deadline is None:" in SHUTDOWN_SOURCE
+assert "os._exit" in SHUTDOWN_SOURCE
+assert "write_json_line" not in SHUTDOWN_SOURCE
+for language in ("cs", "en"):
+    translation = (REPOSITORY_ROOT / "cez_pnd_collector" / "translations" / (language + ".yaml")).read_text(encoding="utf-8")
+    assert "  sync_interval_minutes:" in translation
+print("PASS: strict configurable cadence, independent history and bounded recovery waits")

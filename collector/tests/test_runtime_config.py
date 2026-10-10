@@ -366,6 +366,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                 return_value=runtime_config.SupervisorSelfInfo({}, "606197c3_cez_pnd_collector"),
             ),
             mock.patch.object(runtime_config.ManagedIdentityStore, "load_or_create", return_value=(identity, True)),
+            mock.patch.object(runtime_config, "recover_pairing_temporaries"),
             mock.patch.object(runtime_config, "ManagedCredentialStore", return_value=credentials),
             mock.patch.object(runtime_config, "_context_from_memory", return_value=context) as load_tls,
         ):

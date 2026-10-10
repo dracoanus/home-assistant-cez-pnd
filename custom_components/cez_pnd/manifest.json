@@ -10,7 +10,7 @@
                           "recorder"
                       ],
     "integration_type":  "hub",
-    "iot_class":  "local_polling",
+    "iot_class":  "local_push",
     "issue_tracker":  "https://github.com/dracoanus/home-assistant-cez-pnd/issues",
     "requirements":  [
 

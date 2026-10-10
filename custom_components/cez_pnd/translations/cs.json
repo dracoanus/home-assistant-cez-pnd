@@ -37,15 +37,8 @@
       "discovery_expired": "Pozvánka Collectoru ke spárování vypršela"
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Interval aktualizace",
-        "description": "Nastavte, jak často Home Assistant ověří novou revizi datasetu v místním Collectoru.",
-        "data": {"poll_interval_seconds": "Interval dotazování"}
-      }
-    },
-    "error": {"invalid_poll_interval": "Zadejte celé číslo od 30 do 3600 sekund"}
+  "exceptions": {
+    "collector_update_required": {"message": "Aktualizujte Collector na verzi podporující události synchronizace."}
   },
   "entity": {
     "sensor": {

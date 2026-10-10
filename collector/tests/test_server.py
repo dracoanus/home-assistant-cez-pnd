@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import signal
+import threading
 import io
 import re
 import unittest
@@ -18,6 +19,15 @@ from collector_service.structured_logging import structured_event_json
 
 
 class CollectorServerLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(server, "ShutdownWatchdog")
+        self.watchdog = patcher.start().return_value
+        self.watchdog.remaining.return_value = 8.0
+        self.watchdog.cleanup_deadline = 123.0
+        self.addCleanup(patcher.stop)
+        signal_patcher = mock.patch.object(server.signal, "signal")
+        signal_patcher.start()
+        self.addCleanup(signal_patcher.stop)
     def test_tls_timeout_is_set_before_handshake(self) -> None:
         calls: list[object] = []
 
@@ -43,7 +53,7 @@ class CollectorServerLifecycleTest(unittest.TestCase):
         ):
             accepted, _address = collector_server.get_request()
         self.assertIs(accepted, connection)
-        self.assertEqual(calls, [("timeout", 5.0), "handshake"])
+        self.assertEqual(calls, [("timeout", 5.0)])
 
     def test_failed_tls_handshake_closes_connection(self) -> None:
         calls: list[object] = []
@@ -60,17 +70,13 @@ class CollectorServerLifecycleTest(unittest.TestCase):
                 calls.append("close")
 
         collector_server = object.__new__(server.CollectorHttpServer)
-        with (
-            mock.patch.object(
-                server.HTTPServer,
-                "get_request",
-                return_value=(FakeTlsSocket(), ("127.0.0.1", 1)),
-            ),
-            mock.patch.object(server.ssl, "SSLSocket", FakeTlsSocket),
-            self.assertRaises(TimeoutError),
-        ):
-            collector_server.get_request()
-        self.assertEqual(calls, [("timeout", 5.0), "handshake", "close"])
+        collector_server._handlers_lock = threading.RLock()
+        collector_server._handlers = {}
+        collector_server._stopping = threading.Event()
+        collector_server.shutdown_request = lambda connection: connection.close()
+        with mock.patch.object(server.ssl, "SSLSocket", FakeTlsSocket):
+            collector_server._handle_request(FakeTlsSocket(), ("127.0.0.1", 1))
+        self.assertEqual(calls, ["handshake", "close"])
 
     def test_structured_timestamp_is_utc_second_precision_and_first(self) -> None:
         encoded = structured_event_json(
@@ -204,8 +210,51 @@ class CollectorServerLifecycleTest(unittest.TestCase):
         ):
             self.assertEqual(server.main(), 0)
         worker_instance.start.assert_called_once_with()
-        worker_instance.stop.assert_called_once_with()
+        worker_instance.stop.assert_called_once_with(timeout=8.0)
         fake_server.serve_forever.assert_called_once_with(poll_interval=0.5)
+
+    def test_worker_join_overrun_exits_nonzero_without_exception_text(self) -> None:
+        configuration = SimpleNamespace(
+            discovery=None,
+            requests_preauth_compatibility=False,
+            data_probe=None,
+            http_auth_discovery=None,
+            sync=mock.Mock(),
+            verifier=mock.Mock(),
+            tls_context=mock.Mock(),
+            source="test",
+        )
+        fake_server = mock.Mock()
+        fake_server.socket = object()
+        output = io.StringIO()
+        worker_instance = mock.Mock()
+        worker_instance.stop.return_value = False
+
+        def worker_started() -> None:
+            self.assertIn('"event":"service_started"', output.getvalue())
+
+        worker_instance.start.side_effect = worker_started
+        with mock.patch.object(server.os, "geteuid", return_value=2000, create=True), mock.patch.object(
+            server.os, "getegid", return_value=2000, create=True
+        ), mock.patch.object(
+            server, "load_runtime_configuration", return_value=configuration
+        ), mock.patch.object(
+            server, "CollectorHttpServer", return_value=fake_server
+        ), mock.patch(
+            "collector_service.sync_worker.SyncWorker", return_value=worker_instance
+        ), mock.patch.object(
+            server.signal, "signal"
+        ), mock.patch(
+            "sys.stdout", output
+        ), mock.patch.object(server.threading, "Event"):
+
+            self.assertEqual(server.main(), 1)
+        worker_instance.start.assert_called_once_with()
+        worker_instance.stop.assert_called_once_with(timeout=8.0)
+        fake_server.serve_forever.assert_called_once_with(poll_interval=0.5)
+
+        self.assertNotIn("synthetic exception", output.getvalue())
+        worker_instance.request_stop.assert_called_once_with()
 
 
 if __name__ == "__main__":
