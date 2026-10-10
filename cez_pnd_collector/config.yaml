@@ -10,7 +10,7 @@ startup: application
 boot: manual
 init: false
 stage: experimental
-timeout: 162
+timeout: 15
 tmpfs: true
 host_network: false
 host_pid: false

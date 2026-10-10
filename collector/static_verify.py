@@ -889,7 +889,7 @@ assert "completed + self._historical_interval_seconds" in SYNC_WORKER_SOURCE
 assert "completed + self._interval_seconds" in SYNC_WORKER_SOURCE
 assert "self._wait(deadline - current_time)" in SYNC_WORKER_SOURCE
 assert "WORKER_STOP_TIMEOUT_SECONDS = COOPERATIVE_STOP_SECONDS" in SYNC_WORKER_SOURCE
-assert "timeout: 162" in APP_MANIFEST
+assert re.search(r"^timeout: 15$", APP_MANIFEST, re.MULTILINE)
 assert "sync_worker.request_stop()" in SERVER_SOURCE
 assert "deadline=watchdog.cleanup_deadline" in SERVER_SOURCE
 assert "pairing_worker.request_stop()" in SERVER_SOURCE

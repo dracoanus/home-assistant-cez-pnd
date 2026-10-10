@@ -151,8 +151,10 @@ The accepted shutdown strategy preserves requests authentication and uses a
 prestarted daemon fail-stop guard: first SIGTERM fixes a 10-second monotonic hard
 deadline and a shared 8-second cooperative deadline. Forced termination calls
 `os._exit(70)` silently; normal cleanup returns 0. It is not cooperative transport
-cancellation. Verify real Linux process tests before reducing the temporary App
-timeout from 162 to the target 15 seconds; Windows skips do not establish the bound.
+cancellation. The App stop timeout is 15 seconds, providing a five-second
+Supervisor operational margin after the 10-second watchdog. Phase 2B Linux
+validation passed on GitHub Actions ubuntu-latest; Windows skips alone do not
+establish the process bound. Repeat Linux validation after shutdown changes.
 SQLite journal recovery belongs to SQLite. Startup cleanup is restricted to verified
 private pairing-state atomic-write leftovers in the managed directory; interrupted
 identity generation retains existing fail-closed handling. No event producer is

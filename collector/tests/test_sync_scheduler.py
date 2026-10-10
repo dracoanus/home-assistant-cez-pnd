@@ -192,10 +192,17 @@ class SchedulerTests(unittest.TestCase):
 
     def test_join_budget_and_app_timeout_contract(self):
         import re
+        from collector_service import shutdown
         root = Path(__file__).resolve().parents[2]
         manifest = (root/"cez_pnd_collector/config.yaml").read_text(encoding="utf-8")
         self.assertEqual(sync_worker.WORKER_STOP_TIMEOUT_SECONDS, 8)
-        self.assertGreaterEqual(int(re.search(r"^timeout: ([0-9]+)$", manifest, re.M)[1]), 15)
+        app_timeout = int(re.search(r"^timeout: ([0-9]+)$", manifest, re.M)[1])
+        self.assertEqual(app_timeout, 15)
+        self.assertEqual(shutdown.HARD_STOP_SECONDS, 10)
+        self.assertEqual(shutdown.COOPERATIVE_STOP_SECONDS, 8)
+        self.assertEqual(shutdown.FORCED_EXIT_STATUS, 70)
+        self.assertGreater(app_timeout, shutdown.HARD_STOP_SECONDS)
+        self.assertEqual(app_timeout - shutdown.HARD_STOP_SECONDS, 5)
         worker, _, _ = self.worker()
         worker._thread = mock.Mock()
         worker._thread.is_alive.return_value = True
