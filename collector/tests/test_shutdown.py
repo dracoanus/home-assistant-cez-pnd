@@ -29,8 +29,12 @@ from collector_service.cez_csv_models import PndChannel, IntervalQuality
 from decimal import Decimal
 
 
-def _ready(directory: Path, value: str = "ready") -> None:
-    (directory / "ready").write_text(value, encoding="ascii")
+def _ready(directory: Path) -> None:
+    # Test-only identity evidence proves that readiness came from the exec child.
+    (directory / "ready").write_text(json.dumps({
+        "pid": os.getpid(), "parent_pid": os.getppid(),
+        "session_id": os.getsid(0), "process_group": os.getpgrp(),
+    }), encoding="ascii")
 
 
 def _child(mode: str, directory: Path) -> int:
@@ -179,15 +183,24 @@ class ShutdownProcessTests(unittest.TestCase):
         environment["PYTHONPATH"] = str(root) + os.pathsep + str(root / "collector")
         child = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()),
             "--child", mode, str(directory)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=environment)
+            env=environment, start_new_session=True)
         try:
             deadline = time.monotonic() + 10
-            while not (directory / "ready").exists():
+            identity = None
+            while identity is None:
                 if child.poll() is not None:
                     output, error = child.communicate()
                     self.fail(f"child failed before barrier: {output!r} {error!r}")
                 self.assertLess(time.monotonic(), deadline, "child barrier not reached")
-                time.sleep(.01)
+                try:
+                    identity = json.loads((directory / "ready").read_text(encoding="ascii"))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    time.sleep(.01)
+            self.assertNotEqual(child.pid, os.getpid())
+            self.assertEqual(identity, {
+                "pid": child.pid, "parent_pid": os.getpid(),
+                "session_id": child.pid, "process_group": child.pid,
+            })
             started = time.monotonic()
             child.send_signal(signal.SIGTERM)
             # Repeat signals cannot extend the first hard deadline.
@@ -279,6 +292,39 @@ class ShutdownProcessTests(unittest.TestCase):
 
 
 class ShutdownUnitTests(unittest.TestCase):
+    def test_earlier_startup_test_cannot_terminate_later_runner_tests(self):
+        # Reproduce the complete parent-runner lifetime in a disposable process.
+        # Before the fix, its real leaked watchdog exited 70 during the second test.
+        script = '''
+import os, sys, time, unittest
+from collector.tests.test_phase3b_http_auth import Phase3BHttpAuthTests
+from collector.tests.test_phase3a_discovery import Phase3ADiscoveryTests
+from collector_service.shutdown import HARD_STOP_SECONDS
+class RemainingRunnerTest(unittest.TestCase):
+    def runTest(self):
+        time.sleep(HARD_STOP_SECONDS + 0.25)
+if os.name == "posix":
+    from collector.tests.test_shutdown import ShutdownProcessTests
+    following_test = ShutdownProcessTests("test_blocked_body")
+else:
+    following_test = RemainingRunnerTest()
+suite = unittest.TestSuite([
+    Phase3ADiscoveryTests("test_normal_server_start_does_not_run_discovery"),
+    Phase3BHttpAuthTests("test_normal_collector_start_does_not_authenticate"),
+    following_test,
+])
+result = unittest.TextTestRunner().run(suite)
+sys.exit(0 if result.wasSuccessful() else 1)
+'''
+        root = Path(__file__).resolve().parents[2]
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(root) + os.pathsep + str(root / "collector")
+        result = subprocess.run([sys.executable, "-B", "-c", script],
+            capture_output=True, timeout=20, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertIn(b"Ran 3 tests", result.stderr)
+        self.assertIn(b"OK", result.stderr)
+
     def test_first_arm_wins_and_forced_path_is_silent(self):
         clock = [100]
         with mock.patch.object(shutdown.os, "_exit") as terminate, \
