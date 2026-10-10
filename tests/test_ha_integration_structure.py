@@ -19,7 +19,7 @@ class IntegrationStructureTests(unittest.TestCase):
         self.assertEqual(manifest["domain"], "cez_pnd")
         self.assertEqual(manifest["dependencies"], ["recorder"])
         self.assertTrue(manifest["config_flow"])
-        self.assertEqual(manifest["iot_class"], "local_polling")
+        self.assertEqual(manifest["iot_class"], "local_push")
         self.assertEqual(manifest["requirements"], [])
         for name in (
             "__init__.py",
@@ -28,6 +28,7 @@ class IntegrationStructureTests(unittest.TestCase):
             "coordinator.py",
             "sensor.py",
             "statistics.py",
+            "event_listener.py",
         ):
             self.assertTrue((INTEGRATION / name).is_file())
 
@@ -80,13 +81,18 @@ class IntegrationStructureTests(unittest.TestCase):
         self.assertNotIn(".storage/core.config_entries", combined)
         self.assertIn("async_update_entry", setup)
 
-    def test_polling_options_reload_without_collector_permissions(self) -> None:
+    def test_event_architecture_removes_polling_ui_and_update_listener(self) -> None:
         flow = (INTEGRATION / "config_flow.py").read_text(encoding="utf-8")
         setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("class CezPndOptionsFlow", flow)
-        self.assertIn("CONF_POLL_INTERVAL_SECONDS", flow)
-        self.assertIn("entry.add_update_listener(_async_update_listener)", setup)
-        self.assertIn("async_reload(entry.entry_id)", setup)
+        self.assertNotIn("CezPndOptionsFlow", flow)
+        self.assertNotIn("CONF_POLL_INTERVAL_SECONDS", flow)
+        self.assertNotIn("add_update_listener", setup)
+        self.assertIn("async_migrate_entry", setup)
+        self.assertIn("MINOR_VERSION = 2", flow)
+        for name in ("strings.json", "translations/en.json", "translations/cs.json"):
+            payload = json.loads((INTEGRATION / name).read_text(encoding="utf-8"))
+            self.assertNotIn("options", payload)
+            self.assertIn("collector_update_required", payload["exceptions"])
 
     def test_statistics_work_is_owned_by_config_entry_lifecycle(self) -> None:
         setup = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")

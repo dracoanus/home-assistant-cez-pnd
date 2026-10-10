@@ -889,6 +889,29 @@ assert 'REVISION_PATTERN.fullmatch(self.dataset_revision)' in EVENT_SOURCE
 assert 'REVISION_PATTERN = ' not in API_SOURCE and 'REVISION_PATTERN = ' not in EVENT_SOURCE
 print("PASS: event revision reuses the opaque dataset API string contract")
 
+HA_ROOT = ROOT.parent / "custom_components" / "cez_pnd"
+HA_CLIENT = (HA_ROOT / "client.py").read_text(encoding="utf-8")
+HA_COORDINATOR = (HA_ROOT / "coordinator.py").read_text(encoding="utf-8")
+HA_LISTENER = (HA_ROOT / "event_listener.py").read_text(encoding="utf-8")
+HA_SETUP = (HA_ROOT / "__init__.py").read_text(encoding="utf-8")
+HA_FLOW = (HA_ROOT / "config_flow.py").read_text(encoding="utf-8")
+assert "EVENT_TIMEOUT = aiohttp.ClientTimeout(total=35, connect=5, sock_read=30)" in HA_CLIENT
+assert "MAX_EVENT_RESPONSE_BYTES = 4096" in HA_CLIENT
+assert "allow_redirects=False" in HA_CLIENT and "ssl=self._ssl_context" in HA_CLIENT
+assert 'REVISION_PATTERN.fullmatch(revision)' in HA_CLIENT
+assert "update_interval=None" in HA_COORDINATOR
+assert "RECONCILIATION_SECONDS = 300" in HA_LISTENER
+assert "RECONNECT_SECONDS = (1, 2, 5, 10, 30, 60)" in HA_LISTENER
+assert "async_create_background_task" in HA_LISTENER
+assert "async_request_refresh()" in HA_LISTENER
+assert "async_start_reauth" in HA_LISTENER and "async_schedule_reload" in HA_LISTENER
+assert "await entry.runtime_data.event_listener.async_stop()" in HA_SETUP
+assert 'options.pop("poll_interval_seconds", None)' in HA_SETUP
+assert "MINOR_VERSION = 2" in HA_FLOW
+assert "OptionsFlow" not in HA_FLOW and "add_update_listener" not in HA_SETUP
+assert '"iot_class":  "local_push"' in (HA_ROOT / "manifest.json").read_text(encoding="utf-8")
+print("PASS: HA event-only triggers, bounded TLS long polls and ConfigEntry-owned recovery")
+
 assert "retry_kind: str | None = None" in SYNC_WORKER_SOURCE
 assert "TRANSIENT_RETRY_SECONDS = (5 * 60, 15 * 60, 30 * 60, 60 * 60)" in SYNC_WORKER_SOURCE
 assert "completed + self._historical_interval_seconds" in SYNC_WORKER_SOURCE

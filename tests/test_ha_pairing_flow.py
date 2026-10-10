@@ -146,6 +146,7 @@ def _load_module():
     values = {
         "CollectorAuthenticationError": _CollectorAuthenticationError,
         "CollectorClient": object, "CollectorConfigurationError": _CollectorConfigurationError,
+        "CollectorDatasetUnavailable": type("CollectorDatasetUnavailable", (_CollectorError,), {}),
         "CollectorConnectionError": _CollectorConnectionError, "CollectorError": _CollectorError,
         "CollectorPairingClient": _PairingClient, "CollectorTlsError": _CollectorTlsError,
         "PairingRejectedError": _PairingRejectedError,
@@ -183,6 +184,18 @@ def _discovery(*, expires_at="2099-01-01T00:00:00Z", config_changes=None):
 
 
 class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_connection_allows_no_initial_dataset_but_not_storage_failure(self):
+        data = {"collector_url": "https://606197c3-cez-pnd-collector:8443",
+                "meter_id": METER_ID, "api_token": TOKEN, "ca_certificate": VALID_CA}
+        client = SimpleNamespace(async_health=mock.AsyncMock(return_value="ok"),
+                                 async_status=mock.AsyncMock(side_effect=module.CollectorDatasetUnavailable("fixed")))
+        with mock.patch.object(module, "CollectorClient", return_value=client):
+            await module._validate_input(SimpleNamespace(session=object()), data)
+            client.async_health.assert_awaited_once()
+            client.async_status.side_effect = _CollectorError("dataset_storage_unavailable")
+            with self.assertRaises(_CollectorError):
+                await module._validate_input(SimpleNamespace(session=object()), data)
+
     def setUp(self):
         _Store.data, _Store.fail_readback = None, False
         _Store.options.clear()

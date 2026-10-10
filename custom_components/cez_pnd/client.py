@@ -24,6 +24,9 @@ MAX_METADATA_COUNT = (1 << 63) - 1
 MAX_PAGES = 64
 MAX_TEXT_LENGTH = 255
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
+EVENT_TIMEOUT = aiohttp.ClientTimeout(total=35, connect=5, sock_read=30)
+MAX_EVENT_RESPONSE_BYTES = 4096
+EVENT_CURSOR_PATTERN = re.compile(r"ev1_[a-f0-9]{32}_(?:0|[1-9][0-9]{0,18})", re.ASCII)
 METER_ID_PATTERN = re.compile(r"^mtr_[a-f0-9]{32}$")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 PAIRING_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
@@ -63,6 +66,69 @@ class CollectorHttpError(CollectorError):
 
 class CollectorProtocolError(CollectorError):
     """Collector response violated the bounded API contract."""
+
+
+class CollectorUpdateRequired(CollectorError):
+    """The Collector does not provide the required event endpoint."""
+
+
+class CollectorDatasetUnavailable(CollectorError):
+    """The healthy Collector has no authoritative dataset yet."""
+
+
+@dataclass(frozen=True)
+class CollectorEvent:
+    """A validated notification trigger, never an authoritative API snapshot."""
+
+    event: str
+    cursor: str
+    sync_kind: str | None = None
+    sync_result: str | None = None
+    dataset_revision: str | None = None
+
+
+def _validate_event_cursor(value: object) -> str:
+    if (
+        not isinstance(value, str) or len(value) > 56
+        or not EVENT_CURSOR_PATTERN.fullmatch(value)
+        or int(value.rsplit("_", 1)[1]) > (1 << 63) - 1
+    ):
+        raise CollectorProtocolError("invalid_event_cursor")
+    return value
+
+
+def _parse_event(payload: dict[str, Any]) -> CollectorEvent:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise CollectorProtocolError("invalid_event_schema")
+    event = payload.get("event")
+    keys = {"schema_version", "event", "cursor"}
+    if event == "sync_finished":
+        keys |= {"sync_kind", "sync_result", "dataset_revision"}
+    elif event != "state_reset":
+        raise CollectorProtocolError("invalid_event_name")
+    _require_exact_keys(payload, keys)
+    cursor = _validate_event_cursor(payload["cursor"])
+    if event == "state_reset":
+        return CollectorEvent(event, cursor)
+    if payload["sync_kind"] not in ("current_day", "historical_backfill", "historical_correction"):
+        raise CollectorProtocolError("invalid_sync_kind")
+    if payload["sync_result"] not in ("succeeded", "failed"):
+        raise CollectorProtocolError("invalid_sync_result")
+    revision = payload["dataset_revision"]
+    if revision is not None and (
+        not isinstance(revision, str) or not REVISION_PATTERN.fullmatch(revision)
+    ):
+        raise CollectorProtocolError("invalid_event_revision")
+    return CollectorEvent(event, cursor, payload["sync_kind"], payload["sync_result"], revision)
+
+
+def _event_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CollectorProtocolError("duplicate_event_field")
+        result[key] = value
+    return result
 
 
 class PairingRejectedError(CollectorError):
@@ -202,7 +268,7 @@ def create_collector_ssl_context(ca_certificate: str) -> ssl.SSLContext:
 
 
 class CollectorClient:
-    """Authenticated client exposing only the three Collector read routes."""
+    """Authenticated client exposing only the fixed Collector read routes."""
 
     def __init__(
         self,
@@ -239,6 +305,14 @@ class CollectorClient:
             "/api/v1/status", params={"meter_id": self._meter_id}
         )
         return _parse_status(payload, self._meter_id)
+
+    async def async_events(self, cursor: str | None = None) -> CollectorEvent | None:
+        """Long poll with a separate timeout and bounded, exact event schema."""
+        params = {"meter_id": self._meter_id}
+        if cursor is not None:
+            params["cursor"] = _validate_event_cursor(cursor)
+        payload = await self._async_get("/api/v1/events", params=params, events=True)
+        return None if payload is None else _parse_event(payload)
 
     async def async_measurements(
         self, start: str, end: str
@@ -317,8 +391,8 @@ class CollectorClient:
         )
 
     async def _async_get(
-        self, path: str, params: dict[str, str] | None = None
-    ) -> dict[str, Any]:
+        self, path: str, params: dict[str, str] | None = None, *, events: bool = False
+    ) -> dict[str, Any] | None:
         url = f"{self._base_url}{path}"
         try:
             async with self._session.get(
@@ -329,7 +403,7 @@ class CollectorClient:
                     "Accept": "application/json",
                 },
                 ssl=self._ssl_context,
-                timeout=REQUEST_TIMEOUT,
+                timeout=EVENT_TIMEOUT if events else REQUEST_TIMEOUT,
                 allow_redirects=False,
             ) as response:
                 if 300 <= response.status < 400:
@@ -338,7 +412,12 @@ class CollectorClient:
                     raise CollectorAuthenticationError(
                         "collector_authentication_failed"
                     )
-                if response.status < 200 or response.status >= 300:
+                if events and response.status == 404:
+                    raise CollectorUpdateRequired("collector_update_required")
+                if events and response.status == 204:
+                    return None
+                unavailable = path == "/api/v1/status" and response.status == 503
+                if response.status != 200 and not unavailable:
                     raise CollectorHttpError(response.status)
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
                 if content_type.strip().lower() != "application/json":
@@ -346,7 +425,7 @@ class CollectorClient:
                 body = bytearray()
                 async for chunk in response.content.iter_chunked(16 * 1024):
                     body.extend(chunk)
-                    if len(body) > MAX_RESPONSE_BYTES:
+                    if len(body) > (MAX_EVENT_RESPONSE_BYTES if events or unavailable else MAX_RESPONSE_BYTES):
                         raise CollectorProtocolError("response_too_large")
         except CollectorError:
             raise
@@ -358,14 +437,29 @@ class CollectorClient:
             ssl.SSLError,
         ) as error:
             raise CollectorTlsError("collector_tls_verification_failed") from error
-        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as error:
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, asyncio.TimeoutError) as error:
             raise CollectorConnectionError("collector_connection_failed") from error
         try:
-            payload = json.loads(body.decode("utf-8"))
+            payload = json.loads(body.decode("utf-8"),
+                                 object_pairs_hook=_event_json_object if events else None)
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise CollectorProtocolError("invalid_json") from error
         if not isinstance(payload, dict):
             raise CollectorProtocolError("invalid_json_root")
+        if unavailable:
+            error = payload.get("error")
+            if (
+                set(payload) == {"schema_version", "error"}
+                and payload["schema_version"] == API_SCHEMA_VERSION
+                and isinstance(error, dict)
+                and set(error) == {"code", "request_id", "retryable"}
+                and error["code"] == "dataset_unavailable"
+                and error["retryable"] is True
+                and isinstance(error["request_id"], str)
+                and re.fullmatch(r"[a-f0-9]{16}", error["request_id"])
+            ):
+                raise CollectorDatasetUnavailable("dataset_unavailable")
+            raise CollectorHttpError(503)
         return payload
 
 

@@ -11,8 +11,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .client import (
     CollectorAuthenticationError,
     CollectorClient,
+    CollectorDatasetUnavailable,
     CollectorError,
     CollectorPairingClient,
+    CollectorProtocolError,
+    CollectorUpdateRequired,
     PairingRejectedError,
     PairingUnavailableError,
     create_collector_ssl_context,
@@ -27,6 +30,7 @@ from .const import (
     CONF_PAIRING_MANAGED,
 )
 from .coordinator import CezPndCoordinator
+from .event_listener import CollectorEventListener
 from .pairing_recovery import (
     PairingRecoveryError,
     created_this_process,
@@ -36,6 +40,26 @@ from .pairing_recovery import (
 )
 
 PLATFORMS = [Platform.SENSOR]
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Remove only the obsolete polling option without contacting the Collector."""
+    if entry.version != 1:
+        return False
+    if entry.minor_version < 2:
+        options = dict(entry.options)
+        options.pop("poll_interval_seconds", None)
+        hass.config_entries.async_update_entry(entry, options=options, minor_version=2)
+    return True
+
+
+async def _verify_pairing_api(client: CollectorClient) -> None:
+    """Activation proves API access even when initial collection has not finished."""
+    await client.async_health()
+    try:
+        await client.async_status()
+    except CollectorDatasetUnavailable:
+        pass
 
 
 def _managed_pairing_state(data: dict) -> tuple[bool, bool, bool]:
@@ -103,8 +127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 raise PairingRecoveryError("pairing_recovery_mismatch")
             await pairing_client.async_activate(entry.data[CONF_API_TOKEN])
-            await client.async_health()
-            await client.async_status()
+            await _verify_pairing_api(client)
         except (PairingRejectedError, CollectorAuthenticationError) as error:
             raise ConfigEntryAuthFailed("collector_pairing_rejected") from error
         except (PairingRecoveryError, CollectorError) as error:
@@ -123,8 +146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 raise PairingRecoveryError("pairing_recovery_mismatch")
             if not api_verified:
-                await client.async_health()
-                await client.async_status()
+                await _verify_pairing_api(client)
             await pairing_client.async_finalize(entry.data[CONF_API_TOKEN])
         except (PairingRejectedError, CollectorAuthenticationError) as error:
             raise ConfigEntryAuthFailed("collector_pairing_rejected") from error
@@ -158,32 +180,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except PairingRecoveryError:
             pass
     if updated_data != entry.data:
-        # The update listener is registered below, avoiding a reload loop.
         hass.config_entries.async_update_entry(entry, data=updated_data)
+    try:
+        initial_event = await client.async_events()
+        if initial_event is None or initial_event.event != "state_reset":
+            raise CollectorProtocolError("invalid_event_handshake")
+    except CollectorAuthenticationError:
+        raise ConfigEntryAuthFailed("collector_authentication_failed") from None
+    except CollectorUpdateRequired:
+        raise ConfigEntryNotReady("collector_update_required", translation_domain="cez_pnd",
+                                  translation_key="collector_update_required") from None
+    except CollectorError:
+        raise ConfigEntryNotReady("collector_events_unavailable") from None
     coordinator = CezPndCoordinator(hass, entry, client)
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     from .statistics import CezPndStatisticsManager
 
     statistics_manager = CezPndStatisticsManager(hass, entry, client)
-    entry.async_on_unload(
-        coordinator.async_add_listener(
-            lambda: statistics_manager.schedule(coordinator.data.status)
-        )
+
+    def schedule_statistics() -> None:
+        if coordinator.data.status is not None:
+            statistics_manager.schedule(coordinator.data.status)
+
+    entry.async_on_unload(coordinator.async_add_listener(schedule_statistics))
+    schedule_statistics()
+    coordinator.event_listener = CollectorEventListener(
+        hass, entry, client, coordinator, initial_event.cursor
     )
-    statistics_manager.schedule(coordinator.data.status)
+    coordinator.event_listener.start()
     return True
-
-
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry after its polling option changes."""
-
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a CEZ PND Collector config entry."""
 
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        await entry.runtime_data.event_listener.async_stop()
+    return unloaded

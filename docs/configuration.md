@@ -51,6 +51,23 @@ Backfill is chunked and resumable. Normal, spring-DST and autumn-DST days have
 the value and is never zero-filled. `INVALID` has no energy value. Unknown CEZ
 statuses fail closed. A later valid row replaces a stored missing placeholder.
 
+## Home Assistant event-driven updates (unreleased Phase 4)
+
+The development integration uses authenticated Collector event long polling.
+There is no user-configurable HA polling interval. ConfigEntry minor migration
+to 1.2 removes the old `poll_interval_seconds` option and preserves all other
+options, configuration and pairing markers. Collector synchronization cadence
+is still controlled separately by `sync_interval_minutes`.
+
+Events only trigger reconciliation; the Collector status and measurement API
+remain authoritative. Unchanged dataset revisions reuse cached measurements.
+A fixed internal five-minute reconciliation watchdog recovers missed triggers.
+An older Collector without `/api/v1/events` requires an update; there is no
+automatic polling fallback. Healthy startup without a dataset exposes Collector
+health while dataset sensors remain unavailable, never zero. Statistics begin
+after the first dataset appears. HA integration version remains 0.1.10 during
+development; this is not a release announcement.
+
 ## Advanced and troubleshooting options
 
 Diagnostic options are intentionally optional. On a clean installation they are

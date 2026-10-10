@@ -170,4 +170,14 @@ status after the attempt, unchanged on failed collection and null only without a
 dataset. Read/publication failures are isolated from collection; broker stopping
 is expected, other failures use only `sync_notification_failed`. STOP starts no
 new notification work. Broker coalescing and non-durability remain unchanged.
-The Home Assistant integration is not connected to events yet and retains polling.
+Phase 4 now connects the HA consumer (integration version still 0.1.10): one
+ConfigEntry-owned authenticated long poll plus a fixed 300-second reconciliation
+watchdog, both cancelled on unload. Events are only triggers for the public
+coordinator refresh; API snapshots remain authoritative and unchanged revisions
+reuse measurements. No configured polling remains. ConfigEntry minor migration
+1.2 removes only the old interval option, preserving private data and pairing.
+The initial capability handshake requires state_reset; event endpoint 404 means
+collector_update_required, not authentication failure or a polling fallback.
+Healthy dataset-unavailable startup is supported, with no fabricated energy and
+statistics deferred until an authoritative dataset exists. Phase 4 still requires
+Linux and manual HA lifecycle validation; do not infer it from local stub tests.

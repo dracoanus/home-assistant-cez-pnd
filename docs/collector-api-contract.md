@@ -116,7 +116,7 @@ variants also remain future work. These gaps do not permit plaintext fallback,
 unauthenticated access, secret logging, broader endpoints or fabricated CEZ
 behavior.
 
-## Development: bounded event API and sync producer (Phase 3, not released)
+## Development: bounded event API and HA consumer (Phase 4, not released)
 
 `GET /api/v1/events?meter_id=<opaque-meter-id>&cursor=<opaque-cursor>`
 requires the existing bearer credential with `status:read`. `cursor` is optional;
@@ -165,8 +165,33 @@ Notifications are non-durable side effects, not an audit log. Broker shutdown is
 expected and silently contained. Unexpected revision-read/publication failures
 emit only the fixed `sync_notification_failed` diagnostic and never change sync
 outcomes, retry classification or committed data. STOP prevents new attempts and
-new notification work. The HA integration is not connected to events yet; its
-existing polling remains unchanged.
+new notification work.
+
+The development HA integration (version still 0.1.10) uses one authenticated
+long poll per ConfigEntry, with the dedicated Collector CA and hostname validation,
+redirects disabled and a 4 KiB response bound. Its timeout is 35 seconds total,
+5 seconds connect and 30 seconds socket read. Setup probes without a cursor and
+requires `state_reset`; an event endpoint 404 produces retryable setup failure
+`collector_update_required`, never a polling fallback. A later endpoint 404 stops
+the listener/watchdog and schedules one public ConfigEntry reload; subsequent
+setup remains blocked until the Collector supports events. A later 401/403 stops
+the listener/watchdog and starts the existing reauth flow.
+
+Cursor stays in memory. HTTP 204 retains it and does not refresh. `state_reset`
+and `sync_finished` replace it before calling the public coordinator refresh.
+Events supply no entity state: status/health always reconcile, and measurements
+are reused only when the authoritative API revision is unchanged. The coordinator
+has no scheduled update interval. Reconnect base delays are 1, 2, 5, 10, 30 and
+60 seconds, plus at most 0.5 seconds jitter; connectivity success resets backoff.
+One fixed 300-second reconciliation watchdog also uses the same refresh path.
+Both background tasks belong to ConfigEntry and are cancelled/awaited on unload;
+the shared Home Assistant HTTP session is not closed.
+
+ConfigEntry migration 1.1 to 1.2 removes only `poll_interval_seconds` from options.
+The user polling options flow and update listener are removed. Exact bounded
+`503 dataset_unavailable` allows health-only setup and unavailable dataset sensors;
+storage failure remains an update failure. No timestamps, revision or zero energy
+are fabricated. Statistics wait for the first real status, then schedule normally.
 
 ### Concurrency and shutdown
 
@@ -203,4 +228,5 @@ cancellation. The App stop timeout is 15 seconds: the 10-second internal watchdo
 plus a five-second Supervisor operational margin. Phase 2B Linux validation passed
 on GitHub Actions ubuntu-latest; Windows-only results are insufficient. See
 [configuration shutdown details](configuration.md#shutdown-budget).
-The event broker remains disconnected from synchronization; HA polling is unchanged.
+Phase 3 connected SyncWorker publication; Phase 4 connects the HA event consumer
+without changing this shutdown contract or production CEZ requests.
