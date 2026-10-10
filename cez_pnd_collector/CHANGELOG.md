@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.39
+
+- Added authenticated, bounded long-poll synchronization events.
+- Added configurable current-day synchronization cadence with independent historical scheduling and bounded recovery.
+- Added bounded shutdown with an internal watchdog and a 15-second App stop timeout.
+
 ## 0.3.38
 
 - Added secret-safe aggregate diagnostics for current-day shadow metadata matching.
