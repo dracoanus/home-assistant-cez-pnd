@@ -116,7 +116,7 @@ variants also remain future work. These gaps do not permit plaintext fallback,
 unauthenticated access, secret logging, broader endpoints or fabricated CEZ
 behavior.
 
-## Development: bounded event API (Phase 1, not released)
+## Development: bounded event API and sync producer (Phase 3, not released)
 
 `GET /api/v1/events?meter_id=<opaque-meter-id>&cursor=<opaque-cursor>`
 requires the existing bearer credential with `status:read`. `cursor` is optional;
@@ -145,13 +145,28 @@ API revision (`ds_` followed by 2-77 lowercase hexadecimal characters). API curs
 validation and event validation share the same pattern. The value is serialized
 unchanged, without interpretation, conversion or derivation from the event cursor.
 Use null only when no authoritative dataset revision exists; a failed sync with an
-existing dataset retains that dataset's revision. Phase 1 has no production publisher;
-synthetic tests supply revisions directly. No dataset storage or revision generation
-semantics change.
+existing dataset retains that dataset's revision. SyncWorker reads authoritative
+NormalizedDatasetStore status after each completed CEZ collection attempt. If that
+read fails, no event or fabricated null revision is published; the original sync
+outcome is preserved. No dataset storage or revision generation semantics change.
 
 The broker retains one frozen snapshot in memory, uses a condition variable and
-coalesces publications. Restart changes its generation. Production synchronization
-does not publish events in this phase; the HA integration and polling are unchanged.
+coalesces publications. Restart changes its generation. SyncWorker publishes
+sequentially to the same broker used by the server API: one `current_day` event
+per current-day attempt (including successful partial data), one
+`historical_backfill` event per attempted chunk, and one `historical_correction`
+event per correction attempt, including the previous-completed-day operation
+without configured backfill. Scheduler wakeups, outer cycle logs and
+`backfill_complete` do not publish extra events. Publication precedes backfill
+checkpoint advancement; checkpoint failure cannot create a second failed event
+for an already successful CEZ attempt.
+
+Notifications are non-durable side effects, not an audit log. Broker shutdown is
+expected and silently contained. Unexpected revision-read/publication failures
+emit only the fixed `sync_notification_failed` diagnostic and never change sync
+outcomes, retry classification or committed data. STOP prevents new attempts and
+new notification work. The HA integration is not connected to events yet; its
+existing polling remains unchanged.
 
 ### Concurrency and shutdown
 

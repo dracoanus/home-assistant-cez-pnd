@@ -364,7 +364,9 @@ def _serve(configuration, server, pairing_worker, dataset_store, watchdog) -> in
         if sync_configuration is not None:
             from .sync_worker import SyncWorker
 
-            sync_worker = SyncWorker(sync_configuration, store=dataset_store)
+            sync_worker = SyncWorker(
+                sync_configuration, store=dataset_store, publish=server.event_broker.publish
+            )
             sync_worker.start()
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

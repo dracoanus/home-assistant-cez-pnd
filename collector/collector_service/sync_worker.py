@@ -18,6 +18,7 @@ from .cez_http_auth import (
     emit_json_event as emit_http_auth_event,
 )
 from .dataset_store import NormalizedDatasetStore
+from .event_broker import EventBrokerError, SyncEvent
 from .requests_preauth import RequestsSessionTransport
 from .runtime_config import SyncConfiguration
 from .structured_logging import structured_event_json, write_json_line
@@ -63,6 +64,7 @@ SYNC_EVENTS = frozenset(
         "current_day_sync_started",
         "current_day_sync_succeeded",
         "current_day_sync_failed",
+        "sync_notification_failed",
     }
 )
 SYNC_FAILURE_CODES = SAFE_ERROR_CODES | frozenset(
@@ -290,6 +292,7 @@ class SyncWorker:
         initial_delay_seconds: float = INITIAL_SYNC_DELAY_SECONDS,
         monotonic_clock: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
+        publish: Callable[[SyncEvent], None] | None = None,
     ) -> None:
         self._configuration = configuration
         self._store = store
@@ -298,6 +301,7 @@ class SyncWorker:
             current_day_cycle or cycle or self._default_current_day_cycle
         )
         self._emit = emit
+        self._publish = publish
         self._now_local = now_local
         self._interval_seconds = (configuration.sync_interval_minutes * 60
                                   if interval_seconds is None else interval_seconds)
@@ -354,14 +358,10 @@ class SyncWorker:
         )
         if self._stop_event.is_set():
             return SyncCycleOutcome(False, code="sync_cycle_internal_failed")
-        try:
-            outcome = self._current_day_cycle(
-                self._configuration,
-                current_day,
-                current_day + timedelta(days=1),
-            )
-        except Exception:
-            outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        outcome = self._attempt(
+            self._current_day_cycle, current_day,
+            current_day + timedelta(days=1), "current_day",
+        )
         if outcome.succeeded:
             self._emit(
                 SafeSyncEvent(
@@ -380,13 +380,49 @@ class SyncWorker:
             )
         return outcome
 
+    def _attempt(
+        self, cycle: Callable[[SyncConfiguration, date, date], SyncCycleOutcome],
+        start_day: date, end_day: date, kind: str,
+    ) -> SyncCycleOutcome:
+        """Publish once after collection completes, before checkpoint bookkeeping."""
+        if self._stop_event.is_set():
+            return SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        try:
+            outcome = cycle(self._configuration, start_day, end_day)
+        except Exception:
+            outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+        self._notify_completion(kind, outcome)
+        return outcome
+
+    def _notify_completion(self, kind: str, outcome: SyncCycleOutcome) -> None:
+        if self._publish is None or self._stop_event.is_set():
+            return
+        try:
+            status = self._store.read_status()
+            event = SyncEvent(
+                kind, "succeeded" if outcome.succeeded else "failed",
+                None if status is None else status.revision,
+            )
+            self._publish(event)
+            return
+        except EventBrokerError as error:
+            if error.code == "event_broker_stopping":
+                return
+        except Exception:
+            pass  # Notification failure cannot change a completed collection outcome.
+        try:
+            self._emit(SafeSyncEvent("sync_notification_failed"))
+        except Exception:
+            pass  # A diagnostic sink failure is also isolated from collection.
+
     def _scheduled_cycle(self, latest_completed_day: date) -> SyncCycleOutcome:
         history_start = self._configuration.history_start
         if history_start is None:
-            return self._cycle(
-                self._configuration,
+            return self._attempt(
+                self._cycle,
                 latest_completed_day,
                 latest_completed_day + timedelta(days=1),
+                "historical_correction",
             )
 
         state = self._store.prepare_sync_state(
@@ -399,10 +435,11 @@ class SyncWorker:
             )
             if overlap_start > latest_completed_day:
                 overlap_start = latest_completed_day
-            return self._cycle(
-                self._configuration,
+            return self._attempt(
+                self._cycle,
                 overlap_start,
                 latest_completed_day + timedelta(days=1),
+                "historical_correction",
             )
 
         self._emit(
@@ -424,10 +461,7 @@ class SyncWorker:
                     end_day=end_day,
                 )
             )
-            try:
-                outcome = self._cycle(self._configuration, start_day, end_day)
-            except Exception:
-                outcome = SyncCycleOutcome(False, code="sync_cycle_internal_failed")
+            outcome = self._attempt(self._cycle, start_day, end_day, "historical_backfill")
             if not outcome.succeeded:
                 self._emit(
                     SafeSyncEvent(

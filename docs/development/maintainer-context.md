@@ -157,5 +157,17 @@ validation passed on GitHub Actions ubuntu-latest; Windows skips alone do not
 establish the process bound. Repeat Linux validation after shutdown changes.
 SQLite journal recovery belongs to SQLite. Startup cleanup is restricted to verified
 private pairing-state atomic-write leftovers in the managed directory; interrupted
-identity generation retains existing fail-closed handling. No event producer is
-attached to synchronization in Phase 2B.
+identity generation retains existing fail-closed handling.
+
+### Unreleased Phase 3 synchronization notifications
+
+SyncWorker now receives the existing server EventBroker publication callable.
+It publishes `sync_finished` after every completed collection invocation, using
+`current_day`, `historical_backfill` or `historical_correction`. Two backfill chunks
+produce two sequential publications; checkpoint advancement and structured log
+events do not add notifications. Dataset revision comes from authoritative store
+status after the attempt, unchanged on failed collection and null only without a
+dataset. Read/publication failures are isolated from collection; broker stopping
+is expected, other failures use only `sync_notification_failed`. STOP starts no
+new notification work. Broker coalescing and non-durability remain unchanged.
+The Home Assistant integration is not connected to events yet and retains polling.
