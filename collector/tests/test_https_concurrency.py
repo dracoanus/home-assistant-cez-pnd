@@ -137,6 +137,60 @@ class HttpsConcurrencyTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["event"], "sync_finished")
         self.assertEqual(json.loads(body)["dataset_revision"], "ds_" + "a" * 32)
 
+    def test_sync_worker_wakes_authenticated_waiter_on_same_server_broker(self):
+        from collector_service.sync_worker import SyncWorker, SyncCycleOutcome
+        from collector.tests.test_sync_worker import _configuration, _committed
+        from collector_service.cez_csv_models import PndChannel
+        broker = self.server.event_broker
+        cursor = broker.wait(None).cursor
+        entered = threading.Event()
+        original = broker._condition.wait_for
+        def wait_for(predicate, timeout):
+            entered.set()
+            return original(predicate, timeout)
+        def cycle(*_args):
+            self.fixture.store.commit_dataset(
+                test_api._profile(PndChannel.CONSUMPTION),
+                test_api._profile(PndChannel.PRODUCTION),
+                collected_at=test_api.START,
+            )
+            return SyncCycleOutcome(True, committed=_committed())
+        worker = SyncWorker(_configuration(), store=self.fixture.store,
+            cycle=cycle, emit=lambda _event: None, publish=broker.publish)
+        with mock.patch.object(broker._condition, "wait_for", side_effect=wait_for), ThreadPoolExecutor(1) as pool:
+            response = pool.submit(self.get, self.target + "&cursor=" + cursor)
+            try:
+                self.assertTrue(entered.wait(2))
+                worker._scheduled_current_day(test_api.START.date())
+                status, body, _headers = response.result(2)
+            finally:
+                if not response.done():
+                    broker.close()
+        self.assertEqual(status, 200)
+        self.assertLessEqual(len(body), 4096)
+        payload = json.loads(body)
+        self.assertEqual(set(payload), {"schema_version", "event", "cursor",
+            "sync_kind", "sync_result", "dataset_revision"})
+        self.assertEqual(payload["event"], "sync_finished")
+        self.assertEqual(payload["sync_kind"], "current_day")
+        self.assertEqual(payload["sync_result"], "succeeded")
+        self.assertEqual(payload["dataset_revision"], self.fixture.store.read_status().revision)
+        self.assertNotEqual(payload["cursor"], cursor)
+        previous = self.fixture.store.read_status()
+        failure_cursor = payload["cursor"]
+        worker = SyncWorker(_configuration(), store=self.fixture.store,
+            cycle=lambda *_args: SyncCycleOutcome(False, code="data_probe_auth_failed"),
+            emit=lambda _event: None, publish=broker.publish)
+        try:
+            worker._scheduled_current_day(test_api.START.date())
+            status, body, _headers = self.get(self.target + "&cursor=" + failure_cursor)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["sync_result"], "failed")
+            self.assertEqual(json.loads(body)["dataset_revision"], previous.revision)
+            self.assertEqual(self.fixture.store.read_status(), previous)
+        finally:
+            broker.close()
+
     def test_sqlite_writes_and_reads_are_independent_of_waiters(self):
         def read():
             return self.get(f"/api/v1/status?meter_id={SYNTHETIC_METER_ID}")[0]

@@ -401,7 +401,7 @@ assert "os.replace" in DATA_PROBE_SOURCE
 assert '"idAssembly", "-1001"' not in DATA_PROBE_SOURCE
 assert '"idAssembly", assembly_id' in DATA_PROBE_SOURCE
 assert "run_data_probe(" in SERVER_SOURCE
-assert "SyncWorker(sync_configuration, store=dataset_store)" in SERVER_SOURCE
+assert "store=dataset_store, publish=server.event_broker.publish" in SERVER_SOURCE
 assert "configuration.sync_interval_minutes * 60" in SYNC_WORKER_SOURCE
 assert "type(value) is not int or not 15 <= value <= 720" in RUNTIME_CONFIG_SOURCE
 assert "  sync_interval_minutes: 60" in APP_OPTIONS_SECTION
@@ -873,8 +873,14 @@ assert "MAX_EVENT_RESPONSE_BYTES = 4096" in EVENT_SOURCE
 assert "threading.Condition()" in EVENT_SOURCE and "notify_all()" in EVENT_SOURCE
 assert 'f"{API_PREFIX}/events": "status:read"' in API_SOURCE
 assert 'self._verifier.authorize(_header(headers, "Authorization"), "status:read")' in API_SOURCE
-assert "event_broker" not in (ROOT / "collector_service" / "sync_worker.py").read_text(encoding="utf-8")
-print("PASS: bounded authenticated event API; sync worker not connected")
+SYNC_SOURCE = (ROOT / "collector_service" / "sync_worker.py").read_text(encoding="utf-8")
+assert "from .event_broker import EventBrokerError, SyncEvent" in SYNC_SOURCE
+assert "status = self._store.read_status()" in SYNC_SOURCE
+assert "None if status is None else status.revision" in SYNC_SOURCE
+assert 'error.code == "event_broker_stopping"' in SYNC_SOURCE
+assert '"historical_backfill"' in SYNC_SOURCE and '"historical_correction"' in SYNC_SOURCE
+assert "dataset_changed" not in SYNC_SOURCE
+print("PASS: bounded authenticated event API; per-attempt authoritative sync notifications")
 
 assert 'from .dataset_revision import REVISION_PATTERN' in API_SOURCE
 assert 'from .dataset_revision import REVISION_PATTERN' in EVENT_SOURCE
