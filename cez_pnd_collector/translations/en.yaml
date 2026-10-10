@@ -39,6 +39,10 @@ configuration:
     description: >-
       Downloads data only for the selected date and exits afterwards. It cannot
       run together with automatic synchronization.
+  sync_interval_minutes:
+    name: CEZ PND synchronization interval
+    description: >-
+      Controls how often the Collector checks CEZ PND for newly available data. The default is 60 minutes; the allowed range is 15 to 720 minutes.
   cez_sync_enabled:
     name: Automatic data synchronization
     description: >-

@@ -15,7 +15,9 @@ from typing import Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from .dataset_store import NormalizedDatasetStore, StoredMeasurement
+from .dataset_revision import REVISION_PATTERN
 from .security_files import read_private_file
+from .event_broker import EventBroker, EventBrokerError, MAX_EVENT_RESPONSE_BYTES
 
 API_SCHEMA_VERSION = "1.0"
 API_PREFIX = "/api/v1"
@@ -28,7 +30,6 @@ METER_ID_PATTERN = re.compile(r"^mtr_[a-f0-9]{32}$")
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 CURSOR_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
-REVISION_PATTERN = re.compile(r"^ds_[a-f0-9]{2,77}$")
 UTC_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 
 # Stable opaque meter fixture retained for verifier/configuration tests only.
@@ -80,9 +81,11 @@ class TokenVerifier:
 
 class CollectorApi:
     """Pure read-only request handler over a persistent normalized dataset."""
-    def __init__(self, verifier: TokenVerifier, store: NormalizedDatasetStore | None = None) -> None:
+    def __init__(self, verifier: TokenVerifier, store: NormalizedDatasetStore | None = None,
+                 *, event_broker: EventBroker | None = None) -> None:
         self._verifier = verifier
         self._store = store or NormalizedDatasetStore()
+        self._event_broker = event_broker or EventBroker()
 
     def handle(self, method: str, raw_target: str, headers: Mapping[str, str]) -> ApiResponse:
         request_id = secrets.token_hex(8)
@@ -95,7 +98,7 @@ class CollectorApi:
         if split.scheme or split.netloc or split.fragment:
             return self._error(400, "invalid_request_target", False, request_id, "unknown")
         route = split.path
-        routes = {f"{API_PREFIX}/health": "health:read", f"{API_PREFIX}/status": "status:read", f"{API_PREFIX}/measurements": "measurements:read"}
+        routes = {f"{API_PREFIX}/health": "health:read", f"{API_PREFIX}/status": "status:read", f"{API_PREFIX}/measurements": "measurements:read", f"{API_PREFIX}/events": "status:read"}
         scope = routes.get(route)
         if scope is None:
             return self._error(404, "not_found", False, request_id, "unknown")
@@ -109,11 +112,35 @@ class CollectorApi:
             return self._error(400, "invalid_query", False, request_id, route)
         if any(len(values) != 1 for values in query.values()):
             return self._error(400, "duplicate_query_parameter", False, request_id, route)
+        if route.endswith("/events"):
+            return self._events(query, headers, request_id, route)
         if route.endswith("/health"):
             if query:
                 return self._error(400, "unknown_query_parameter", False, request_id, route)
             return ApiResponse(200, {"schema_version": API_SCHEMA_VERSION, "service_status": "ok"}, route, request_id)
         return self._status(query, request_id, route) if route.endswith("/status") else self._measurements(query, request_id, route)
+
+    def _events(self, query: dict[str, list[str]], headers: Mapping[str, str],
+                request_id: str, route: str) -> ApiResponse:
+        if not {"meter_id"} <= set(query) <= {"meter_id", "cursor"}:
+            return self._error(400, "invalid_query_fields", False, request_id, route)
+        if query["meter_id"][0] != self._verifier.meter_id:
+            return self._error(404, "meter_not_found", False, request_id, route)
+        try:
+            snapshot = self._event_broker.wait(query.get("cursor", [None])[0])
+        except EventBrokerError as error:
+            status = {"invalid_event_cursor": 400, "event_waiter_limit": 429,
+                      "event_broker_stopping": 503}[error.code]
+            return self._error(status, error.code, status != 400, request_id, route)
+        # No credential or SQLite lock is held while waiting. State may change.
+        if not self._verifier.authorize(_header(headers, "Authorization"), "status:read"):
+            return self._error(401, "unauthorized", False, request_id, route)
+        if snapshot is None:
+            return ApiResponse(204, {}, route, request_id)
+        body = snapshot.as_dict()
+        if len(json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")) > MAX_EVENT_RESPONSE_BYTES:
+            return self._error(503, "response_limit_exceeded", False, request_id, route)
+        return ApiResponse(200, body, route, request_id)
 
     def _status(self, query: dict[str, list[str]], request_id: str, route: str) -> ApiResponse:
         if set(query) != {"meter_id"}:

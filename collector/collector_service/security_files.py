@@ -7,7 +7,47 @@ import os
 from pathlib import Path
 import stat
 import secrets
+import re
 from typing import Iterator
+
+
+PAIRING_RECOVERY_DIRECTORY = Path("/data/cez-pnd-identity")
+PAIRING_TEMP_PATTERN = re.compile(r"^\.pairing-state\.json\.[a-f0-9]{32}\.tmp$")
+MAX_RECOVERY_ENTRIES = 64
+
+
+def recover_pairing_temporaries() -> None:
+    """Remove only verified orphan pairing writes before worker startup.
+
+    Identity generation leftovers deliberately retain existing fail-closed
+    handling. SQLite and unknown files are never removed.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(PAIRING_RECOVERY_DIRECTORY, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 2000
+                or stat.S_IMODE(metadata.st_mode) != 0o700):
+            raise ValueError("unsafe recovery directory")
+        names = []
+        with os.scandir(descriptor) as entries:
+            for index, entry in enumerate(entries):
+                if index >= MAX_RECOVERY_ENTRIES:
+                    raise ValueError("recovery directory limit exceeded")
+                if PAIRING_TEMP_PATTERN.fullmatch(entry.name):
+                    metadata = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                    _validate_file_metadata(metadata, private=True)
+                    names.append((entry.name, metadata.st_dev, metadata.st_ino))
+        for name, device, inode in names:
+            metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            _validate_file_metadata(metadata, private=True)
+            if (metadata.st_dev, metadata.st_ino) != (device, inode):
+                raise ValueError("recovery file identity changed")
+            os.unlink(name, dir_fd=descriptor)
+        if names:
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager

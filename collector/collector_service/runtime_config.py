@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from .api import EXPECTED_SCOPES, TokenVerifier
 from .managed_identity import ManagedIdentity, ManagedIdentityStore, hostname_from_supervisor_slug
 from .pairing import ManagedCredentialStore
-from .security_files import descriptor_path, open_verified_file
+from .security_files import descriptor_path, open_verified_file, recover_pairing_temporaries
 
 
 SUPERVISOR_SELF_INFO_URL = "http://supervisor/addons/self/info"
@@ -80,6 +80,7 @@ DISCOVERY_CONFIGURATION_ERROR_CODES = frozenset(
         "sync_config_conflicting_modes",
         "sync_config_meter_identity_required",
         "sync_config_invalid_history_start",
+        "sync_config_invalid_interval",
     }
 )
 
@@ -134,6 +135,13 @@ class DataProbeConfiguration:
     ean: str | None = field(default=None, repr=False)
 
 
+def validate_sync_interval(value: object) -> int:
+    """Validate the normal current-day cadence without type coercion."""
+    if type(value) is not int or not 15 <= value <= 720:
+        raise DiscoveryConfigurationError("sync_config_invalid_interval")
+    return value
+
+
 @dataclass(frozen=True)
 class SyncConfiguration:
     """Ephemeral credentials and meter identity for scheduled collection."""
@@ -143,6 +151,10 @@ class SyncConfiguration:
     electrometer_id: str | None = field(default=None, repr=False)
     ean: str | None = field(default=None, repr=False)
     history_start: date | None = None
+    sync_interval_minutes: int = 60
+
+    def __post_init__(self) -> None:
+        validate_sync_interval(self.sync_interval_minutes)
 
     def for_date(self, probe_date: date) -> DataProbeConfiguration:
         return DataProbeConfiguration(
@@ -229,6 +241,7 @@ def load_runtime_configuration() -> RuntimeConfiguration:
                 raise PrivateConfigurationError("private_config_supervisor_identity_invalid") from error
             try:
                 managed_identity, managed_identity_created = ManagedIdentityStore().load_or_create(hostname)
+                recover_pairing_temporaries()
                 verifier = ManagedCredentialStore(managed_identity.meter_id)
                 tls_context = _context_from_memory(
                     managed_identity.server_certificate_pem.encode("ascii"),
@@ -450,6 +463,7 @@ def _load_data_probe_configuration(
 def _load_sync_configuration(
     options: dict[str, object], *, today: date | None = None
 ) -> SyncConfiguration | None:
+    interval = validate_sync_interval(options.get("sync_interval_minutes", 60))
     enabled = options.get("cez_sync_enabled", False)
     if not isinstance(enabled, bool):
         raise DiscoveryConfigurationError("sync_config_invalid_mode")
@@ -473,7 +487,7 @@ def _load_sync_configuration(
         if history_start.isoformat() != raw_history_start or history_start > current_day:
             raise DiscoveryConfigurationError("sync_config_invalid_history_start")
     return SyncConfiguration(
-        username, password, electrometer_id, ean, history_start
+        username, password, electrometer_id, ean, history_start, interval
     )
 
 

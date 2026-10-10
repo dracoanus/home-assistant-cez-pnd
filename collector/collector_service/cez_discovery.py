@@ -17,7 +17,7 @@ from .restricted_proxy import (
     normalize_hostname as _normalize_hostname,
 )
 from .runtime_config import DiscoveryConfiguration
-from .structured_logging import structured_event_json
+from .structured_logging import structured_event_json, write_json_line
 
 
 FORBIDDEN_CHROMIUM_ARGUMENTS = frozenset(
@@ -465,4 +465,4 @@ def run_discovery(
 def emit_json_event(event: SafeDiscoveryEvent) -> None:
     """Print one allowlisted diagnostic event without sensitive values."""
 
-    print(structured_event_json(event.as_dict()), flush=True)
+    write_json_line(structured_event_json(event.as_dict()), flush=True)
